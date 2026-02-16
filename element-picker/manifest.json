@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Element Picker for Claude",
+  "description": "Click any element to copy its selector and React component info for Claude Code",
+  "version": "1.0",
+  "permissions": ["activeTab", "scripting", "clipboardWrite"],
+  "action": {
+    "default_title": "Pick Element",
+    "default_icon": {
+      "16": "icon16.png",
+      "48": "icon48.png",
+      "128": "icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
+  "background": {
+    "service_worker": "background.js"
+  }
+}

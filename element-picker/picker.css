@@ -1,0 +1,13 @@
+/* Element Picker Overlay Styles */
+#__element-picker-overlay {
+  background: rgba(59, 130, 246, 0.3);
+  border: 2px solid #3b82f6;
+  border-radius: 4px;
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.5);
+  transition: all 0.1s ease-out;
+}
+
+/* Ensure picker doesn't interfere with page */
+#__element-picker-overlay * {
+  pointer-events: none !important;
+}

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Element Picker for Claude",
-  "description": "Click any element to copy its selector and React component info for Claude Code",
-  "version": "1.0",
+  "description": "Build multi-element debug bundles with ranked locators, React context, and repro hints for Claude Code",
+  "version": "1.1",
   "permissions": ["activeTab", "scripting", "clipboardWrite"],
   "action": {
     "default_title": "Pick Element",

@@ -1,5 +1,8 @@
 /* Element Picker Overlay Styles */
 #__element-picker-overlay {
+  position: fixed;
+  pointer-events: none;
+  z-index: 2147483646;
   background: rgba(59, 130, 246, 0.3);
   border: 2px solid #3b82f6;
   border-radius: 4px;

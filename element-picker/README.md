@@ -1,6 +1,6 @@
 # Element Picker for Claude Code
 
-A Chrome/Arc extension that lets you click on any element and copy its selector + React component info to your clipboard. Perfect for telling Claude Code exactly which element you're talking about.
+A Chrome/Arc extension that lets you build a multi-element debug bundle and copy it to clipboard as Claude-ready Markdown + JSON.
 
 ## Installation
 
@@ -12,26 +12,45 @@ A Chrome/Arc extension that lets you click on any element and copy its selector 
 ## Usage
 
 1. Click the extension icon in your toolbar
-2. Hover over elements - they'll highlight in blue
-3. Click an element to copy its info to clipboard
-4. Press `ESC` to cancel
+2. Hover elements to preview highlight
+3. Click elements to add them to the current bundle
+4. Press `Backspace`/`Delete` (or `Cmd/Ctrl + Z`) to undo the last selection
+5. Press `Enter` to export the bundle to clipboard
+6. Press `ESC` to cancel
 
 ## What Gets Copied
 
-```
-Element: button
-Selector: #root > div.sidebar > button.submit-btn
-Classes: submit-btn primary
-React: SubmitButton → Form → App
-Text: "Submit"
-Size: 120x40
-```
+Each export now includes:
 
-## Notes
+- Page URL + title + timestamp
+- Multiple selected elements in one packet
+- Ranked locator candidates (`data-testid`, role/name, CSS, XPath, text)
+- Uniqueness/match counts and score per locator
+- React component chain + props/state (when available)
+- A11y/form/style/data-attribute diagnostics
+- Viewport screenshot crop metadata for each element
+- Embedded preview crop images for smaller bundles
+- Generated Playwright repro skeleton
 
-- Works with React apps (detects component names)
-- Filters out Tailwind utility classes to keep selectors readable
-- Press ESC to cancel without selecting
+Example (abbreviated):
+
+```
+# Element Debug Bundle
+Captured at: 2026-02-25T18:14:07.220Z
+URL: https://app.example.com/settings
+Elements: 3
+
+### 1. button#save
+Primary locator: page.getByRole("button", { name: "Save changes" })
+Locator ranking:
+- data-testid: score 100, 1 match, page.locator("[data-testid=\"save-btn\"]")
+- role-name: score 98, 1 match, page.getByRole("button", { name: "Save changes" })
+- css: score 80, 1 match, page.locator("#save")
+
+## Playwright Repro Skeleton
+import { test, expect } from '@playwright/test';
+...
+```
 
 ## Missing Icons?
 

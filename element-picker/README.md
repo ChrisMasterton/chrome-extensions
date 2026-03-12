@@ -1,4 +1,4 @@
-# Element Picker for Claude Code
+# Element Picker for Coding Agents
 
 A Chrome/Arc extension that lets you build a multi-element debug bundle and copy it to clipboard as Claude-ready Markdown + JSON.
 

@@ -24,13 +24,21 @@ Each export now includes:
 
 - Page URL + title + timestamp
 - Multiple selected elements in one packet
-- Ranked locator candidates (`data-testid`, role/name, CSS, XPath, text)
+- Ranked locator candidates that prefer stable hooks (`data-testid`, role/name, label, placeholder, alt text, stable IDs)
+- Backup locator candidates (`CSS`, `XPath`, generated-looking IDs) separated from stable candidates
 - Uniqueness/match counts and score per locator
+- Nearest section heading, stable ancestor, and section-like ancestor context
+- Scroll diagnostics (`scrollWidth`, `clientWidth`, `scrollLeft`, `overflowX`, hidden overflow, scroll snap)
 - React component chain + props/state (when available)
+- React Native Web props such as `testID`, `nativeID`, and accessibility props when React exposes them
 - A11y/form/style/data-attribute diagnostics
-- Viewport screenshot crop metadata for each element
-- Embedded preview crop images for smaller bundles
+- Clean visible-viewport screenshot metadata; picker UI is hidden during capture
+- Padded, highlighted crop images for smaller bundles
+- A highlighted visible-viewport image for smaller bundles
+- Saved screenshot files in `Downloads/elements` with filenames included in the bundle
 - Generated Playwright repro skeleton
+
+The visual capture is intentionally visible-viewport only. The extension does not scroll and stitch the full page because that can mutate page state while debugging.
 
 Example (abbreviated):
 
@@ -42,10 +50,16 @@ Elements: 3
 
 ### 1. button#save
 Primary locator: page.getByRole("button", { name: "Save changes" })
-Locator ranking:
-- data-testid: score 100, 1 match, page.locator("[data-testid=\"save-btn\"]")
+Nearest section heading: "Settings"
+Nearest stable ancestor: form [data-testid="settings-form"] "Profile settings Save changes"
+Stable locator candidates:
+- data-testid: score 100, 1 match, page.getByTestId("save-btn")
 - role-name: score 98, 1 match, page.getByRole("button", { name: "Save changes" })
+Backup locator candidates:
 - css: score 80, 1 match, page.locator("#save")
+Screenshot crop: visible in viewport
+Capture pixels: x=120, y=340, w=180, h=76, padding=16 CSS px
+Crop image file: /Users/name/Downloads/elements/element-picker-2026-02-25-181407-app.example.com-element-01.jpg
 
 ## Playwright Repro Skeleton
 import { test, expect } from '@playwright/test';

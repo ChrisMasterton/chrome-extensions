@@ -9,6 +9,8 @@
   const UI_ATTR = 'data-element-picker-ui';
   const MAX_SELECTIONS = 25;
   const MAX_INLINE_CROPS = 6;
+  const CROP_PADDING_CSS_PX = 16;
+  const HIGHLIGHT_COLOR = '#ef4444';
 
   const TEST_ID_ATTRIBUTES = [
     'data-testid',
@@ -18,11 +20,21 @@
     'data-qa',
   ];
 
+  const RN_WEB_PROP_NAMES = [
+    'testID',
+    'nativeID',
+    'accessibilityLabel',
+    'accessibilityHint',
+    'accessibilityRole',
+    'accessible',
+  ];
+
   let overlay = null;
   let badgeLayer = null;
   let currentElement = null;
   let selections = [];
   let isExporting = false;
+  let hiddenPickerUiSnapshot = [];
 
   function isElementNode(node) {
     return !!node && node.nodeType === Node.ELEMENT_NODE;
@@ -56,8 +68,12 @@
     return `${value.slice(0, maxLength - 3)}...`;
   }
 
+  function normalizeWhitespace(value) {
+    return String(value || '').replace(/\s+/g, ' ').trim();
+  }
+
   function normalizeText(value) {
-    return String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    return normalizeWhitespace(value).toLowerCase();
   }
 
   function toSerializableValue(value, depth = 0, seen = new WeakSet()) {
@@ -319,14 +335,95 @@
     return null;
   }
 
+  function getFiberDisplayName(fiber) {
+    const type = fiber?.type || fiber?.elementType;
+    if (!type) return null;
+    if (typeof type === 'string') return type;
+    return type.displayName || type.name || null;
+  }
+
+  function getReactNativeWebProps(element) {
+    let fiber = getReactFiberNode(element);
+    if (!fiber) return null;
+
+    const props = {};
+    let depth = 0;
+
+    while (fiber && depth < 8) {
+      const source = getFiberDisplayName(fiber);
+      const memoizedProps = fiber.memoizedProps;
+
+      if (memoizedProps && typeof memoizedProps === 'object') {
+        for (const propName of RN_WEB_PROP_NAMES) {
+          if (!(propName in memoizedProps)) continue;
+          if (props[propName]) continue;
+
+          props[propName] = {
+            value: toSerializableValue(memoizedProps[propName]),
+            source,
+            depth,
+          };
+        }
+      }
+
+      fiber = fiber.return;
+      depth += 1;
+    }
+
+    return Object.keys(props).length > 0 ? props : null;
+  }
+
+  function isUtilityClassName(className) {
+    const utilityPrefixes = [
+      'p', 'px', 'py', 'pt', 'pr', 'pb', 'pl',
+      'm', 'mx', 'my', 'mt', 'mr', 'mb', 'ml',
+      'w', 'h', 'min-w', 'min-h', 'max-w', 'max-h',
+      'flex', 'grid', 'text', 'bg', 'border', 'rounded',
+      'shadow', 'items', 'justify', 'gap', 'space', 'overflow',
+      'opacity', 'z', 'inset', 'top', 'right', 'bottom', 'left',
+    ];
+
+    return utilityPrefixes.some((prefix) => className.startsWith(`${prefix}-`));
+  }
+
+  function isLikelyGeneratedClassName(className) {
+    if (!className) return false;
+
+    return (
+      /^css-[a-z]+-[a-z0-9]+$/i.test(className) ||
+      /^r-[a-z0-9]{6,}$/i.test(className) ||
+      (/^[_-]?[a-z0-9]{7,}$/i.test(className) && /\d/.test(className)) ||
+      /__[a-z0-9_-]*[a-f0-9]{5,}$/i.test(className) ||
+      /(^|[-_])[a-f0-9]{8,}($|[-_])/i.test(className)
+    );
+  }
+
+  function getClassDiagnostics(element) {
+    const raw = Array.from(element.classList);
+    const generated = raw.filter(isLikelyGeneratedClassName);
+    const utility = raw.filter((className) => !generated.includes(className) && isUtilityClassName(className));
+    const meaningful = raw
+      .filter((className) => !generated.includes(className) && !utility.includes(className))
+      .slice(0, 6);
+
+    if (raw.length === 0) return null;
+
+    return {
+      meaningful,
+      totalCount: raw.length,
+      generatedCount: generated.length,
+      utilityCount: utility.length,
+      omittedGeneratedExamples: generated.slice(0, 4),
+    };
+  }
+
   function getMeaningfulClasses(element) {
-    return Array.from(element.classList)
-      .filter((className) => !className.match(/^(p-|m-|w-|h-|flex|grid|text-|bg-|border-|rounded)/))
-      .slice(0, 3);
+    const diagnostics = getClassDiagnostics(element);
+    return diagnostics?.meaningful.slice(0, 3) || [];
   }
 
   function getCssSelector(element) {
-    if (element.id) {
+    if (element.id && !isLikelyGeneratedIdentifier(element.id)) {
       return `#${cssEscape(element.id)}`;
     }
 
@@ -336,7 +433,7 @@
     while (current && current.nodeType === Node.ELEMENT_NODE) {
       let selector = current.tagName.toLowerCase();
 
-      if (current.id) {
+      if (current.id && !isLikelyGeneratedIdentifier(current.id)) {
         selector = `#${cssEscape(current.id)}`;
         path.unshift(selector);
         break;
@@ -389,7 +486,7 @@
   }
 
   function getTextPreview(element) {
-    const text = normalizeText(element.innerText || element.textContent || '');
+    const text = normalizeWhitespace(element.innerText || element.textContent || '');
     return truncate(text, 100);
   }
 
@@ -418,6 +515,14 @@
 
     if (computed.pointerEvents === 'none') styles.pointerEvents = 'none';
     if (computed.overflow !== 'visible') styles.overflow = computed.overflow;
+    if (computed.overflowX !== 'visible') styles.overflowX = computed.overflowX;
+    if (computed.overflowY !== 'visible') styles.overflowY = computed.overflowY;
+    if (computed.scrollSnapType && computed.scrollSnapType !== 'none') {
+      styles.scrollSnapType = computed.scrollSnapType;
+    }
+    if (computed.scrollSnapAlign && computed.scrollSnapAlign !== 'none') {
+      styles.scrollSnapAlign = computed.scrollSnapAlign;
+    }
 
     if (computed.display.includes('flex')) {
       styles.display = computed.display;
@@ -473,9 +578,9 @@
     return Object.keys(info).length > 0 ? info : null;
   }
 
-  function getAccessibleName(element) {
+  function getAccessibleNameInfo(element) {
     const ariaLabel = element.getAttribute('aria-label');
-    if (ariaLabel) return truncate(ariaLabel, 120);
+    if (ariaLabel) return { name: truncate(ariaLabel, 120), source: 'aria-label' };
 
     const labelledBy = element.getAttribute('aria-labelledby');
     if (labelledBy) {
@@ -487,22 +592,27 @@
         .map((id) => document.getElementById(id)?.innerText || document.getElementById(id)?.textContent || '')
         .join(' ')
         .trim();
-      if (text) return truncate(text, 120);
+      if (text) return { name: truncate(text, 120), source: 'aria-labelledby' };
     }
 
     const title = element.getAttribute('title');
-    if (title) return truncate(title, 120);
+    if (title) return { name: truncate(title, 120), source: 'title' };
 
-    if (element.alt) return truncate(element.alt, 120);
+    if (element.alt) return { name: truncate(element.alt, 120), source: 'alt' };
 
     const tag = element.tagName.toLowerCase();
     if (tag === 'input' || tag === 'textarea') {
       const placeholder = element.getAttribute('placeholder');
-      if (placeholder) return truncate(placeholder, 120);
-      if (element.value) return truncate(element.value, 120);
+      if (placeholder) return { name: truncate(placeholder, 120), source: 'placeholder' };
+      if (element.value) return { name: truncate(element.value, 120), source: 'value' };
     }
 
-    return getTextPreview(element);
+    const text = getTextPreview(element);
+    return text ? { name: text, source: 'visible-text' } : null;
+  }
+
+  function getAccessibleName(element) {
+    return getAccessibleNameInfo(element)?.name || '';
   }
 
   function inferRole(element) {
@@ -534,6 +644,286 @@
     return null;
   }
 
+  function getStableHook(element) {
+    if (!isElementNode(element)) return null;
+
+    for (const attribute of TEST_ID_ATTRIBUTES) {
+      const value = element.getAttribute(attribute);
+      if (!value) continue;
+
+      return {
+        type: attribute,
+        value,
+        selector: `[${attribute}="${escapeCssAttributeValue(value)}"]`,
+      };
+    }
+
+    if (element.id && !isLikelyGeneratedIdentifier(element.id)) {
+      return {
+        type: 'id',
+        value: element.id,
+        selector: `#${cssEscape(element.id)}`,
+      };
+    }
+
+    const ariaLabel = element.getAttribute('aria-label');
+    if (ariaLabel) {
+      return {
+        type: 'aria-label',
+        value: truncate(ariaLabel, 120),
+        selector: `[aria-label="${escapeCssAttributeValue(ariaLabel)}"]`,
+      };
+    }
+
+    const role = inferRole(element);
+    const accessibleNameInfo = getAccessibleNameInfo(element);
+    if (shouldUseRoleNameLocator(role, accessibleNameInfo)) {
+      return {
+        type: 'role-name',
+        value: `${role}: ${accessibleNameInfo.name}`,
+        role,
+        accessibleName: accessibleNameInfo.name,
+        accessibleNameSource: accessibleNameInfo.source,
+      };
+    }
+
+    if (element.id) {
+      return {
+        type: 'id-fallback',
+        value: element.id,
+        selector: `#${cssEscape(element.id)}`,
+      };
+    }
+
+    return null;
+  }
+
+  function describeElementBrief(element, depth = 0) {
+    if (!isElementNode(element)) return null;
+
+    const tag = element.tagName.toLowerCase();
+    const hook = getStableHook(element);
+    const role = inferRole(element);
+    const text = getTextPreview(element);
+    const rect = element.getBoundingClientRect();
+
+    return {
+      tag,
+      depth,
+      id: element.id || null,
+      role,
+      hook,
+      text: text ? truncate(text, 90) : null,
+      dimensions: `${Math.round(rect.width)}x${Math.round(rect.height)}`,
+    };
+  }
+
+  function isVisibleElement(element) {
+    if (!isElementNode(element)) return false;
+
+    const rect = element.getBoundingClientRect();
+    const styles = window.getComputedStyle(element);
+    return rect.width > 0 && rect.height > 0 && styles.display !== 'none' && styles.visibility !== 'hidden';
+  }
+
+  function findNearestHeading(element) {
+    let current = element.parentElement;
+    let depth = 0;
+
+    while (current && current !== document.documentElement && depth < 8) {
+      const headings = Array.from(current.querySelectorAll('h1,h2,h3,h4,h5,h6,[role="heading"]'))
+        .filter((heading) => heading !== element && !heading.contains(element))
+        .filter(isVisibleElement);
+
+      const precedingHeadings = headings.filter((heading) => {
+        const relation = heading.compareDocumentPosition(element);
+        return Boolean(relation & Node.DOCUMENT_POSITION_FOLLOWING);
+      });
+
+      const heading = precedingHeadings[precedingHeadings.length - 1];
+      const text = heading ? getTextPreview(heading) : '';
+      if (text) {
+        return {
+          text: truncate(text, 120),
+          tag: heading.tagName.toLowerCase(),
+          depth,
+          hook: getStableHook(heading),
+        };
+      }
+
+      current = current.parentElement;
+      depth += 1;
+    }
+
+    return null;
+  }
+
+  function isSectionLike(element) {
+    if (!isElementNode(element)) return false;
+
+    const tag = element.tagName.toLowerCase();
+    const role = element.getAttribute('role');
+
+    return (
+      ['section', 'article', 'main', 'aside', 'nav', 'header', 'footer', 'form'].includes(tag) ||
+      ['region', 'group', 'list', 'grid', 'tabpanel', 'dialog'].includes(role)
+    );
+  }
+
+  function getAncestorContext(element) {
+    const path = [];
+    let nearestStableAncestor = null;
+    let nearestSection = null;
+    let current = element.parentElement;
+    let depth = 1;
+
+    while (current && current !== document.documentElement && depth <= 8) {
+      if (!isPickerUi(current)) {
+        const description = describeElementBrief(current, depth);
+        if (description && path.length < 5) {
+          path.push(description);
+        }
+
+        if (!nearestStableAncestor && description?.hook) {
+          nearestStableAncestor = description;
+        }
+
+        if (!nearestSection && isSectionLike(current)) {
+          nearestSection = description;
+        }
+      }
+
+      current = current.parentElement;
+      depth += 1;
+    }
+
+    const sectionHeading = findNearestHeading(element);
+
+    if (!nearestStableAncestor && !nearestSection && !sectionHeading && path.length === 0) {
+      return null;
+    }
+
+    return {
+      nearestStableAncestor,
+      nearestSection,
+      sectionHeading,
+      path,
+    };
+  }
+
+  function isScrollableOverflow(overflowValue) {
+    return ['auto', 'scroll', 'overlay'].includes(overflowValue);
+  }
+
+  function isClippingOverflow(overflowValue) {
+    return ['hidden', 'clip'].includes(overflowValue);
+  }
+
+  function getScrollNodeInfo(element, depth = 0) {
+    if (!isElementNode(element)) return null;
+
+    const computed = window.getComputedStyle(element);
+    const scrollWidth = Math.round(element.scrollWidth);
+    const scrollHeight = Math.round(element.scrollHeight);
+    const clientWidth = Math.round(element.clientWidth);
+    const clientHeight = Math.round(element.clientHeight);
+    const scrollLeft = Math.round(element.scrollLeft);
+    const scrollTop = Math.round(element.scrollTop);
+    const horizontalOverflow = scrollWidth > clientWidth + 1;
+    const verticalOverflow = scrollHeight > clientHeight + 1;
+    const canScrollHorizontally = horizontalOverflow && isScrollableOverflow(computed.overflowX);
+    const canScrollVertically = verticalOverflow && isScrollableOverflow(computed.overflowY);
+    const clipsHorizontal = horizontalOverflow && isClippingOverflow(computed.overflowX);
+    const clipsVertical = verticalOverflow && isClippingOverflow(computed.overflowY);
+    const hiddenOverflowRight = horizontalOverflow && scrollLeft + clientWidth < scrollWidth - 1;
+    const hiddenOverflowBottom = verticalOverflow && scrollTop + clientHeight < scrollHeight - 1;
+    const scrollSnapType = computed.scrollSnapType && computed.scrollSnapType !== 'none'
+      ? computed.scrollSnapType
+      : null;
+    const scrollSnapAlign = computed.scrollSnapAlign && computed.scrollSnapAlign !== 'none'
+      ? computed.scrollSnapAlign
+      : null;
+
+    return {
+      element: describeElementBrief(element, depth),
+      overflowX: computed.overflowX,
+      overflowY: computed.overflowY,
+      scrollWidth,
+      clientWidth,
+      scrollLeft,
+      scrollHeight,
+      clientHeight,
+      scrollTop,
+      horizontalOverflow,
+      verticalOverflow,
+      canScrollHorizontally,
+      canScrollVertically,
+      clipsHorizontal,
+      clipsVertical,
+      hiddenOverflowRight,
+      hiddenOverflowBottom,
+      scrollSnapType,
+      scrollSnapAlign,
+    };
+  }
+
+  function isInterestingScrollNode(info) {
+    if (!info) return false;
+
+    return (
+      info.horizontalOverflow ||
+      info.verticalOverflow ||
+      info.canScrollHorizontally ||
+      info.canScrollVertically ||
+      info.clipsHorizontal ||
+      info.clipsVertical ||
+      info.scrollSnapType ||
+      info.scrollSnapAlign ||
+      info.overflowX !== 'visible' ||
+      info.overflowY !== 'visible'
+    );
+  }
+
+  function getScrollDiagnostics(element) {
+    const selected = getScrollNodeInfo(element, 0);
+    const containers = [];
+    let current = element;
+    let depth = 0;
+
+    while (current && current !== document.documentElement && depth <= 8) {
+      if (!isPickerUi(current)) {
+        const info = getScrollNodeInfo(current, depth);
+        if (isInterestingScrollNode(info)) {
+          containers.push(info);
+        }
+      }
+
+      current = current.parentElement;
+      depth += 1;
+    }
+
+    const nearestHorizontalContainer = containers.find((info) => (
+      info.canScrollHorizontally ||
+      info.clipsHorizontal ||
+      info.horizontalOverflow ||
+      info.scrollSnapType?.includes('x')
+    )) || null;
+
+    const nearestVerticalContainer = containers.find((info) => (
+      info.canScrollVertically ||
+      info.clipsVertical ||
+      info.verticalOverflow ||
+      info.scrollSnapType?.includes('y')
+    )) || null;
+
+    return {
+      selected,
+      nearestHorizontalContainer,
+      nearestVerticalContainer,
+      containers: containers.slice(0, 6),
+    };
+  }
+
   function cssMatchCount(selector) {
     try {
       return document.querySelectorAll(selector).length;
@@ -549,6 +939,32 @@
     } catch {
       return null;
     }
+  }
+
+  function attributeMatchCount(attributeName, value, tagName = '*') {
+    const selector = `${tagName}[${attributeName}="${escapeCssAttributeValue(value)}"]`;
+    return cssMatchCount(selector);
+  }
+
+  function exactVisibleTextMatchCount(text) {
+    const normalizedTarget = normalizeText(text);
+    if (!normalizedTarget) return 0;
+
+    return Array.from(document.querySelectorAll('*')).filter((node) => {
+      if (isPickerUi(node)) return false;
+      return normalizeText(getTextPreview(node)) === normalizedTarget;
+    }).length;
+  }
+
+  function isLikelyGeneratedIdentifier(value) {
+    const id = String(value || '');
+    if (!id) return false;
+
+    return (
+      /^:[a-z0-9_-]+:$/i.test(id) ||
+      /^[a-z]+[-_][a-f0-9]{8,}$/i.test(id) ||
+      (/^[a-z0-9_-]{12,}$/i.test(id) && /\d/.test(id) && !/[-_]/.test(id))
+    );
   }
 
   function roleNameMatchCount(role, accessibleName) {
@@ -568,11 +984,18 @@
       'data-test': 92,
       'data-cy': 92,
       'data-qa': 91,
+      id: 90,
       'role-name': 88,
+      'alt-text': 86,
+      placeholder: 86,
+      label: 84,
+      'aria-label': 82,
+      title: 78,
       role: 76,
       css: 70,
       xpath: 56,
       text: 52,
+      'id-fallback': 50,
     };
 
     let score = baseByStrategy[locator.strategy] ?? 50;
@@ -596,6 +1019,46 @@
     return Math.max(0, Math.min(100, score));
   }
 
+  function getAssociatedLabelText(element) {
+    if (!('labels' in element) || !element.labels || element.labels.length === 0) return '';
+
+    return truncate(
+      Array.from(element.labels)
+        .map((label) => normalizeWhitespace(label.innerText || label.textContent || ''))
+        .filter(Boolean)
+        .join(' '),
+      120
+    );
+  }
+
+  function labelMatchCount(labelText) {
+    const normalizedTarget = normalizeText(labelText);
+    if (!normalizedTarget) return 0;
+
+    return Array.from(document.querySelectorAll('input,textarea,select')).filter((control) => (
+      normalizeText(getAssociatedLabelText(control)) === normalizedTarget
+    )).length;
+  }
+
+  function shouldUseRoleNameLocator(role, accessibleNameInfo) {
+    if (!role || !accessibleNameInfo?.name) return false;
+    if (accessibleNameInfo.name.length > 90) return false;
+    if (accessibleNameInfo.source !== 'visible-text') return true;
+
+    return [
+      'button',
+      'link',
+      'checkbox',
+      'radio',
+      'switch',
+      'tab',
+      'menuitem',
+      'option',
+      'textbox',
+      'combobox',
+    ].includes(role);
+  }
+
   function buildLocatorCandidates(element, cssSelector, xpath, text) {
     const candidates = [];
 
@@ -609,15 +1072,33 @@
       candidates.push({
         strategy: attribute,
         selector,
-        playwright: `page.locator(${JSON.stringify(selector)})`,
+        playwright:
+          attribute === 'data-testid'
+            ? `page.getByTestId(${JSON.stringify(value)})`
+            : `page.locator(${JSON.stringify(selector)})`,
         uniqueCount,
       });
     }
 
-    const role = inferRole(element);
-    const accessibleName = getAccessibleName(element);
+    if (element.id) {
+      const selector = `#${cssEscape(element.id)}`;
+      const uniqueCount = cssMatchCount(selector);
+      const generated = isLikelyGeneratedIdentifier(element.id);
 
-    if (role && accessibleName) {
+      candidates.push({
+        strategy: generated ? 'id-fallback' : 'id',
+        selector,
+        playwright: `page.locator(${JSON.stringify(selector)})`,
+        uniqueCount,
+        note: generated ? 'id looks generated; keep as a fallback only' : null,
+      });
+    }
+
+    const role = inferRole(element);
+    const accessibleNameInfo = getAccessibleNameInfo(element);
+    const accessibleName = accessibleNameInfo?.name || '';
+
+    if (shouldUseRoleNameLocator(role, accessibleNameInfo)) {
       const uniqueCount = roleNameMatchCount(role, accessibleName);
       candidates.push({
         strategy: 'role-name',
@@ -632,6 +1113,56 @@
         selector: role,
         playwright: `page.getByRole(${JSON.stringify(role)})`,
         uniqueCount,
+      });
+    }
+
+    const ariaLabel = element.getAttribute('aria-label');
+    if (ariaLabel) {
+      const selector = `[aria-label="${escapeCssAttributeValue(ariaLabel)}"]`;
+      candidates.push({
+        strategy: 'aria-label',
+        selector,
+        playwright: `page.locator(${JSON.stringify(selector)})`,
+        uniqueCount: cssMatchCount(selector),
+      });
+    }
+
+    if (element.alt) {
+      candidates.push({
+        strategy: 'alt-text',
+        selector: `img[alt="${escapeCssAttributeValue(element.alt)}"]`,
+        playwright: `page.getByAltText(${JSON.stringify(element.alt)})`,
+        uniqueCount: attributeMatchCount('alt', element.alt, 'img'),
+      });
+    }
+
+    const placeholder = element.getAttribute('placeholder');
+    if (placeholder) {
+      candidates.push({
+        strategy: 'placeholder',
+        selector: `[placeholder="${escapeCssAttributeValue(placeholder)}"]`,
+        playwright: `page.getByPlaceholder(${JSON.stringify(placeholder)})`,
+        uniqueCount: cssMatchCount(`[placeholder="${escapeCssAttributeValue(placeholder)}"]`),
+      });
+    }
+
+    const labelText = getAssociatedLabelText(element);
+    if (labelText) {
+      candidates.push({
+        strategy: 'label',
+        selector: labelText,
+        playwright: `page.getByLabel(${JSON.stringify(labelText)})`,
+        uniqueCount: labelMatchCount(labelText),
+      });
+    }
+
+    const title = element.getAttribute('title');
+    if (title) {
+      candidates.push({
+        strategy: 'title',
+        selector: `[title="${escapeCssAttributeValue(title)}"]`,
+        playwright: `page.getByTitle(${JSON.stringify(title)})`,
+        uniqueCount: cssMatchCount(`[title="${escapeCssAttributeValue(title)}"]`),
       });
     }
 
@@ -656,16 +1187,16 @@
     }
 
     if (text) {
-      const textNodes = Array.from(document.querySelectorAll('*'));
-      const normalizedTarget = normalizeText(text);
-      const uniqueCount = textNodes.filter((node) => normalizeText(getTextPreview(node)) === normalizedTarget).length;
+      const uniqueCount = exactVisibleTextMatchCount(text);
 
-      candidates.push({
-        strategy: 'text',
-        selector: text,
-        playwright: `page.getByText(${JSON.stringify(text)})`,
-        uniqueCount,
-      });
+      if (uniqueCount === 1 && text.length <= 90) {
+        candidates.push({
+          strategy: 'text',
+          selector: text,
+          playwright: `page.getByText(${JSON.stringify(text)})`,
+          uniqueCount,
+        });
+      }
     }
 
     return candidates
@@ -678,14 +1209,19 @@
     const selector = getCssSelector(element);
     const xpath = getXPath(element);
     const text = getTextPreview(element);
+    const classDiagnostics = getClassDiagnostics(element);
+    const accessibleNameInfo = getAccessibleNameInfo(element);
 
     const info = {
       index,
       selectedAt: new Date().toISOString(),
       tag: element.tagName.toLowerCase(),
       id: element.id || null,
-      classes: Array.from(element.classList).join(' '),
+      classes: classDiagnostics?.meaningful.join(' ') || null,
+      classDiagnostics,
       text,
+      accessibleName: accessibleNameInfo?.name || null,
+      accessibleNameSource: accessibleNameInfo?.source || null,
       dimensions: `${Math.round(rect.width)}x${Math.round(rect.height)}`,
       viewportRect: toRectObject(rect),
       selector,
@@ -703,8 +1239,17 @@
     const reactState = getReactState(element);
     if (reactState) info.reactState = reactState;
 
+    const reactNativeWebProps = getReactNativeWebProps(element);
+    if (reactNativeWebProps) info.reactNativeWebProps = reactNativeWebProps;
+
     const styles = getDebugStyles(element);
     if (styles) info.styles = styles;
+
+    const ancestorContext = getAncestorContext(element);
+    if (ancestorContext) info.ancestorContext = ancestorContext;
+
+    const scrollDiagnostics = getScrollDiagnostics(element);
+    if (scrollDiagnostics) info.scrollDiagnostics = scrollDiagnostics;
 
     const formState = getFormState(element);
     if (formState) info.formState = formState;
@@ -777,19 +1322,28 @@
     return Math.min(Math.max(value, min), max);
   }
 
-  function computeCropRectPixels(rect, dpr, imageWidth, imageHeight) {
+  function computeRectPixels(rect, dpr, imageWidth, imageHeight, paddingCssPx = 0) {
     if (!rect) return null;
 
-    const left = clamp(Math.round(rect.left * dpr), 0, imageWidth);
-    const top = clamp(Math.round(rect.top * dpr), 0, imageHeight);
-    const right = clamp(Math.round(rect.right * dpr), 0, imageWidth);
-    const bottom = clamp(Math.round(rect.bottom * dpr), 0, imageHeight);
+    const padding = paddingCssPx * dpr;
+    const left = clamp(Math.round(rect.left * dpr - padding), 0, imageWidth);
+    const top = clamp(Math.round(rect.top * dpr - padding), 0, imageHeight);
+    const right = clamp(Math.round(rect.right * dpr + padding), 0, imageWidth);
+    const bottom = clamp(Math.round(rect.bottom * dpr + padding), 0, imageHeight);
 
     const width = right - left;
     const height = bottom - top;
     if (width <= 0 || height <= 0) return null;
 
     return { x: left, y: top, width, height };
+  }
+
+  function computeCropRectPixels(rect, dpr, imageWidth, imageHeight) {
+    return computeRectPixels(rect, dpr, imageWidth, imageHeight, CROP_PADDING_CSS_PX);
+  }
+
+  function computeElementRectPixels(rect, dpr, imageWidth, imageHeight) {
+    return computeRectPixels(rect, dpr, imageWidth, imageHeight, 0);
   }
 
   function loadImage(dataUrl) {
@@ -801,7 +1355,34 @@
     });
   }
 
-  function createCropPreviewDataUrl(image, cropRect) {
+  function drawHighlight(context, rect, scale, label = null) {
+    if (!rect) return;
+
+    const x = Math.round(rect.x * scale) + 1.5;
+    const y = Math.round(rect.y * scale) + 1.5;
+    const width = Math.max(1, Math.round(rect.width * scale) - 3);
+    const height = Math.max(1, Math.round(rect.height * scale) - 3);
+
+    context.save();
+    context.strokeStyle = HIGHLIGHT_COLOR;
+    context.lineWidth = Math.max(2, Math.round(3 * scale));
+    context.strokeRect(x, y, width, height);
+
+    if (label) {
+      const badgeSize = Math.max(18, Math.round(24 * scale));
+      context.fillStyle = HIGHLIGHT_COLOR;
+      context.fillRect(x, y, badgeSize, badgeSize);
+      context.fillStyle = '#ffffff';
+      context.font = `700 ${Math.max(11, Math.round(13 * scale))}px ui-sans-serif, system-ui, sans-serif`;
+      context.textAlign = 'center';
+      context.textBaseline = 'middle';
+      context.fillText(String(label), x + badgeSize / 2, y + badgeSize / 2 + 0.5);
+    }
+
+    context.restore();
+  }
+
+  function createCropPreviewDataUrl(image, cropRect, elementRect) {
     const maxSide = 360;
     const scale = Math.min(1, maxSide / Math.max(cropRect.width, cropRect.height));
 
@@ -824,7 +1405,103 @@
       canvas.height
     );
 
+    if (elementRect) {
+      drawHighlight(
+        context,
+        {
+          x: elementRect.x - cropRect.x,
+          y: elementRect.y - cropRect.y,
+          width: elementRect.width,
+          height: elementRect.height,
+        },
+        scale
+      );
+    }
+
     return canvas.toDataURL('image/jpeg', 0.82);
+  }
+
+  function createHighlightedViewportDataUrl(image, crops) {
+    const maxSide = 900;
+    const scale = Math.min(1, maxSide / Math.max(image.width, image.height));
+
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(image.width * scale));
+    canvas.height = Math.max(1, Math.round(image.height * scale));
+
+    const context = canvas.getContext('2d');
+    if (!context) return null;
+
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+
+    crops.forEach((crop) => {
+      if (!crop.elementRectPixels) return;
+      drawHighlight(context, crop.elementRectPixels, scale, crop.index);
+    });
+
+    return canvas.toDataURL('image/jpeg', 0.72);
+  }
+
+  function slugifyFilenamePart(value, fallback = 'page') {
+    const slug = normalizeWhitespace(value)
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 60);
+
+    return slug || fallback;
+  }
+
+  function getCaptureFilenamePrefix() {
+    const timestamp = new Date().toISOString()
+      .replace(/\.\d+Z$/, 'Z')
+      .replace(/[:]/g, '')
+      .replace(/[TZ]/g, '-')
+      .replace(/-$/, '');
+
+    let host = 'page';
+    try {
+      host = new URL(window.location.href).hostname;
+    } catch {
+      // Ignore URL parsing failures and keep the fallback host.
+    }
+
+    return `elements/element-picker-${timestamp}-${slugifyFilenamePart(host)}`;
+  }
+
+  function formatDownloadFilename(prefix, name) {
+    return `${prefix}-${name}.jpg`;
+  }
+
+  async function requestImageSave(dataUrl, filename) {
+    if (!dataUrl || !filename) return null;
+
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: 'ELEMENT_PICKER_SAVE_IMAGE',
+        dataUrl,
+        filename,
+      });
+
+      if (response?.ok) {
+        return {
+          filename: response.filename || filename,
+          requestedFilename: response.requestedFilename || filename,
+          downloadId: response.downloadId || null,
+        };
+      }
+
+      return {
+        error: response?.error || 'Unable to save screenshot',
+        requestedFilename: filename,
+      };
+    } catch (error) {
+      console.warn('Element picker screenshot save failed:', error);
+      return {
+        error: error?.message || 'Unable to save screenshot',
+        requestedFilename: filename,
+      };
+    }
   }
 
   async function requestViewportCapture() {
@@ -844,8 +1521,48 @@
     }
   }
 
+  function setPickerVisualsHidden(hidden) {
+    if (hidden) {
+      const nodes = Array.from(document.querySelectorAll(`[${UI_ATTR}="true"]`));
+      hiddenPickerUiSnapshot = nodes.map((node) => ({
+        node,
+        visibility: node.style.visibility,
+      }));
+      nodes.forEach((node) => {
+        node.style.visibility = 'hidden';
+      });
+      return;
+    }
+
+    hiddenPickerUiSnapshot.forEach(({ node, visibility }) => {
+      if (node.isConnected) {
+        node.style.visibility = visibility;
+      }
+    });
+    hiddenPickerUiSnapshot = [];
+  }
+
+  function waitForPaint() {
+    return new Promise((resolve) => {
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(resolve);
+      });
+    });
+  }
+
+  async function requestCleanViewportCapture() {
+    setPickerVisualsHidden(true);
+
+    try {
+      await waitForPaint();
+      return await requestViewportCapture();
+    } finally {
+      setPickerVisualsHidden(false);
+    }
+  }
+
   async function buildScreenshotData() {
-    const captureDataUrl = await requestViewportCapture();
+    const captureDataUrl = await requestCleanViewportCapture();
     if (!captureDataUrl) {
       return {
         status: 'unavailable',
@@ -869,6 +1586,8 @@
 
     const dpr = window.devicePixelRatio || 1;
     const includeInlineImages = selections.length <= MAX_INLINE_CROPS;
+    const filenamePrefix = getCaptureFilenamePrefix();
+    const imageDownloads = [];
 
     const crops = selections.map((selection) => {
       const rect = getElementRect(selection);
@@ -885,21 +1604,78 @@
       }
 
       const cropRectPixels = computeCropRectPixels(rect, dpr, image.width, image.height);
-      if (!cropRectPixels) {
+      const elementRectPixels = computeElementRectPixels(rect, dpr, image.width, image.height);
+      if (!cropRectPixels || !elementRectPixels) {
         return cropData;
       }
 
       cropData.captureRectPixels = cropRectPixels;
+      cropData.elementRectPixels = elementRectPixels;
+      cropData.cropPaddingCssPx = CROP_PADDING_CSS_PX;
+      cropData.previewHasHighlight = includeInlineImages;
 
-      if (includeInlineImages) {
-        cropData.imageDataUrl = createCropPreviewDataUrl(image, cropRectPixels);
+      const imageDataUrl = createCropPreviewDataUrl(image, cropRectPixels, elementRectPixels);
+      cropData.previewHasHighlight = !!imageDataUrl;
+
+      if (imageDataUrl) {
+        imageDownloads.push({
+          kind: 'element-crop',
+          index: selection.info.index,
+          dataUrl: imageDataUrl,
+          filename: formatDownloadFilename(
+            filenamePrefix,
+            `element-${String(selection.info.index).padStart(2, '0')}`
+          ),
+        });
+      }
+
+      if (includeInlineImages && imageDataUrl) {
+        cropData.imageDataUrl = imageDataUrl;
       }
 
       return cropData;
     });
 
+    const highlightedViewportSaveDataUrl = createHighlightedViewportDataUrl(image, crops);
+    const highlightedViewportImageDataUrl = includeInlineImages
+      ? highlightedViewportSaveDataUrl
+      : null;
+
+    if (highlightedViewportSaveDataUrl) {
+      imageDownloads.unshift({
+        kind: 'highlighted-viewport',
+        dataUrl: highlightedViewportSaveDataUrl,
+        filename: formatDownloadFilename(filenamePrefix, 'viewport'),
+      });
+    }
+
+    const downloadResults = await Promise.all(
+      imageDownloads.map(async (item) => ({
+        kind: item.kind,
+        index: item.index || null,
+        ...(await requestImageSave(item.dataUrl, item.filename)),
+      }))
+    );
+
+    const viewportDownload = downloadResults.find((item) => item.kind === 'highlighted-viewport') || null;
+    const cropDownloadsByIndex = new Map(
+      downloadResults
+        .filter((item) => item.kind === 'element-crop' && item.index)
+        .map((item) => [item.index, item])
+    );
+
+    crops.forEach((crop) => {
+      const cropDownload = cropDownloadsByIndex.get(crop.index);
+      if (cropDownload) {
+        crop.imageFile = cropDownload;
+      }
+    });
+
     return {
       status: 'ok',
+      captureScope: 'visible-viewport',
+      fullPageCapture: false,
+      fullPageCaptureReason: 'The extension uses non-invasive visible-tab capture to avoid scrolling or mutating page state.',
       dpr: round(dpr, 3),
       viewport: {
         width: window.innerWidth,
@@ -910,6 +1686,10 @@
         height: image.height,
       },
       inlineImages: includeInlineImages,
+      highlightedViewportImageDataUrl,
+      highlightedViewportImageFile: viewportDownload,
+      imageDirectory: 'Downloads/elements',
+      imageFiles: downloadResults,
       note: includeInlineImages
         ? null
         : `Inline crop images omitted because ${selections.length} elements were selected (limit: ${MAX_INLINE_CROPS}).`,
@@ -954,7 +1734,7 @@
     });
 
     const bundle = {
-      bundleVersion: '2.0.0',
+      bundleVersion: '2.1.0',
       generatedAt: new Date().toISOString(),
       page: {
         title: document.title,
@@ -964,10 +1744,17 @@
       screenshot: {
         status: screenshotData.status,
         reason: screenshotData.reason || null,
+        captureScope: screenshotData.captureScope || null,
+        fullPageCapture: screenshotData.fullPageCapture || false,
+        fullPageCaptureReason: screenshotData.fullPageCaptureReason || null,
         dpr: screenshotData.dpr || null,
         viewport: screenshotData.viewport || null,
         captureImageSize: screenshotData.captureImageSize || null,
         inlineImages: screenshotData.inlineImages,
+        highlightedViewportImageDataUrl: screenshotData.highlightedViewportImageDataUrl || null,
+        highlightedViewportImageFile: screenshotData.highlightedViewportImageFile || null,
+        imageDirectory: screenshotData.imageDirectory || null,
+        imageFiles: screenshotData.imageFiles || [],
         note: screenshotData.note || null,
       },
       elements,
@@ -982,7 +1769,107 @@
       typeof locator.uniqueCount === 'number'
         ? `${locator.uniqueCount} ${pluralize(locator.uniqueCount, 'match', 'matches')}`
         : 'match count unknown';
-    return `- ${locator.strategy}: score ${locator.score}, ${matchText}, ${locator.playwright}`;
+    const note = locator.note ? ` (${locator.note})` : '';
+    return `- ${locator.strategy}: score ${locator.score}, ${matchText}, ${locator.playwright}${note}`;
+  }
+
+  function formatHook(hook) {
+    if (!hook) return '';
+    if (hook.type === 'role-name') {
+      return `role=${JSON.stringify(hook.role)} name=${JSON.stringify(hook.accessibleName)}`;
+    }
+    return `${hook.type}=${JSON.stringify(hook.value)}`;
+  }
+
+  function formatBriefElement(description) {
+    if (!description) return '';
+
+    const parts = [description.tag];
+    if (description.id) parts.push(`#${description.id}`);
+    if (description.hook) parts.push(`[${formatHook(description.hook)}]`);
+    if (description.text) parts.push(`"${description.text}"`);
+    return parts.join(' ');
+  }
+
+  function formatAncestorContextLines(context) {
+    if (!context) return [];
+
+    const lines = [];
+
+    if (context.sectionHeading?.text) {
+      lines.push(`Nearest section heading: "${context.sectionHeading.text}"`);
+    }
+
+    if (context.nearestStableAncestor) {
+      lines.push(`Nearest stable ancestor: ${formatBriefElement(context.nearestStableAncestor)}`);
+    }
+
+    if (context.nearestSection) {
+      lines.push(`Nearest section-like ancestor: ${formatBriefElement(context.nearestSection)}`);
+    }
+
+    return lines;
+  }
+
+  function formatScrollNode(info) {
+    if (!info) return '';
+
+    const label = formatBriefElement(info.element);
+    const flags = [];
+
+    if (info.canScrollHorizontally) flags.push('can scroll horizontally');
+    if (info.clipsHorizontal) flags.push('clips horizontal overflow');
+    if (info.hiddenOverflowRight) flags.push('hidden overflow to the right');
+    if (info.canScrollVertically) flags.push('can scroll vertically');
+    if (info.clipsVertical) flags.push('clips vertical overflow');
+    if (info.hiddenOverflowBottom) flags.push('hidden overflow below');
+    if (info.scrollSnapType) flags.push(`scroll-snap-type=${info.scrollSnapType}`);
+    if (info.scrollSnapAlign) flags.push(`scroll-snap-align=${info.scrollSnapAlign}`);
+
+    const metrics = `scrollWidth=${info.scrollWidth}, clientWidth=${info.clientWidth}, scrollLeft=${info.scrollLeft}, overflowX=${info.overflowX}`;
+    const suffix = flags.length ? `; ${flags.join(', ')}` : '';
+    return `${label || 'element'} (${metrics}${suffix})`;
+  }
+
+  function formatScrollDiagnosticsLines(scrollDiagnostics) {
+    if (!scrollDiagnostics) return [];
+
+    const lines = [];
+    const selected = scrollDiagnostics.selected;
+
+    if (selected) {
+      const selectedFlags = [];
+      if (selected.canScrollHorizontally) selectedFlags.push('can scroll horizontally');
+      if (selected.clipsHorizontal) selectedFlags.push('clips horizontal overflow');
+      if (selected.hiddenOverflowRight) selectedFlags.push('hidden overflow to the right');
+      if (selected.scrollSnapType) selectedFlags.push(`scroll-snap-type=${selected.scrollSnapType}`);
+
+      if (selectedFlags.length) {
+        lines.push(`Selected element scroll: ${selectedFlags.join(', ')}`);
+      }
+    }
+
+    if (scrollDiagnostics.nearestHorizontalContainer) {
+      lines.push(`Nearest horizontal scroll context: ${formatScrollNode(scrollDiagnostics.nearestHorizontalContainer)}`);
+    }
+
+    return lines;
+  }
+
+  function formatReactNativeProps(props) {
+    if (!props) return '';
+
+    return Object.entries(props)
+      .map(([name, details]) => `${name}=${JSON.stringify(details.value)}`)
+      .join(', ');
+  }
+
+  function formatImageFile(imageFile) {
+    if (!imageFile) return '';
+    if (imageFile.error) {
+      return `save failed (${imageFile.error}; requested ${imageFile.requestedFilename || 'unknown filename'})`;
+    }
+    return imageFile.filename || imageFile.requestedFilename || '';
   }
 
   function formatElementSection(elementInfo) {
@@ -995,24 +1882,62 @@
       lines.push(`Text: "${elementInfo.text}"`);
     }
 
-    lines.push(`CSS selector: ${elementInfo.selector}`);
-    if (elementInfo.xpath) {
-      lines.push(`XPath: ${elementInfo.xpath}`);
-    }
-
     if (elementInfo.primaryLocator) {
       lines.push(`Primary locator: ${elementInfo.primaryLocator.playwright}`);
     }
 
+    if (elementInfo.accessibleName && elementInfo.accessibleNameSource !== 'visible-text') {
+      lines.push(`Accessible name: "${elementInfo.accessibleName}" (${elementInfo.accessibleNameSource})`);
+    }
+
     lines.push(`Size: ${elementInfo.dimensions}`);
+
+    lines.push(...formatAncestorContextLines(elementInfo.ancestorContext));
+    lines.push(...formatScrollDiagnosticsLines(elementInfo.scrollDiagnostics));
 
     if (elementInfo.reactComponents) {
       lines.push(`React chain: ${elementInfo.reactComponents.join(' -> ')}`);
     }
 
+    if (elementInfo.reactNativeWebProps) {
+      lines.push(`RN-web props: ${formatReactNativeProps(elementInfo.reactNativeWebProps)}`);
+    }
+
+    if (elementInfo.classDiagnostics?.totalCount) {
+      const classParts = [];
+      if (elementInfo.classDiagnostics.meaningful?.length) {
+        classParts.push(`meaningful: ${elementInfo.classDiagnostics.meaningful.join(' ')}`);
+      }
+      if (elementInfo.classDiagnostics.generatedCount) {
+        classParts.push(`${elementInfo.classDiagnostics.generatedCount} generated omitted`);
+      }
+      if (elementInfo.classDiagnostics.utilityCount) {
+        classParts.push(`${elementInfo.classDiagnostics.utilityCount} utility omitted`);
+      }
+      if (classParts.length) {
+        lines.push(`Class summary: ${classParts.join('; ')}`);
+      }
+    }
+
     if (elementInfo.locators?.length) {
-      lines.push('Locator ranking:');
-      elementInfo.locators.slice(0, 5).forEach((locator) => {
+      const stableLocators = elementInfo.locators
+        .filter((locator) => !['css', 'xpath', 'id-fallback'].includes(locator.strategy))
+        .slice(0, 5);
+      const backupLocators = elementInfo.locators
+        .filter((locator) => ['css', 'xpath', 'id-fallback'].includes(locator.strategy))
+        .slice(0, 4);
+
+      if (stableLocators.length) {
+        lines.push('Stable locator candidates:');
+      }
+      stableLocators.forEach((locator) => {
+        lines.push(formatLocatorLine(locator));
+      });
+
+      if (backupLocators.length) {
+        lines.push('Backup locator candidates:');
+      }
+      backupLocators.forEach((locator) => {
         lines.push(formatLocatorLine(locator));
       });
     }
@@ -1024,10 +1949,14 @@
       );
       if (crop.captureRectPixels) {
         const rect = crop.captureRectPixels;
-        lines.push(`Capture pixels: x=${rect.x}, y=${rect.y}, w=${rect.width}, h=${rect.height}`);
+        const padding = crop.cropPaddingCssPx ?? 0;
+        lines.push(`Capture pixels: x=${rect.x}, y=${rect.y}, w=${rect.width}, h=${rect.height}, padding=${padding} CSS px`);
       }
       if (crop.imageDataUrl) {
-        lines.push('Crop preview image: embedded in JSON under `screenshotCrop.imageDataUrl`.');
+        lines.push('Crop preview image: embedded in JSON under `screenshotCrop.imageDataUrl` with selected element outlined.');
+      }
+      if (crop.imageFile) {
+        lines.push(`Crop image file: ${formatImageFile(crop.imageFile)}`);
       }
     }
 
@@ -1073,6 +2002,24 @@
       '- Backspace/Delete/Ctrl+Z: remove latest selection',
       '- Escape: cancel picker',
       '',
+      '## Visual Capture',
+      `Status: ${bundle.screenshot.status}`,
+      `Scope: ${bundle.screenshot.captureScope || 'unavailable'}`,
+      `Viewport: ${bundle.screenshot.viewport ? `${bundle.screenshot.viewport.width}x${bundle.screenshot.viewport.height}` : 'unknown'}`,
+      `Device pixel ratio: ${bundle.screenshot.dpr || 'unknown'}`,
+      bundle.screenshot.highlightedViewportImageDataUrl
+        ? 'Highlighted viewport image: embedded in JSON under `screenshot.highlightedViewportImageDataUrl`.'
+        : 'Highlighted viewport image: unavailable or omitted.',
+      bundle.screenshot.highlightedViewportImageFile
+        ? `Highlighted viewport file: ${formatImageFile(bundle.screenshot.highlightedViewportImageFile)}`
+        : 'Highlighted viewport file: unavailable.',
+      bundle.screenshot.imageDirectory
+        ? `Screenshot directory: ${bundle.screenshot.imageDirectory}`
+        : 'Screenshot directory: unavailable.',
+      bundle.screenshot.fullPageCapture
+        ? 'Full-page capture: included.'
+        : `Full-page capture: not included${bundle.screenshot.fullPageCaptureReason ? ` (${bundle.screenshot.fullPageCaptureReason})` : ''}.`,
+      '',
       '## Elements',
       '',
     ];
@@ -1108,6 +2055,7 @@
       screenshot: {
         ...bundle.screenshot,
         inlineImages: false,
+        highlightedViewportImageDataUrl: null,
         note: bundle.screenshot.note || 'Inline crop images removed to keep clipboard payload manageable.',
       },
       elements: bundle.elements.map((elementInfo) => {

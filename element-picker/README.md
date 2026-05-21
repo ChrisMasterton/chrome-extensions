@@ -45,6 +45,18 @@ The reverse loop is:
 - `picker.css`: overlay, toolbar, responsive controls, tour panel, and tour highlight styling.
 - `scripts/codex-qa-inbox-server.mjs`: local capture/tour server used by Codex and the extension.
 - `package.json`: local scripts for running the inbox and syntax checking extension code.
+- `codex-skills/web-qa-capture/`: repo copy of the Codex skill that reads the local QA inbox and posts guided review tours.
+
+## Codex Skill
+
+This repo includes the Codex-side companion skill at `codex-skills/web-qa-capture`. Install or refresh it into your local Codex skills folder when you want Codex to automatically respond to prompts like `look at latest QA capture`:
+
+```sh
+mkdir -p ~/.codex/skills
+rsync -a codex-skills/web-qa-capture/ ~/.codex/skills/web-qa-capture/
+```
+
+The skill tells Codex to read `~/CodexInbox/web-qa/latest/manifest.json`, inspect `bundle.md`, use `bundle.json` for selectors and state, open capture images when available, honor `userComment` and `tourContext`, and post guided review tours back to `http://127.0.0.1:43117/tours`.
 
 ## Installation
 

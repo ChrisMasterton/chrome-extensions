@@ -1,0 +1,4 @@
+interface:
+  display_name: "Web QA Capture"
+  short_description: "Inspect latest browser QA capture"
+  default_prompt: "Use $web-qa-capture to inspect the latest QA capture and explain what is happening."

@@ -1,9 +1,10 @@
 {
   "manifest_version": 3,
-  "name": "Element Picker for Claude",
-  "description": "Build debug bundles with stable locators, saved screenshot crops, scroll diagnostics, and repro hints",
-  "version": "1.3",
+  "name": "Element Picker QA Bridge",
+  "description": "Build QA debug bundles with comments, tour context, and Codex guided review handoffs through a local inbox",
+  "version": "1.8",
   "permissions": ["activeTab", "scripting", "clipboardWrite", "downloads"],
+  "host_permissions": ["http://127.0.0.1:43117/*"],
   "action": {
     "default_title": "Pick Element",
     "default_icon": {

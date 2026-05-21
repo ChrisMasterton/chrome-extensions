@@ -1,0 +1,10 @@
+{
+  "name": "element-picker-qa-bridge",
+  "version": "1.8.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "inbox": "node scripts/codex-qa-inbox-server.mjs",
+    "check": "node --check background.js && node --check picker.js && node --check scripts/codex-qa-inbox-server.mjs"
+  }
+}

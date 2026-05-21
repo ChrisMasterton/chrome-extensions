@@ -1,4 +1,4 @@
-// Element Picker for Claude Code
+// Element Picker QA Bridge
 (function() {
   // Prevent multiple injections
   if (window.__elementPickerActive) return;
@@ -6,11 +6,18 @@
 
   const OVERLAY_ID = '__element-picker-overlay';
   const BADGE_LAYER_ID = '__element-picker-badges';
+  const TOOLBAR_ID = '__element-picker-toolbar';
   const UI_ATTR = 'data-element-picker-ui';
   const MAX_SELECTIONS = 25;
   const MAX_INLINE_CROPS = 6;
   const CROP_PADDING_CSS_PX = 16;
   const HIGHLIGHT_COLOR = '#ef4444';
+  const CODEX_INBOX_URL = 'http://127.0.0.1:43117/captures';
+  const CODEX_TOUR_URL = 'http://127.0.0.1:43117/tours/latest';
+  const TOUR_PANEL_ID = '__element-picker-tour-panel';
+  const TOUR_HIGHLIGHT_ID = '__element-picker-tour-highlight';
+  const TOUR_PANEL_POSITIONS = ['top-right', 'bottom-right', 'bottom-left', 'top-left'];
+  const TOUR_PANEL_OVERLAP_PADDING = 12;
 
   const TEST_ID_ATTRIBUTES = [
     'data-testid',
@@ -31,10 +38,24 @@
 
   let overlay = null;
   let badgeLayer = null;
+  let toolbar = null;
+  let pauseButton = null;
+  let countBadge = null;
+  let commentInput = null;
   let currentElement = null;
   let selections = [];
   let isExporting = false;
+  let isPaused = true;
   let hiddenPickerUiSnapshot = [];
+  let activeTour = null;
+  let activeTourStepIndex = 0;
+  let activeTourElement = null;
+  let tourPanel = null;
+  let tourHighlight = null;
+  let tourAskInput = null;
+  let tourAskNotes = new Map();
+  let tourPanelPosition = 'top-right';
+  let tourPanelPositionLocked = false;
 
   function isElementNode(node) {
     return !!node && node.nodeType === Node.ELEMENT_NODE;
@@ -227,9 +248,8 @@
     toast.textContent = message;
     toast.style.cssText = [
       'position: fixed',
-      'bottom: 20px',
-      'left: 50%',
-      'transform: translateX(-50%)',
+      'top: 16px',
+      'left: 16px',
       'background: #111827',
       'color: #fff',
       'padding: 12px 18px',
@@ -240,12 +260,601 @@
       'z-index: 2147483647',
       'box-shadow: 0 10px 20px rgba(0,0,0,0.35)',
       'pointer-events: none',
-      'max-width: calc(100vw - 24px)',
-      'text-align: center',
+      'max-width: min(460px, calc(100vw - 32px))',
+      'text-align: left',
     ].join(';');
 
     document.body.appendChild(toast);
     window.setTimeout(() => toast.remove(), duration);
+  }
+
+  function createTourHighlight() {
+    tourHighlight = document.createElement('div');
+    tourHighlight.id = TOUR_HIGHLIGHT_ID;
+    markPickerUi(tourHighlight);
+    document.body.appendChild(tourHighlight);
+  }
+
+  function updateTourHighlight(element) {
+    if (!tourHighlight) {
+      createTourHighlight();
+    }
+
+    if (!element || !element.isConnected) {
+      tourHighlight.style.display = 'none';
+      return;
+    }
+
+    const rect = element.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      tourHighlight.style.display = 'none';
+      return;
+    }
+
+    tourHighlight.style.display = 'block';
+    tourHighlight.style.top = `${rect.top}px`;
+    tourHighlight.style.left = `${rect.left}px`;
+    tourHighlight.style.width = `${rect.width}px`;
+    tourHighlight.style.height = `${rect.height}px`;
+  }
+
+  function setTourPanelPosition(position) {
+    if (!tourPanel || !TOUR_PANEL_POSITIONS.includes(position)) return;
+    tourPanelPosition = position;
+    tourPanel.dataset.position = position;
+  }
+
+  function getNextTourPanelPosition(position = tourPanelPosition) {
+    const index = TOUR_PANEL_POSITIONS.indexOf(position);
+    return TOUR_PANEL_POSITIONS[(index + 1) % TOUR_PANEL_POSITIONS.length] || TOUR_PANEL_POSITIONS[0];
+  }
+
+  function expandRect(rect, padding) {
+    return {
+      top: rect.top - padding,
+      right: rect.right + padding,
+      bottom: rect.bottom + padding,
+      left: rect.left - padding,
+      width: rect.width + padding * 2,
+      height: rect.height + padding * 2,
+    };
+  }
+
+  function getOverlapArea(a, b) {
+    const width = Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left));
+    const height = Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top));
+    return width * height;
+  }
+
+  function getTourTargetAvoidanceRect() {
+    if (!activeTourElement || !activeTourElement.isConnected) return null;
+
+    const rect = activeTourElement.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    return expandRect(rect, TOUR_PANEL_OVERLAP_PADDING);
+  }
+
+  function chooseTourPanelPosition() {
+    if (!tourPanel) return tourPanelPosition;
+
+    const targetRect = getTourTargetAvoidanceRect();
+    if (!targetRect) return tourPanelPosition;
+
+    const candidateOrder = [
+      tourPanelPosition,
+      ...TOUR_PANEL_POSITIONS.filter((position) => position !== tourPanelPosition),
+    ];
+    const scored = [];
+
+    for (const position of candidateOrder) {
+      setTourPanelPosition(position);
+      const panelRect = tourPanel.getBoundingClientRect();
+      const overlapArea = getOverlapArea(panelRect, targetRect);
+      scored.push({ position, overlapArea });
+
+      if (overlapArea === 0) {
+        return position;
+      }
+    }
+
+    return scored.sort((a, b) => a.overlapArea - b.overlapArea)[0]?.position || tourPanelPosition;
+  }
+
+  function placeTourPanel(options = {}) {
+    if (!tourPanel) return;
+    const { forceAuto = false } = options;
+
+    if (forceAuto || !tourPanelPositionLocked) {
+      setTourPanelPosition(chooseTourPanelPosition());
+      return;
+    }
+
+    setTourPanelPosition(tourPanelPosition);
+  }
+
+  function queueTourPanelPlacement(options = {}) {
+    if (!tourPanel) return;
+    window.requestAnimationFrame(() => placeTourPanel(options));
+  }
+
+  function normalizeTourUrl(value) {
+    try {
+      const url = new URL(value, window.location.href);
+      url.hash = '';
+      return url;
+    } catch {
+      return null;
+    }
+  }
+
+  function isCurrentTourStepUrl(step) {
+    if (!step?.url) return true;
+
+    const target = normalizeTourUrl(step.url);
+    const current = normalizeTourUrl(window.location.href);
+    if (!target || !current) return false;
+
+    const targetPath = target.pathname.replace(/\/$/, '') || '/';
+    const currentPath = current.pathname.replace(/\/$/, '') || '/';
+
+    return (
+      target.origin === current.origin &&
+      targetPath === currentPath &&
+      (!target.search || target.search === current.search)
+    );
+  }
+
+  function findElementByTourText(text) {
+    const target = normalizeText(text);
+    if (!target) return null;
+
+    const candidates = Array.from(document.querySelectorAll('body *'))
+      .filter((node) => isElementNode(node) && !isPickerUi(node) && isVisibleElement(node))
+      .map((node) => ({
+        node,
+        text: normalizeText(getTextPreview(node)),
+      }))
+      .filter((candidate) => candidate.text && candidate.text.includes(target))
+      .sort((a, b) => a.text.length - b.text.length);
+
+    return candidates[0]?.node || null;
+  }
+
+  function findTourElement(step) {
+    if (!step) return null;
+
+    if (step.selector) {
+      try {
+        const element = document.querySelector(step.selector);
+        if (isElementNode(element) && !isPickerUi(element)) {
+          return element;
+        }
+      } catch {
+        // Invalid selectors are reported through the tour panel instead.
+      }
+    }
+
+    if (step.text) {
+      return findElementByTourText(step.text);
+    }
+
+    return null;
+  }
+
+  function createTourPanelButton(label, onClick, variant = 'secondary') {
+    const button = document.createElement('button');
+    markPickerUi(button);
+    button.type = 'button';
+    button.textContent = label;
+    button.className = `element-picker-tour-button element-picker-tour-button-${variant}`;
+    button.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+      onClick();
+    });
+    return button;
+  }
+
+  function ensureTourPanel() {
+    if (tourPanel) return tourPanel;
+
+    tourPanel = document.createElement('div');
+    tourPanel.id = TOUR_PANEL_ID;
+    markPickerUi(tourPanel);
+    document.body.appendChild(tourPanel);
+    setTourPanelPosition(tourPanelPosition);
+    return tourPanel;
+  }
+
+  function clearTour() {
+    if (tourPanel) tourPanel.remove();
+    if (tourHighlight) tourHighlight.remove();
+
+    activeTour = null;
+    activeTourStepIndex = 0;
+    activeTourElement = null;
+    tourPanel = null;
+    tourHighlight = null;
+    tourAskInput = null;
+    tourAskNotes.clear();
+    tourPanelPosition = 'top-right';
+    tourPanelPositionLocked = false;
+    updateToolbarState();
+  }
+
+  function getActiveTourStep() {
+    if (!activeTour?.steps?.length) return null;
+    return activeTour.steps[activeTourStepIndex] || null;
+  }
+
+  function isTourActive() {
+    return !!activeTour?.steps?.length;
+  }
+
+  function getTourStepKey(step = getActiveTourStep(), stepIndex = activeTourStepIndex) {
+    if (!activeTour || !step) return '';
+    const tourKey = activeTour.id || activeTour.title || 'tour';
+    const stepKey = step.id || step.selector || step.text || stepIndex;
+    return `${tourKey}:${stepKey}`;
+  }
+
+  function saveTourAskText(value, step = getActiveTourStep(), stepIndex = activeTourStepIndex) {
+    const key = getTourStepKey(step, stepIndex);
+    if (key) {
+      tourAskNotes.set(key, value || '');
+    }
+  }
+
+  function getTourAskText(step = getActiveTourStep(), stepIndex = activeTourStepIndex) {
+    const key = getTourStepKey(step, stepIndex);
+    const activeKey = getTourStepKey();
+
+    if (tourAskInput && key && key === activeKey) {
+      return normalizeWhitespace(tourAskInput.value) || null;
+    }
+
+    return normalizeWhitespace(tourAskNotes.get(key) || '') || null;
+  }
+
+  function createTourAskInput(step, stepIndex) {
+    const input = document.createElement('textarea');
+    markPickerUi(input);
+    input.className = 'element-picker-tour-ask';
+    input.placeholder = 'Ask Codex about this step...';
+    input.title = 'Add a question or observation for this tour step';
+    input.rows = 2;
+    input.value = tourAskNotes.get(getTourStepKey(step, stepIndex)) || '';
+    input.setAttribute('aria-label', 'Ask Codex about this tour step');
+    input.addEventListener('input', () => saveTourAskText(input.value, step, stepIndex));
+    return input;
+  }
+
+  function getActiveTourContext(extra = {}) {
+    const step = getActiveTourStep();
+    if (!activeTour || !step) return null;
+
+    return {
+      tourId: activeTour.id || null,
+      tourTitle: activeTour.title || null,
+      tourSummary: activeTour.summary || null,
+      stepIndex: activeTourStepIndex + 1,
+      totalSteps: activeTour.steps.length,
+      currentUrlMatches: isCurrentTourStepUrl(step),
+      targetFound: !!activeTourElement,
+      step: {
+        id: step.id || null,
+        title: step.title || null,
+        body: step.body || null,
+        url: step.url || null,
+        selector: step.selector || null,
+        text: step.text || null,
+        action: step.action || null,
+        notes: step.notes || null,
+      },
+      ...extra,
+    };
+  }
+
+  async function navigateToTourStep(step, stepIndex = activeTourStepIndex) {
+    if (!step?.url) return;
+
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: 'ELEMENT_PICKER_OPEN_TOUR_STEP',
+        url: step.url,
+        tour: activeTour,
+        stepIndex,
+      });
+
+      if (response?.ok) return;
+    } catch {
+      // Fall back to normal navigation below.
+    }
+
+    window.location.href = step.url;
+  }
+
+  async function askCodexAboutTourStep() {
+    const step = getActiveTourStep();
+    const element = activeTourElement || findTourElement(step);
+    const askText = getTourAskText(step, activeTourStepIndex);
+
+    if (!element) {
+      showToast('Tour step element was not found on this page.', 2600);
+      return;
+    }
+
+    clearSelections();
+    currentElement = element;
+    updateOverlay(element);
+    addSelection(element, { silent: true });
+
+    await sendBundleToCodex({
+      tourContext: getActiveTourContext({ askText }),
+    });
+  }
+
+  function renderTourStep() {
+    const step = getActiveTourStep();
+    if (!step) {
+      clearTour();
+      return;
+    }
+
+    const panel = ensureTourPanel();
+    const total = activeTour.steps.length;
+    const onCurrentUrl = isCurrentTourStepUrl(step);
+    activeTourElement = onCurrentUrl ? findTourElement(step) : null;
+    currentElement = null;
+    if (overlay) overlay.style.display = 'none';
+    updateTourHighlight(activeTourElement);
+
+    const eyebrow = document.createElement('div');
+    eyebrow.className = 'element-picker-tour-eyebrow';
+    eyebrow.textContent = `${activeTour.title || 'Codex tour'} - ${activeTourStepIndex + 1} of ${total}`;
+
+    const title = document.createElement('div');
+    title.className = 'element-picker-tour-title';
+    title.textContent = step.title || `Step ${activeTourStepIndex + 1}`;
+
+    const body = document.createElement('div');
+    body.className = 'element-picker-tour-body';
+    body.textContent = step.body || step.notes || 'Codex marked this part of the page for review.';
+
+    const status = document.createElement('div');
+    status.className = 'element-picker-tour-status';
+    if (!onCurrentUrl && step.url) {
+      status.textContent = `Open ${step.url} to view this step.`;
+    } else if (activeTourElement) {
+      status.textContent = step.selector
+        ? `Highlighting ${step.selector}`
+        : `Highlighting text match "${truncate(step.text, 56)}"`;
+    } else {
+      status.textContent = 'Could not find the target element on this page.';
+    }
+
+    const controls = document.createElement('div');
+    controls.className = 'element-picker-tour-controls';
+
+    const backButton = createTourPanelButton('Back', () => {
+      saveTourAskText(tourAskInput?.value || '', step, activeTourStepIndex);
+      tourPanelPositionLocked = false;
+      activeTourStepIndex = Math.max(0, activeTourStepIndex - 1);
+      renderTourStep();
+    });
+    backButton.disabled = activeTourStepIndex === 0;
+
+    const closeButton = createTourPanelButton('Close', () => {
+      clearTour();
+      showToast('Guided review closed.', 1500);
+    });
+
+    const moveButton = createTourPanelButton('Move', () => {
+      tourPanelPositionLocked = true;
+      setTourPanelPosition(getNextTourPanelPosition());
+      showToast('Moved the tour guide box.', 1200);
+    });
+
+    const askButton = createTourPanelButton('Ask Codex', () => {
+      askCodexAboutTourStep();
+    }, 'primary');
+    askButton.disabled = !activeTourElement;
+
+    const nextButton = createTourPanelButton(activeTourStepIndex === total - 1 ? 'Done' : 'Next', () => {
+      if (activeTourStepIndex >= total - 1) {
+        clearTour();
+        showToast('Guided review complete.', 1700);
+        return;
+      }
+
+      saveTourAskText(tourAskInput?.value || '', step, activeTourStepIndex);
+      tourPanelPositionLocked = false;
+      const nextStep = activeTour.steps[activeTourStepIndex + 1];
+      activeTourStepIndex += 1;
+      if (nextStep?.url && !isCurrentTourStepUrl(nextStep)) {
+        navigateToTourStep(nextStep, activeTourStepIndex);
+        return;
+      }
+      renderTourStep();
+    }, 'primary');
+
+    controls.append(backButton, moveButton);
+    if (!onCurrentUrl && step.url) {
+      controls.append(createTourPanelButton('Open Step', () => navigateToTourStep(step), 'primary'));
+    } else {
+      controls.append(askButton);
+    }
+    controls.append(nextButton, closeButton);
+
+    tourAskInput = onCurrentUrl ? createTourAskInput(step, activeTourStepIndex) : null;
+
+    if (tourAskInput) {
+      panel.replaceChildren(eyebrow, title, body, status, tourAskInput, controls);
+    } else {
+      panel.replaceChildren(eyebrow, title, body, status, controls);
+    }
+
+    queueTourPanelPlacement();
+    updateToolbarState();
+  }
+
+  async function loadLatestTour() {
+    try {
+      showToast('Loading latest Codex guided review...', 1600);
+      const response = await chrome.runtime.sendMessage({
+        type: 'ELEMENT_PICKER_GET_LATEST_TOUR',
+        tourUrl: CODEX_TOUR_URL,
+      });
+
+      if (!response?.ok || !response.tour) {
+        throw new Error(response?.error || 'No guided review is available');
+      }
+
+      activeTour = response.tour;
+      activeTourStepIndex = 0;
+      tourPanelPositionLocked = false;
+      clearSelections();
+      isPaused = true;
+      renderTourStep();
+      updateToolbarState();
+      showToast(`Loaded guided review: ${activeTour.title}`, 2400);
+    } catch (error) {
+      console.error('Failed to load Codex guided review:', error);
+      showToast(`Tour load failed: ${error?.message || 'start the Codex QA inbox server'}`, 4200);
+    }
+  }
+
+  function onRuntimeMessage(message) {
+    if (message?.type !== 'ELEMENT_PICKER_RESUME_TOUR' || !message.tour) {
+      return;
+    }
+
+    activeTour = message.tour;
+    activeTourStepIndex = Math.max(0, Math.min(
+      Number.parseInt(message.stepIndex || 0, 10),
+      activeTour.steps.length - 1
+    ));
+    tourPanelPositionLocked = false;
+    clearSelections();
+    isPaused = true;
+    renderTourStep();
+    updateToolbarState();
+    showToast(`Continuing guided review: ${activeTour.title}`, 2400);
+  }
+
+  function createToolbarButton(label, title, onClick, variant = 'secondary') {
+    const button = document.createElement('button');
+    markPickerUi(button);
+    button.type = 'button';
+    button.textContent = label;
+    button.title = title;
+    button.className = `element-picker-toolbar-button element-picker-toolbar-button-${variant}`;
+    button.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+      onClick();
+    });
+    return button;
+  }
+
+  function createCommentInput() {
+    const input = document.createElement('textarea');
+    markPickerUi(input);
+    input.className = 'element-picker-toolbar-comment';
+    input.placeholder = 'Comment for Codex...';
+    input.title = 'Add context to include with Send to Codex or Copy';
+    input.rows = 1;
+    input.setAttribute('aria-label', 'Comment for Codex');
+    return input;
+  }
+
+  function getUserComment() {
+    return normalizeWhitespace(commentInput?.value || '') || null;
+  }
+
+  function isTextEntryElement(element) {
+    if (!isElementNode(element)) return false;
+
+    const tagName = element.tagName.toLowerCase();
+    return (
+      tagName === 'textarea' ||
+      tagName === 'input' ||
+      element.isContentEditable
+    );
+  }
+
+  function updateToolbarState() {
+    const tourActive = isTourActive();
+
+    if (toolbar) {
+      toolbar.classList.toggle('element-picker-toolbar-hidden-by-tour', tourActive);
+      toolbar.setAttribute('aria-hidden', tourActive ? 'true' : 'false');
+    }
+
+    if (pauseButton) {
+      pauseButton.textContent = isPaused ? 'Resume' : 'Pause';
+      pauseButton.title = isPaused
+        ? 'Resume normal page interaction'
+        : 'Pause page interaction and inspect elements';
+    }
+
+    if (countBadge) {
+      countBadge.textContent = `${selections.length} selected`;
+    }
+
+    if (overlay) {
+      overlay.style.display = isPaused && !tourActive && currentElement ? overlay.style.display : 'none';
+    }
+  }
+
+  function createToolbar() {
+    toolbar = document.createElement('div');
+    toolbar.id = TOOLBAR_ID;
+    markPickerUi(toolbar);
+
+    const title = document.createElement('div');
+    markPickerUi(title);
+    title.className = 'element-picker-toolbar-title';
+    title.textContent = 'QA Bridge';
+
+    countBadge = document.createElement('div');
+    markPickerUi(countBadge);
+    countBadge.className = 'element-picker-toolbar-count';
+
+    commentInput = createCommentInput();
+
+    pauseButton = createToolbarButton('Resume', 'Resume normal page interaction', () => {
+      isPaused = !isPaused;
+      updateToolbarState();
+      showToast(isPaused ? 'Page paused. Click elements to inspect.' : 'Page interaction resumed. Toolbar remains available.', 1800);
+    });
+
+    const undoButton = createToolbarButton('Undo', 'Remove latest selected element', () => {
+      removeLastSelection();
+      updateToolbarState();
+    });
+
+    const copyButton = createToolbarButton('Copy', 'Copy selected element bundle to clipboard', () => {
+      exportBundle({ cleanupAfter: true });
+    });
+
+    const sendButton = createToolbarButton('Send to Codex', 'Save selected element bundle to the local Codex QA inbox', () => {
+      sendBundleToCodex();
+    }, 'primary');
+
+    const tourButton = createToolbarButton('Load Tour', 'Load the latest Codex guided review from the local QA inbox', () => {
+      loadLatestTour();
+    });
+
+    const closeButton = createToolbarButton('Close', 'Close the QA bridge', () => {
+      cleanup();
+    });
+
+    toolbar.append(title, countBadge, commentInput, pauseButton, undoButton, copyButton, sendButton, tourButton, closeButton);
+    document.body.appendChild(toolbar);
+    updateToolbarState();
   }
 
   function getReactFiberNode(element) {
@@ -1273,28 +1882,42 @@
     return info;
   }
 
-  function addSelection(element) {
+  function clearSelections() {
+    selections = [];
+    updateBadges();
+    updateToolbarState();
+  }
+
+  function addSelection(element, options = {}) {
+    const { silent = false } = options;
     if (!isElementNode(element) || isPickerUi(element)) return;
 
     if (selections.some((selection) => selection.element === element)) {
-      showToast('Element already added. Press Enter to export or keep selecting.');
+      if (!silent) {
+        showToast('Element already added. Press Enter to export or keep selecting.');
+      }
       return;
     }
 
     if (selections.length >= MAX_SELECTIONS) {
-      showToast(`Selection limit reached (${MAX_SELECTIONS}). Press Enter to export.`);
+      if (!silent) {
+        showToast(`Selection limit reached (${MAX_SELECTIONS}). Press Enter to export.`);
+      }
       return;
     }
 
     const info = buildElementInfo(element, selections.length + 1);
     selections.push({ element, info });
     updateBadges();
+    updateToolbarState();
 
     const count = selections.length;
-    showToast(
-      `Added ${count} ${pluralize(count, 'element', 'elements')}. Enter exports, Backspace undoes.`,
-      1600
-    );
+    if (!silent) {
+      showToast(
+        `Added ${count} ${pluralize(count, 'element', 'elements')}. Send to Codex, Copy, or keep selecting.`,
+        1600
+      );
+    }
   }
 
   function removeLastSelection() {
@@ -1305,6 +1928,7 @@
 
     const removed = selections.pop();
     updateBadges();
+    updateToolbarState();
 
     const label = `${removed.info.tag}${removed.info.id ? `#${removed.info.id}` : ''}`;
     showToast(`Removed ${label}. ${selections.length} selected.`);
@@ -1724,7 +2348,32 @@
     return lines.join('\n');
   }
 
-  function buildBundle(screenshotData) {
+  function getBrowserContextSnapshot() {
+    const activeElement = document.activeElement && !isPickerUi(document.activeElement)
+      ? describeElementBrief(document.activeElement)
+      : null;
+
+    return {
+      paused: isPaused,
+      documentReadyState: document.readyState,
+      visibilityState: document.visibilityState,
+      viewport: {
+        width: window.innerWidth,
+        height: window.innerHeight,
+        devicePixelRatio: round(window.devicePixelRatio || 1, 3),
+      },
+      scroll: {
+        x: Math.round(window.scrollX),
+        y: Math.round(window.scrollY),
+        maxX: Math.max(0, Math.round(document.documentElement.scrollWidth - window.innerWidth)),
+        maxY: Math.max(0, Math.round(document.documentElement.scrollHeight - window.innerHeight)),
+      },
+      activeElement,
+      selectedText: truncate(window.getSelection ? window.getSelection().toString() : '', 240) || null,
+    };
+  }
+
+  function buildBundle(screenshotData, options = {}) {
     const elements = selections.map((selection) => {
       const crop = screenshotData.crops.find((item) => item.index === selection.info.index) || null;
       return {
@@ -1734,12 +2383,16 @@
     });
 
     const bundle = {
-      bundleVersion: '2.1.0',
+      bundleVersion: '2.2.0',
       generatedAt: new Date().toISOString(),
       page: {
         title: document.title,
         url: window.location.href,
+        referrer: document.referrer || null,
       },
+      browserContext: getBrowserContextSnapshot(),
+      userComment: getUserComment(),
+      tourContext: options.tourContext || getActiveTourContext(),
       totalElements: elements.length,
       screenshot: {
         status: screenshotData.status,
@@ -1987,6 +2640,72 @@
     return lines;
   }
 
+  function formatTourContextLines(tourContext) {
+    if (!tourContext) return [];
+
+    const stepTitle = tourContext.step?.title || `Step ${tourContext.stepIndex}`;
+    const lines = [
+      '## Tour Context',
+      `Tour: ${tourContext.tourTitle || 'Untitled tour'}`,
+      `Step: ${tourContext.stepIndex}/${tourContext.totalSteps} - ${stepTitle}`,
+    ];
+
+    if (tourContext.tourSummary) {
+      lines.push(`Tour summary: ${tourContext.tourSummary}`);
+    }
+
+    if (tourContext.step?.body) {
+      lines.push(`Step note: ${tourContext.step.body}`);
+    }
+
+    if (tourContext.step?.notes && tourContext.step.notes !== tourContext.step.body) {
+      lines.push(`Step notes: ${tourContext.step.notes}`);
+    }
+
+    if (tourContext.step?.url) {
+      lines.push(`Step URL: ${tourContext.step.url}`);
+    }
+
+    if (tourContext.step?.selector) {
+      lines.push(`Step selector: ${tourContext.step.selector}`);
+    } else if (tourContext.step?.text) {
+      lines.push(`Step text match: ${tourContext.step.text}`);
+    }
+
+    lines.push(`Current URL matched step: ${tourContext.currentUrlMatches ? 'yes' : 'no'}`);
+    lines.push(`Tour target found: ${tourContext.targetFound ? 'yes' : 'no'}`);
+
+    if (tourContext.askText) {
+      lines.push('', '### Ask Codex', tourContext.askText);
+    }
+
+    lines.push('');
+    return lines;
+  }
+
+  function formatSessionControlLines(bundle) {
+    if (bundle.tourContext) {
+      return [
+        '## Session Controls',
+        '- Tour mode: normal page selection was locked during this capture',
+        '- Ask Codex: captured only the highlighted tour step target',
+        '- Next / Back: move through the guided review',
+        '- Close / Escape: exit the guided review',
+        '',
+      ];
+    }
+
+    return [
+      '## Session Controls',
+      '- Click: add element to bundle',
+      '- Send to Codex: save bundle to the local QA inbox',
+      '- Copy / Enter: export bundle to clipboard',
+      '- Backspace/Delete/Ctrl+Z: remove latest selection',
+      '- Resume / Escape: resume or cancel picker',
+      '',
+    ];
+  }
+
   function formatBundleForClipboard(bundle, includeJson = true) {
     const lines = [
       '# Element Debug Bundle',
@@ -1996,12 +2715,11 @@
       `Title: ${bundle.page.title}`,
       `Elements: ${bundle.totalElements}`,
       '',
-      '## Session Controls',
-      '- Click: add element to bundle',
-      '- Enter: export bundle to clipboard',
-      '- Backspace/Delete/Ctrl+Z: remove latest selection',
-      '- Escape: cancel picker',
-      '',
+      bundle.userComment ? '## User Comment' : null,
+      bundle.userComment || null,
+      bundle.userComment ? '' : null,
+      ...formatTourContextLines(bundle.tourContext),
+      ...formatSessionControlLines(bundle),
       '## Visual Capture',
       `Status: ${bundle.screenshot.status}`,
       `Scope: ${bundle.screenshot.captureScope || 'unavailable'}`,
@@ -2022,7 +2740,7 @@
       '',
       '## Elements',
       '',
-    ];
+    ].filter((line) => line !== null);
 
     bundle.elements.forEach((elementInfo) => {
       lines.push(...formatElementSection(elementInfo));
@@ -2101,11 +2819,28 @@
     return 'summary';
   }
 
-  async function exportBundle() {
+  function ensureSelectionForExport() {
+    if (selections.length > 0) return true;
+
+    if (currentElement && !isPickerUi(currentElement)) {
+      addSelection(currentElement);
+      return true;
+    }
+
+    showToast('No elements selected. Click or hover an element first.');
+    return false;
+  }
+
+  async function buildCurrentBundle(options = {}) {
+    const screenshotData = await buildScreenshotData();
+    return buildBundle(screenshotData, options);
+  }
+
+  async function exportBundle(options = {}) {
+    const { cleanupAfter = true } = options;
     if (isExporting) return;
 
-    if (selections.length === 0) {
-      showToast('No elements selected. Click elements first.');
+    if (!ensureSelectionForExport()) {
       return;
     }
 
@@ -2113,8 +2848,7 @@
     const count = selections.length;
     showToast(`Building bundle for ${count} ${pluralize(count, 'element', 'elements')}...`, 2500);
 
-    const screenshotData = await buildScreenshotData();
-    const bundle = buildBundle(screenshotData);
+    const bundle = await buildCurrentBundle();
 
     try {
       const copyMode = await copyBundleToClipboard(bundle);
@@ -2125,7 +2859,11 @@
       } else {
         showToast('Copied summary bundle (payload was too large).', 2600);
       }
-      cleanup();
+      if (cleanupAfter) {
+        cleanup();
+      } else {
+        isExporting = false;
+      }
     } catch (error) {
       console.error('Failed to copy debug bundle:', error);
       isExporting = false;
@@ -2133,7 +2871,45 @@
     }
   }
 
+  async function sendBundleToCodex(options = {}) {
+    if (isExporting) return;
+
+    if (!ensureSelectionForExport()) {
+      return;
+    }
+
+    isExporting = true;
+    const count = selections.length;
+    showToast(`Sending ${count} ${pluralize(count, 'element', 'elements')} to Codex QA inbox...`, 2600);
+
+    try {
+      const bundle = await buildCurrentBundle(options);
+      const markdownBundle = stripInlineImages(bundle);
+      const markdown = formatBundleForClipboard(markdownBundle, true);
+      const response = await chrome.runtime.sendMessage({
+        type: 'ELEMENT_PICKER_SEND_TO_CODEX',
+        inboxUrl: CODEX_INBOX_URL,
+        bundle,
+        markdown,
+      });
+
+      if (!response?.ok) {
+        throw new Error(response?.error || 'Codex QA inbox did not accept the capture');
+      }
+
+      showToast(`Saved QA capture ${response.captureId || ''}. Tell Codex: "look at latest QA capture."`, 4200);
+      isExporting = false;
+    } catch (error) {
+      console.error('Failed to send bundle to Codex QA inbox:', error);
+      isExporting = false;
+      showToast(`Send failed: ${error?.message || 'start the Codex QA inbox server'}`, 4200);
+    }
+  }
+
   function onMouseMove(event) {
+    if (!isPaused) return;
+    if (isTourActive()) return;
+
     const element = document.elementFromPoint(event.clientX, event.clientY);
     if (!isElementNode(element) || isPickerUi(element)) return;
 
@@ -2144,11 +2920,26 @@
   }
 
   function onClick(event) {
+    if (isPickerUi(event.target)) return;
+    if (!isPaused) return;
+
     event.preventDefault();
     event.stopPropagation();
     event.stopImmediatePropagation();
 
     if (isExporting) return;
+
+    if (isTourActive()) {
+      showToast('Tour mode is focused on the highlighted step. Use Ask Codex, Next, or Close.', 2200);
+      return;
+    }
+
+    const clickedElement = document.elementFromPoint(event.clientX, event.clientY);
+    if (isElementNode(clickedElement) && !isPickerUi(clickedElement)) {
+      currentElement = clickedElement;
+      updateOverlay(clickedElement);
+    }
+
     if (!currentElement || isPickerUi(currentElement)) return;
 
     addSelection(currentElement);
@@ -2158,18 +2949,35 @@
     if (currentElement) {
       updateOverlay(currentElement);
     }
+    if (activeTourElement) {
+      updateTourHighlight(activeTourElement);
+      queueTourPanelPlacement();
+    }
     updateBadges();
   }
 
   function onKeyDown(event) {
+    if (isTextEntryElement(event.target)) {
+      return;
+    }
+
     if (event.key === 'Escape') {
       event.preventDefault();
+      if (isTourActive()) {
+        clearTour();
+        showToast('Guided review closed.', 1500);
+        return;
+      }
       cleanup();
       return;
     }
 
     if (event.key === 'Enter') {
       event.preventDefault();
+      if (isTourActive()) {
+        askCodexAboutTourStep();
+        return;
+      }
       exportBundle();
       return;
     }
@@ -2191,26 +2999,36 @@
     document.removeEventListener('keydown', onKeyDown, true);
     window.removeEventListener('scroll', onViewportChange, true);
     window.removeEventListener('resize', onViewportChange, true);
+    chrome.runtime.onMessage.removeListener(onRuntimeMessage);
 
     if (overlay) overlay.remove();
     if (badgeLayer) badgeLayer.remove();
+    if (toolbar) toolbar.remove();
+    clearTour();
 
     overlay = null;
     badgeLayer = null;
+    toolbar = null;
+    pauseButton = null;
+    countBadge = null;
+    commentInput = null;
     currentElement = null;
     selections = [];
     isExporting = false;
+    isPaused = true;
     window.__elementPickerActive = false;
   }
 
   createOverlay();
   createBadgeLayer();
+  createToolbar();
 
   document.addEventListener('mousemove', onMouseMove, true);
   document.addEventListener('click', onClick, true);
   document.addEventListener('keydown', onKeyDown, true);
   window.addEventListener('scroll', onViewportChange, true);
   window.addEventListener('resize', onViewportChange, true);
+  chrome.runtime.onMessage.addListener(onRuntimeMessage);
 
-  showToast('Bundle mode active: click elements, Enter exports, Backspace undoes, ESC cancels.', 3200);
+  showToast('QA Bridge paused: click elements, then Send to Codex or Copy. Resume restores page interaction.', 3600);
 })();

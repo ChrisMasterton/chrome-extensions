@@ -1,16 +1,20 @@
 // Handle extension icon click
-chrome.action.onClicked.addListener(async (tab) => {
-  // Inject the picker script into the current tab
+const pendingToursByTab = new Map();
+
+async function injectPicker(tabId) {
   await chrome.scripting.executeScript({
-    target: { tabId: tab.id },
+    target: { tabId },
     files: ['picker.js']
   });
-  
-  // Inject styles
+
   await chrome.scripting.insertCSS({
-    target: { tabId: tab.id },
+    target: { tabId },
     files: ['picker.css']
   });
+}
+
+chrome.action.onClicked.addListener(async (tab) => {
+  await injectPicker(tab.id);
 });
 
 function downloadDataUrl(dataUrl, filename) {
@@ -44,6 +48,96 @@ function downloadDataUrl(dataUrl, filename) {
   });
 }
 
+async function postBundleToInbox(inboxUrl, payload) {
+  const targetUrl = inboxUrl || 'http://127.0.0.1:43117/captures';
+
+  try {
+    const response = await fetch(targetUrl, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+
+    let body = null;
+    try {
+      body = await response.json();
+    } catch {
+      body = null;
+    }
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        status: response.status,
+        error: body?.error || `Inbox server returned HTTP ${response.status}`,
+      };
+    }
+
+    return {
+      ok: true,
+      ...body,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error?.message || 'Unable to reach Codex QA inbox server',
+    };
+  }
+}
+
+async function getLatestTour(tourUrl) {
+  const targetUrl = tourUrl || 'http://127.0.0.1:43117/tours/latest';
+
+  try {
+    const response = await fetch(targetUrl);
+    let body = null;
+    try {
+      body = await response.json();
+    } catch {
+      body = null;
+    }
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        status: response.status,
+        error: body?.error || `Inbox server returned HTTP ${response.status}`,
+      };
+    }
+
+    return {
+      ok: true,
+      ...body,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error?.message || 'Unable to reach Codex QA inbox server',
+    };
+  }
+}
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.status !== 'complete' || !pendingToursByTab.has(tabId)) {
+    return;
+  }
+
+  const pendingTour = pendingToursByTab.get(tabId);
+  pendingToursByTab.delete(tabId);
+
+  injectPicker(tabId)
+    .then(() => chrome.tabs.sendMessage(tabId, {
+      type: 'ELEMENT_PICKER_RESUME_TOUR',
+      tour: pendingTour.tour,
+      stepIndex: pendingTour.stepIndex,
+    }))
+    .catch((error) => {
+      console.warn('Unable to continue guided review after navigation:', error);
+    });
+});
+
 // Capture the visible tab so the content script can build element crops.
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message) {
@@ -69,6 +163,52 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.type === 'ELEMENT_PICKER_SAVE_IMAGE') {
     downloadDataUrl(message.dataUrl, message.filename).then(sendResponse);
+    return true;
+  }
+
+  if (message.type === 'ELEMENT_PICKER_SEND_TO_CODEX') {
+    postBundleToInbox(message.inboxUrl, {
+      source: {
+        extension: 'element-picker-qa-bridge',
+        version: chrome.runtime.getManifest().version,
+        tabId: sender?.tab?.id || null,
+        tabUrl: sender?.tab?.url || null,
+      },
+      bundle: message.bundle,
+      markdown: message.markdown || null,
+    }).then(sendResponse);
+    return true;
+  }
+
+  if (message.type === 'ELEMENT_PICKER_GET_LATEST_TOUR') {
+    getLatestTour(message.tourUrl).then(sendResponse);
+    return true;
+  }
+
+  if (message.type === 'ELEMENT_PICKER_OPEN_TOUR_STEP') {
+    const tabId = sender?.tab?.id;
+    if (!tabId || !message.url) {
+      sendResponse({ ok: false, error: 'Missing active tab or tour step URL' });
+      return;
+    }
+
+    pendingToursByTab.set(tabId, {
+      tour: message.tour || null,
+      stepIndex: message.stepIndex || 0,
+    });
+
+    chrome.tabs.update(tabId, { url: message.url }, () => {
+      if (chrome.runtime.lastError) {
+        pendingToursByTab.delete(tabId);
+        sendResponse({
+          ok: false,
+          error: chrome.runtime.lastError.message || 'Unable to open tour step',
+        });
+        return;
+      }
+
+      sendResponse({ ok: true });
+    });
     return true;
   }
 });

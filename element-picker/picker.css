@@ -14,3 +14,286 @@
 #__element-picker-overlay * {
   pointer-events: none !important;
 }
+
+#__element-picker-toolbar {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 2147483647;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100vw - 32px);
+  padding: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.4);
+  border-radius: 8px;
+  background: rgba(17, 24, 39, 0.96);
+  color: #f8fafc;
+  box-shadow: 0 16px 36px rgba(15, 23, 42, 0.35);
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 13px;
+  line-height: 1;
+  pointer-events: auto;
+}
+
+#__element-picker-toolbar .element-picker-toolbar-title {
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+#__element-picker-toolbar .element-picker-toolbar-count {
+  min-width: 76px;
+  color: #cbd5e1;
+  white-space: nowrap;
+}
+
+#__element-picker-toolbar .element-picker-toolbar-comment {
+  appearance: none;
+  box-sizing: border-box;
+  width: min(280px, 28vw);
+  min-width: 180px;
+  height: 30px;
+  max-height: 30px;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  border-radius: 6px;
+  padding: 7px 10px;
+  background: rgba(15, 23, 42, 0.92);
+  color: #f8fafc;
+  font: inherit;
+  line-height: 1.2;
+  resize: none;
+  outline: none;
+}
+
+#__element-picker-toolbar .element-picker-toolbar-comment::placeholder {
+  color: #94a3b8;
+}
+
+#__element-picker-toolbar .element-picker-toolbar-comment:focus {
+  border-color: rgba(96, 165, 250, 0.85);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.3);
+}
+
+#__element-picker-toolbar .element-picker-toolbar-button {
+  appearance: none;
+  height: 30px;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  border-radius: 6px;
+  padding: 0 10px;
+  background: rgba(30, 41, 59, 0.95);
+  color: #f8fafc;
+  font: inherit;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+#__element-picker-toolbar .element-picker-toolbar-button:hover {
+  background: rgba(51, 65, 85, 0.98);
+}
+
+#__element-picker-toolbar .element-picker-toolbar-button-primary {
+  border-color: rgba(37, 99, 235, 0.7);
+  background: #2563eb;
+}
+
+#__element-picker-toolbar .element-picker-toolbar-button-primary:hover {
+  background: #1d4ed8;
+}
+
+#__element-picker-toolbar.element-picker-toolbar-hidden-by-tour {
+  display: none;
+}
+
+#__element-picker-tour-highlight {
+  position: fixed;
+  pointer-events: none;
+  z-index: 2147483645;
+  border: 3px solid #f97316;
+  border-radius: 6px;
+  background: rgba(249, 115, 22, 0.12);
+  box-shadow:
+    0 0 0 3px rgba(255, 255, 255, 0.9),
+    0 0 0 6px rgba(249, 115, 22, 0.38),
+    0 16px 40px rgba(15, 23, 42, 0.2);
+  transition: top 0.12s ease-out, left 0.12s ease-out, width 0.12s ease-out, height 0.12s ease-out;
+}
+
+#__element-picker-tour-panel {
+  position: fixed;
+  z-index: 2147483647;
+  width: min(360px, calc(100vw - 32px));
+  padding: 14px;
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.98);
+  color: #111827;
+  box-shadow: 0 18px 44px rgba(15, 23, 42, 0.28);
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 13px;
+  line-height: 1.35;
+  pointer-events: auto;
+}
+
+#__element-picker-tour-panel[data-position="top-right"] {
+  top: 16px;
+  right: 16px;
+  bottom: auto;
+  left: auto;
+}
+
+#__element-picker-tour-panel[data-position="bottom-right"] {
+  top: auto;
+  right: 16px;
+  bottom: 16px;
+  left: auto;
+}
+
+#__element-picker-tour-panel[data-position="bottom-left"] {
+  top: auto;
+  right: auto;
+  bottom: 16px;
+  left: 16px;
+}
+
+#__element-picker-tour-panel[data-position="top-left"] {
+  top: 16px;
+  right: auto;
+  bottom: auto;
+  left: 16px;
+}
+
+#__element-picker-tour-panel .element-picker-tour-eyebrow {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+#__element-picker-tour-panel .element-picker-tour-title {
+  margin-top: 6px;
+  color: #0f172a;
+  font-size: 16px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+#__element-picker-tour-panel .element-picker-tour-body {
+  margin-top: 8px;
+  color: #334155;
+  overflow-wrap: anywhere;
+}
+
+#__element-picker-tour-panel .element-picker-tour-status {
+  margin-top: 10px;
+  padding: 8px;
+  border-radius: 6px;
+  background: #f8fafc;
+  color: #475569;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+#__element-picker-tour-panel .element-picker-tour-ask {
+  appearance: none;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 58px;
+  max-height: 140px;
+  margin-top: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.7);
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: #ffffff;
+  color: #0f172a;
+  font: inherit;
+  line-height: 1.35;
+  resize: vertical;
+  outline: none;
+}
+
+#__element-picker-tour-panel .element-picker-tour-ask::placeholder {
+  color: #94a3b8;
+}
+
+#__element-picker-tour-panel .element-picker-tour-ask:focus {
+  border-color: rgba(37, 99, 235, 0.8);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.16);
+}
+
+#__element-picker-tour-panel .element-picker-tour-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+#__element-picker-tour-panel .element-picker-tour-button {
+  appearance: none;
+  height: 30px;
+  border: 1px solid rgba(148, 163, 184, 0.55);
+  border-radius: 6px;
+  padding: 0 10px;
+  background: #ffffff;
+  color: #0f172a;
+  font: inherit;
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+#__element-picker-tour-panel .element-picker-tour-button:hover {
+  background: #f8fafc;
+}
+
+#__element-picker-tour-panel .element-picker-tour-button-primary {
+  border-color: rgba(37, 99, 235, 0.75);
+  background: #2563eb;
+  color: #ffffff;
+}
+
+#__element-picker-tour-panel .element-picker-tour-button-primary:hover {
+  background: #1d4ed8;
+}
+
+#__element-picker-tour-panel .element-picker-tour-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+@media (max-width: 720px) {
+  #__element-picker-toolbar {
+    left: 8px;
+    right: 8px;
+    bottom: 8px;
+    flex-wrap: wrap;
+  }
+
+  #__element-picker-toolbar .element-picker-toolbar-comment {
+    width: 100%;
+    flex: 1 0 100%;
+    min-width: 0;
+    height: 34px;
+    max-height: 34px;
+  }
+
+  #__element-picker-tour-panel {
+    width: auto;
+  }
+
+  #__element-picker-tour-panel[data-position="top-right"],
+  #__element-picker-tour-panel[data-position="top-left"] {
+    top: 8px;
+    right: 8px;
+    bottom: auto;
+    left: 8px;
+  }
+
+  #__element-picker-tour-panel[data-position="bottom-right"],
+  #__element-picker-tour-panel[data-position="bottom-left"] {
+    top: auto;
+    right: 8px;
+    bottom: 8px;
+    left: 8px;
+  }
+}

@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Vibe Debugger Smoke Page</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f3f6fb;
+      color: #172033;
+    }
+
+    body {
+      margin: 0;
+      padding: 32px;
+    }
+
+    main {
+      max-width: 1040px;
+      margin: 0 auto;
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: 30px;
+    }
+
+    .lede {
+      margin: 0 0 24px;
+      color: #55657d;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 16px;
+    }
+
+    .panel {
+      min-height: 190px;
+      border: 1px solid #d6deeb;
+      border-radius: 8px;
+      padding: 16px;
+      background: #ffffff;
+      box-shadow: 0 10px 28px rgba(24, 40, 72, 0.08);
+    }
+
+    .panel h2 {
+      margin: 0 0 10px;
+      font-size: 16px;
+    }
+
+    .stack {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    button,
+    input {
+      box-sizing: border-box;
+      height: 38px;
+      border: 1px solid #b8c4d6;
+      border-radius: 6px;
+      padding: 0 12px;
+      font: inherit;
+    }
+
+    button {
+      background: #1f6feb;
+      color: #ffffff;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      background: #90a4c2;
+    }
+
+    input {
+      width: 100%;
+      background: #ffffff;
+      color: #172033;
+    }
+
+    .status {
+      min-height: 24px;
+      color: #334155;
+    }
+
+    .hidden-wrapper {
+      margin-top: 10px;
+      padding: 10px;
+      border: 1px dashed #95a3b8;
+      border-radius: 6px;
+    }
+
+    .hidden-wrapper.is-hidden {
+      display: none;
+    }
+
+    .list {
+      margin: 10px 0 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .list li {
+      margin-top: 6px;
+      padding: 8px;
+      border-radius: 6px;
+      background: #edf3ff;
+    }
+
+    .empty {
+      margin-top: 10px;
+      padding: 10px;
+      border-radius: 6px;
+      background: #fff4d6;
+      color: #6c4b00;
+    }
+
+    .route {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      color: #475569;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Vibe Debugger Smoke Page</h1>
+    <p class="lede">Use Element Picker QA Bridge to watch targets, record changes, and send a trace.</p>
+
+    <section class="grid">
+      <article class="panel stack">
+        <h2>Disabled And Text Changes</h2>
+        <button id="save-button" data-testid="save-button">Save</button>
+        <div id="save-status" class="status" data-testid="save-status">Idle</div>
+      </article>
+
+      <article class="panel stack">
+        <h2>Hidden Ancestor</h2>
+        <button id="toggle-details" data-testid="toggle-details">Toggle details wrapper</button>
+        <div id="details-wrapper" class="hidden-wrapper" data-testid="details-wrapper">
+          <div id="details-target" data-testid="details-target">Nested details target</div>
+        </div>
+      </article>
+
+      <article class="panel stack">
+        <h2>Filter To Empty</h2>
+        <input id="filter-input" data-testid="filter-input" placeholder="Filter items" autocomplete="off">
+        <ul id="item-list" class="list" data-testid="item-list"></ul>
+        <div id="empty-state" class="empty" data-testid="empty-state" hidden>No matching items</div>
+      </article>
+
+      <article class="panel stack">
+        <h2>Network, Timer, And Route</h2>
+        <button id="network-button" data-testid="network-button">Fetch fake data</button>
+        <button id="timer-button" data-testid="timer-button">Delay update</button>
+        <button id="route-button" data-testid="route-button">Push route</button>
+        <div id="network-status" class="status" data-testid="network-status">Network idle</div>
+        <div id="route-status" class="route" data-testid="route-status">Route: initial</div>
+      </article>
+    </section>
+  </main>
+
+  <script>
+    const items = ['Alpha ridge', 'Beta valley', 'Gamma pass', 'Delta lake'];
+    const state = {
+      saving: false,
+      detailsVisible: true,
+      filter: '',
+      networkStatus: 'Network idle',
+      routeCount: 0,
+    };
+
+    const saveButton = document.querySelector('#save-button');
+    const saveStatus = document.querySelector('#save-status');
+    const toggleDetails = document.querySelector('#toggle-details');
+    const detailsWrapper = document.querySelector('#details-wrapper');
+    const filterInput = document.querySelector('#filter-input');
+    const itemList = document.querySelector('#item-list');
+    const emptyState = document.querySelector('#empty-state');
+    const networkButton = document.querySelector('#network-button');
+    const timerButton = document.querySelector('#timer-button');
+    const routeButton = document.querySelector('#route-button');
+    const networkStatus = document.querySelector('#network-status');
+    const routeStatus = document.querySelector('#route-status');
+
+    function vibeWatch() {
+      window.__VIBE_DEBUGGER__?.watch('Smoke.state', state);
+      window.__VIBE_DEBUGGER__?.visibility('Smoke.emptyState', {
+        visible: !emptyState.hidden,
+        filter: state.filter,
+      });
+      window.__VIBE_DEBUGGER__?.watch('Smoke.saveDisabled', saveButton.disabled);
+    }
+
+    function renderList() {
+      const query = state.filter.trim().toLowerCase();
+      const visibleItems = items.filter((item) => item.toLowerCase().includes(query));
+      itemList.replaceChildren(...visibleItems.map((item) => {
+        const li = document.createElement('li');
+        li.textContent = item;
+        return li;
+      }));
+      emptyState.hidden = visibleItems.length > 0;
+      vibeWatch();
+    }
+
+    saveButton.addEventListener('click', () => {
+      window.__VIBE_DEBUGGER__?.action('Smoke.saveClicked', { before: state.saving });
+      state.saving = true;
+      saveButton.disabled = true;
+      saveButton.textContent = 'Saving...';
+      saveStatus.textContent = 'Save in progress';
+      vibeWatch();
+
+      setTimeout(() => {
+        state.saving = false;
+        saveButton.disabled = false;
+        saveButton.textContent = 'Save';
+        saveStatus.textContent = 'Saved after timer';
+        vibeWatch();
+      }, 900);
+    });
+
+    toggleDetails.addEventListener('click', () => {
+      state.detailsVisible = !state.detailsVisible;
+      detailsWrapper.classList.toggle('is-hidden', !state.detailsVisible);
+      window.__VIBE_DEBUGGER__?.action('Smoke.detailsVisibilityChanged', {
+        visible: state.detailsVisible,
+      });
+      vibeWatch();
+    });
+
+    filterInput.addEventListener('input', () => {
+      state.filter = filterInput.value;
+      renderList();
+    });
+
+    networkButton.addEventListener('click', async () => {
+      state.networkStatus = 'Fetching';
+      networkStatus.textContent = state.networkStatus;
+      vibeWatch();
+      const response = await fetch('data:application/json,{"message":"Fake response loaded"}');
+      const data = await response.json();
+      state.networkStatus = data.message;
+      networkStatus.textContent = state.networkStatus;
+      vibeWatch();
+    });
+
+    timerButton.addEventListener('click', () => {
+      networkStatus.textContent = 'Waiting for delayed update';
+      setTimeout(() => {
+        networkStatus.textContent = 'Delayed update fired';
+        window.__VIBE_DEBUGGER__?.trace('Smoke.timerFinished', {
+          status: networkStatus.textContent,
+        });
+        vibeWatch();
+      }, 700);
+    });
+
+    routeButton.addEventListener('click', () => {
+      state.routeCount += 1;
+      history.pushState({ routeCount: state.routeCount }, '', `#route-${state.routeCount}`);
+      routeStatus.textContent = `Route: ${location.hash || 'initial'}`;
+      vibeWatch();
+    });
+
+    renderList();
+    vibeWatch();
+  </script>
+</body>
+</html>

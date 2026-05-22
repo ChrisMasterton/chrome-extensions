@@ -1,7 +1,18 @@
 // Handle extension icon click
 const pendingToursByTab = new Map();
+const CODEX_TRACE_URL = 'http://127.0.0.1:43117/traces';
 
 async function injectPicker(tabId) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ['vibe-page-probe.js'],
+      world: 'MAIN'
+    });
+  } catch (error) {
+    console.warn('Unable to inject Vibe Debugger page probe:', error);
+  }
+
   await chrome.scripting.executeScript({
     target: { tabId },
     files: ['picker.js']
@@ -83,6 +94,45 @@ async function postBundleToInbox(inboxUrl, payload) {
     return {
       ok: false,
       error: error?.message || 'Unable to reach Codex QA inbox server',
+    };
+  }
+}
+
+async function postTraceToInbox(traceUrl, payload) {
+  const targetUrl = traceUrl || CODEX_TRACE_URL;
+
+  try {
+    const response = await fetch(targetUrl, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+
+    let body = null;
+    try {
+      body = await response.json();
+    } catch {
+      body = null;
+    }
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        status: response.status,
+        error: body?.error || `Inbox server returned HTTP ${response.status}`,
+      };
+    }
+
+    return {
+      ok: true,
+      ...body,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error?.message || 'Unable to reach Codex QA trace inbox server',
     };
   }
 }
@@ -175,6 +225,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         tabUrl: sender?.tab?.url || null,
       },
       bundle: message.bundle,
+      markdown: message.markdown || null,
+    }).then(sendResponse);
+    return true;
+  }
+
+  if (message.type === 'ELEMENT_PICKER_SEND_TRACE_TO_CODEX') {
+    postTraceToInbox(message.traceUrl, {
+      source: {
+        extension: 'element-picker-qa-bridge',
+        feature: 'vibe-debugger',
+        version: chrome.runtime.getManifest().version,
+        tabId: sender?.tab?.id || null,
+        tabUrl: sender?.tab?.url || null,
+      },
+      trace: message.trace,
       markdown: message.markdown || null,
     }).then(sendResponse);
     return true;

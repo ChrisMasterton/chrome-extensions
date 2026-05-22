@@ -9,6 +9,12 @@ const PORT = Number.parseInt(process.env.CODEX_QA_INBOX_PORT || '43117', 10);
 const ROOT = process.env.CODEX_QA_INBOX_DIR || join(homedir(), 'CodexInbox', 'web-qa');
 const MAX_BODY_BYTES = Number.parseInt(process.env.CODEX_QA_MAX_BODY_BYTES || String(80 * 1024 * 1024), 10);
 const TOUR_SCHEMA_VERSION = '1.0';
+const TRACE_SCHEMA_VERSION = '1.0';
+const TRACE_MAX_EVENTS = Number.parseInt(process.env.CODEX_QA_TRACE_MAX_EVENTS || '600', 10);
+const TRACE_MAX_SAMPLES = Number.parseInt(process.env.CODEX_QA_TRACE_MAX_SAMPLES || '600', 10);
+const TRACE_MAX_MUTATIONS = Number.parseInt(process.env.CODEX_QA_TRACE_MAX_MUTATIONS || '300', 10);
+const TRACE_MAX_NETWORK = Number.parseInt(process.env.CODEX_QA_TRACE_MAX_NETWORK || '200', 10);
+const TRACE_MAX_CONSOLE = Number.parseInt(process.env.CODEX_QA_TRACE_MAX_CONSOLE || '120', 10);
 
 function sendJson(response, status, body) {
   response.writeHead(status, {
@@ -257,6 +263,215 @@ async function writeCapture(payload) {
   return manifest;
 }
 
+function trimArray(value, maxItems, fieldName, trimmed) {
+  if (!Array.isArray(value)) return [];
+  if (value.length <= maxItems) return value;
+
+  trimmed[fieldName] = {
+    originalCount: value.length,
+    keptCount: maxItems,
+    omittedCount: value.length - maxItems,
+  };
+  return value.slice(-maxItems);
+}
+
+function getTraceHost(trace, payload) {
+  const pageUrl = trace?.page?.url || payload?.source?.tabUrl || '';
+  try {
+    return pageUrl ? new URL(pageUrl).hostname : 'page';
+  } catch {
+    return 'page';
+  }
+}
+
+function normalizeTrace(payload, receivedAt) {
+  const source = payload?.trace && typeof payload.trace === 'object'
+    ? payload.trace
+    : payload;
+
+  if (!source || typeof source !== 'object' || Array.isArray(source)) {
+    throw new Error('Trace payload must be a JSON object');
+  }
+
+  const trimmed = {};
+  const host = getTraceHost(source, payload);
+  const traceId = source.traceId
+    ? slugify(source.traceId, 'trace')
+    : `${timestampId(receivedAt)}-${slugify(host, 'page')}`;
+
+  const trace = {
+    schemaVersion: TRACE_SCHEMA_VERSION,
+    traceId,
+    page: source.page || null,
+    startedAt: source.startedAt || receivedAt.toISOString(),
+    endedAt: source.endedAt || receivedAt.toISOString(),
+    durationMs: Number.isFinite(source.durationMs) ? source.durationMs : null,
+    watchTargets: Array.isArray(source.watchTargets) ? source.watchTargets : [],
+    events: trimArray(source.events, TRACE_MAX_EVENTS, 'events', trimmed),
+    samples: trimArray(source.samples, TRACE_MAX_SAMPLES, 'samples', trimmed),
+    mutations: trimArray(source.mutations, TRACE_MAX_MUTATIONS, 'mutations', trimmed),
+    network: trimArray(source.network, TRACE_MAX_NETWORK, 'network', trimmed),
+    console: trimArray(source.console, TRACE_MAX_CONSOLE, 'console', trimmed),
+    summaries: Array.isArray(source.summaries) ? source.summaries.slice(0, 80) : [],
+    browserContext: source.browserContext || null,
+    userComment: source.userComment || null,
+    source: payload?.source || source.source || null,
+  };
+
+  if (Object.keys(trimmed).length > 0) {
+    trace.trimmed = trimmed;
+  }
+
+  return trace;
+}
+
+function formatTraceValue(value) {
+  if (value === null) return 'null';
+  if (value === undefined) return 'undefined';
+  if (typeof value === 'string') return value.length > 120 ? `${value.slice(0, 117)}...` : value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+
+  try {
+    const json = JSON.stringify(value);
+    return json.length > 160 ? `${json.slice(0, 157)}...` : json;
+  } catch {
+    return '[unserializable]';
+  }
+}
+
+function formatTraceDiff(diff) {
+  const before = formatTraceValue(diff.before);
+  const after = formatTraceValue(diff.after);
+  return `${diff.path || 'value'}: ${before} -> ${after}`;
+}
+
+function buildTraceMarkdown(trace, manifest) {
+  const lines = [
+    '# Vibe Debugger Trace',
+    '',
+    `Trace ID: ${trace.traceId}`,
+    `Captured at: ${manifest.receivedAt}`,
+    `URL: ${trace.page?.url || 'unknown'}`,
+    `Title: ${trace.page?.title || 'unknown'}`,
+    `Duration: ${trace.durationMs ?? 'unknown'} ms`,
+    `Watch targets: ${trace.watchTargets.length}`,
+    `Events: ${trace.events.length}`,
+    `Samples: ${trace.samples.length}`,
+    `Mutations: ${trace.mutations.length}`,
+    `Network events: ${trace.network.length}`,
+    `Console events: ${trace.console.length}`,
+    '',
+  ];
+
+  if (trace.userComment) {
+    lines.push('## User Comment', '', trace.userComment, '');
+  }
+
+  if (trace.trimmed) {
+    lines.push('## Trimmed Data', '');
+    for (const [field, details] of Object.entries(trace.trimmed)) {
+      lines.push(`- ${field}: kept ${details.keptCount} of ${details.originalCount}; omitted ${details.omittedCount}`);
+    }
+    lines.push('');
+  }
+
+  if (trace.watchTargets.length > 0) {
+    lines.push('## Watch Targets', '');
+    trace.watchTargets.forEach((target) => {
+      const label = target.label || target.selector || target.watchId;
+      const locator = target.locator?.value || target.locator?.selector || target.selector || 'no locator';
+      lines.push(`- ${target.watchId}: ${label} (${target.kind || 'element'}; ${locator})`);
+    });
+    lines.push('');
+  }
+
+  const changedSamples = trace.samples
+    .filter((sample) => Array.isArray(sample.diffs) && sample.diffs.length > 0)
+    .slice(-40);
+
+  if (changedSamples.length > 0) {
+    lines.push('## Recent Diffs', '');
+    changedSamples.forEach((sample) => {
+      const cause = sample.cause?.label || sample.causeEventId || 'unknown cause';
+      lines.push(`### +${sample.timeOffsetMs ?? '?'} ms - ${sample.watchId || 'watch'} (${cause})`);
+      sample.diffs.slice(0, 12).forEach((diff) => {
+        lines.push(`- ${formatTraceDiff(diff)}`);
+      });
+      if (sample.diffs.length > 12) {
+        lines.push(`- ...${sample.diffs.length - 12} more diffs omitted`);
+      }
+      lines.push('');
+    });
+  }
+
+  if (trace.summaries.length > 0) {
+    lines.push('## Explanations', '');
+    trace.summaries.forEach((summary) => {
+      lines.push(`- ${summary.title || summary.kind || 'Summary'}: ${summary.body || summary.reason || JSON.stringify(summary)}`);
+    });
+    lines.push('');
+  }
+
+  if (trace.events.length > 0) {
+    lines.push('## Timeline', '');
+    trace.events.slice(-80).forEach((event) => {
+      lines.push(`- +${event.timeOffsetMs ?? '?'} ms ${event.kind || 'event'}: ${event.label || event.url || event.eventId || ''}`);
+    });
+    lines.push('');
+  }
+
+  lines.push('## Files', '');
+  lines.push(`- manifest: ${manifest.files.manifest}`);
+  lines.push(`- trace JSON: ${manifest.files.trace}`);
+  lines.push(`- trace Markdown: ${manifest.files.markdown}`);
+
+  return `${lines.join('\n')}\n`;
+}
+
+async function writeTrace(payload) {
+  const receivedAt = new Date();
+  const trace = normalizeTrace(payload, receivedAt);
+  const traceDir = join(ROOT, 'traces', 'history', trace.traceId);
+  const latestDir = join(ROOT, 'traces', 'latest');
+
+  await mkdir(traceDir, { recursive: true });
+
+  const manifest = {
+    traceId: trace.traceId,
+    receivedAt: receivedAt.toISOString(),
+    page: trace.page || null,
+    startedAt: trace.startedAt,
+    endedAt: trace.endedAt,
+    durationMs: trace.durationMs,
+    totalWatchTargets: trace.watchTargets.length,
+    totalEvents: trace.events.length,
+    totalSamples: trace.samples.length,
+    totalMutations: trace.mutations.length,
+    rootDir: ROOT,
+    traceDir,
+    latestDir,
+    files: {
+      manifest: join(traceDir, 'manifest.json'),
+      trace: join(traceDir, 'trace.json'),
+      markdown: join(traceDir, 'trace.md'),
+    },
+    source: trace.source || payload.source || null,
+    trimmed: trace.trimmed || null,
+  };
+
+  const markdown = payload.markdown || buildTraceMarkdown(trace, manifest);
+
+  await writeFile(join(traceDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
+  await writeFile(join(traceDir, 'trace.json'), `${JSON.stringify(trace, null, 2)}\n`);
+  await writeFile(join(traceDir, 'trace.md'), markdown.endsWith('\n') ? markdown : `${markdown}\n`);
+
+  await rm(latestDir, { recursive: true, force: true });
+  await mkdir(latestDir, { recursive: true });
+  await cp(traceDir, latestDir, { recursive: true });
+
+  return manifest;
+}
+
 function normalizeTourStep(step, index) {
   if (!step || typeof step !== 'object' || Array.isArray(step)) {
     throw new Error(`Tour step ${index + 1} must be a JSON object`);
@@ -368,6 +583,30 @@ async function readLatestTour() {
   }
 }
 
+async function readLatestTrace() {
+  const latestDir = join(ROOT, 'traces', 'latest');
+
+  try {
+    const [manifestJson, traceJson, markdown] = await Promise.all([
+      readFile(join(latestDir, 'manifest.json'), 'utf8'),
+      readFile(join(latestDir, 'trace.json'), 'utf8'),
+      readFile(join(latestDir, 'trace.md'), 'utf8'),
+    ]);
+
+    return {
+      manifest: JSON.parse(manifestJson),
+      trace: JSON.parse(traceJson),
+      markdown,
+    };
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      return null;
+    }
+
+    throw error;
+  }
+}
+
 const server = createServer(async (request, response) => {
   if (request.method === 'OPTIONS') {
     sendText(response, 204, '');
@@ -399,6 +638,24 @@ const server = createServer(async (request, response) => {
     return;
   }
 
+  if (request.method === 'GET' && requestUrl.pathname === '/traces/latest') {
+    try {
+      const latest = await readLatestTrace();
+      if (!latest) {
+        sendJson(response, 404, { ok: false, error: 'No vibe debugger trace has been posted yet' });
+        return;
+      }
+
+      sendJson(response, 200, { ok: true, ...latest });
+    } catch (error) {
+      sendJson(response, 500, {
+        ok: false,
+        error: error?.message || 'Unable to read latest trace',
+      });
+    }
+    return;
+  }
+
   if (request.method === 'POST' && requestUrl.pathname === '/tours') {
     try {
       const rawBody = await readBody(request);
@@ -419,8 +676,38 @@ const server = createServer(async (request, response) => {
     return;
   }
 
+  if (request.method === 'POST' && requestUrl.pathname === '/traces') {
+    try {
+      const rawBody = await readBody(request);
+      const payload = JSON.parse(rawBody);
+      const tracePayload = payload.trace || payload;
+      if (!tracePayload || typeof tracePayload !== 'object' || Array.isArray(tracePayload)) {
+        sendJson(response, 400, { ok: false, error: 'Missing JSON object field: trace' });
+        return;
+      }
+
+      const manifest = await writeTrace(payload);
+      sendJson(response, 200, {
+        ok: true,
+        traceId: manifest.traceId,
+        traceDir: manifest.traceDir,
+        latestDir: manifest.latestDir,
+        trimmed: manifest.trimmed,
+      });
+    } catch (error) {
+      sendJson(response, 500, {
+        ok: false,
+        error: error?.message || 'Unable to save trace',
+      });
+    }
+    return;
+  }
+
   if (request.method !== 'POST' || requestUrl.pathname !== '/captures') {
-    sendJson(response, 404, { ok: false, error: 'Use POST /captures, POST /tours, GET /tours/latest, or GET /health' });
+    sendJson(response, 404, {
+      ok: false,
+      error: 'Use POST /captures, POST /tours, POST /traces, GET /tours/latest, GET /traces/latest, or GET /health',
+    });
     return;
   }
 
@@ -449,5 +736,5 @@ const server = createServer(async (request, response) => {
 
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`Codex QA inbox listening on http://127.0.0.1:${PORT}`);
-  console.log(`Writing captures and guided review tours to ${ROOT}`);
+  console.log(`Writing captures, traces, and guided review tours to ${ROOT}`);
 });

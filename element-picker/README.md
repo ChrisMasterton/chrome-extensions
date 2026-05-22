@@ -1,8 +1,8 @@
 # Element Picker QA Bridge
 
-A Chrome/Arc extension that lets you pause a page, select suspicious UI, and hand a rich debug bundle to Codex through a local inbox. Clipboard export still works.
+A Chrome/Edge/Arc extension that lets you pause a page, select suspicious UI, and hand a rich debug bundle to Codex through a local inbox. Clipboard export still works.
 
-## Major Updates in 1.8
+## Major Updates in 1.9
 
 This release turns the old clipboard-oriented element picker into a two-way QA bridge between the browser and Codex:
 
@@ -17,6 +17,7 @@ This release turns the old clipboard-oriented element picker into a two-way QA b
 - Added **Ask Codex** inside tour steps, capturing the highlighted target plus the typed question or observation.
 - Added `tourContext` and `userComment` to generated bundles so the next agent turn knows why the capture exists.
 - Added smarter visual output: highlighted visible-viewport images, padded element crops, saved image files, and image materialization in the inbox server.
+- Added the first **Vibe Debugger** implementation: watch selected UI, record state diffs over time, attribute changes to likely causes, and export traces to Codex.
 - Added `package.json` scripts for `npm run inbox` and `npm run check`.
 - Updated the Manifest V3 metadata, extension name, host permission for the local inbox, and version.
 
@@ -41,9 +42,12 @@ The reverse loop is:
 
 - `manifest.json`: Manifest V3 extension metadata and local inbox host permission.
 - `background.js`: extension injection, screenshot capture, image downloads, local inbox posting, latest tour loading, and cross-page tour continuation.
-- `picker.js`: page overlay, toolbar, element analysis, locator ranking, screenshots, clipboard export, Send to Codex, and guided tour UI.
+- `picker.js`: page overlay, toolbar, element analysis, locator ranking, screenshots, clipboard export, Send to Codex, guided tour UI, and Vibe Debugger recording.
+- `vibe-page-probe.js`: main-world probe for fetch/XHR, route, timer, storage, console, and optional app-provided trace events.
 - `picker.css`: overlay, toolbar, responsive controls, tour panel, and tour highlight styling.
 - `scripts/codex-qa-inbox-server.mjs`: local capture/tour server used by Codex and the extension.
+- `smoke/vibe-debugger-smoke.html`: dependency-free test page for the Vibe Debugger watch and trace workflow.
+- `snippets/vibe-debugger-app-probes.js`: optional app-side helpers for React, Redux, Zustand, and React Query/TanStack Query probes.
 - `package.json`: local scripts for running the inbox and syntax checking extension code.
 - `codex-skills/web-qa-capture/`: repo copy of the Codex skill that reads the local QA inbox and posts guided review tours.
 
@@ -60,7 +64,7 @@ The skill tells Codex to read `~/CodexInbox/web-qa/latest/manifest.json`, inspec
 
 ## Installation
 
-1. Open Arc/Chrome and go to `arc://extensions` (or `chrome://extensions`)
+1. Open Arc, Chrome, or Edge and go to `arc://extensions`, `chrome://extensions`, or `edge://extensions`
 2. Enable **Developer mode** (toggle in top right)
 3. Click **Load unpacked**
 4. Select this folder (`element-picker`)
@@ -90,10 +94,13 @@ Defaults:
 - URL: `http://127.0.0.1:43117/captures`
 - Guided review URL: `http://127.0.0.1:43117/tours`
 - Latest guided review URL: `http://127.0.0.1:43117/tours/latest`
+- Vibe trace URL: `http://127.0.0.1:43117/traces`
+- Latest vibe trace URL: `http://127.0.0.1:43117/traces/latest`
 - Health check: `http://127.0.0.1:43117/health`
 - Output: `~/CodexInbox/web-qa/latest`
 - History: `~/CodexInbox/web-qa/history/<capture-id>`
 - Guided review history: `~/CodexInbox/web-qa/tours/history/<tour-id>`
+- Vibe trace history: `~/CodexInbox/web-qa/traces/history/<trace-id>`
 
 Environment overrides:
 
@@ -109,6 +116,37 @@ Each capture writes:
 - `images/`: highlighted viewport and crop images when image capture was available
 
 The server keeps a stable `latest` folder for the most recent capture and a timestamped `history` folder for older captures. That makes it easy to tell Codex, "look at latest QA capture," while still preserving prior debugging evidence.
+
+## Vibe Debugger
+
+The Vibe Debugger adds a lightweight watch window and timeline to the same QA Bridge surface:
+
+1. Click the extension icon on a page.
+2. Select or hover the UI you care about.
+3. Click **Watch** to track that target.
+4. Click **Record**, then click **Resume** and use the page normally.
+5. Open **Trace** to see watched values, recent diffs, timeline events, and quick explanations like hidden, disabled, empty, or stale.
+6. Click **Send Trace** to write `trace.json`, `trace.md`, and `manifest.json` to `~/CodexInbox/web-qa/traces/latest`.
+7. In Codex, say: `look at latest trace`.
+
+The generic browser-extension recorder observes user events, DOM mutations, route changes, fetch/XHR, timers, storage writes, console warnings/errors, selected-element React fiber props/state when available, and optional app probe events. It stores diffs instead of repeated identical snapshots.
+
+Apps can opt in to clearer product-state traces without importing a package:
+
+```js
+window.__VIBE_DEBUGGER__?.watch('TaskList.visibleTasks', visibleTasks.length);
+window.__VIBE_DEBUGGER__?.visibility('EmptyState', { visible, filter });
+window.__VIBE_DEBUGGER__?.action('Save clicked', { disabled, dirty });
+window.__VIBE_DEBUGGER__?.trace('Save finished', { status });
+```
+
+For app code that wants reusable helpers, see `snippets/vibe-debugger-app-probes.js`.
+
+Use the local smoke page to exercise the core cases:
+
+```sh
+open smoke/vibe-debugger-smoke.html
+```
 
 ## Guided Review Tours
 
@@ -150,13 +188,20 @@ While a tour is active, the page is in guided-review mode: the extension locks n
 
 ## Development Checks
 
-Run the JavaScript syntax check before committing extension changes:
+Run the JavaScript syntax check and focused Node tests before committing extension changes:
 
 ```sh
+npm test
 npm run check
 ```
 
-The check validates `background.js`, `picker.js`, and `scripts/codex-qa-inbox-server.mjs` with Node's parser. Chrome extension API behavior still needs a browser smoke test after loading the unpacked extension.
+For the real browser smoke lane, run:
+
+```sh
+npm run test:e2e
+```
+
+The smoke lane launches a clean Edge/Chrome/Chromium profile, loads the unpacked extension through the browser's CDP pipe, injects the QA Bridge into `smoke/vibe-debugger-smoke.html`, records a Vibe Debugger trace, sends it to a temporary inbox server, and verifies the exported trace artifacts. It prefers Edge when installed; set `BROWSER_PATH`, `EDGE_PATH`, or `CHROME_PATH` to force a specific browser.
 
 ## What Gets Copied
 
@@ -165,6 +210,7 @@ Each export now includes:
 - Page URL + title + timestamp
 - Your toolbar comment, when provided
 - Tour context and per-step Ask Codex note, when sent from a guided review
+- Vibe trace context when watch targets or a recently exported trace exist
 - Multiple selected elements in one packet
 - Ranked locator candidates that prefer stable hooks (`data-testid`, role/name, label, placeholder, alt text, stable IDs)
 - Backup locator candidates (`CSS`, `XPath`, generated-looking IDs) separated from stable candidates

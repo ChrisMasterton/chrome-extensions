@@ -13,11 +13,23 @@
   const CROP_PADDING_CSS_PX = 16;
   const HIGHLIGHT_COLOR = '#ef4444';
   const CODEX_INBOX_URL = 'http://127.0.0.1:43117/captures';
+  const CODEX_TRACE_URL = 'http://127.0.0.1:43117/traces';
   const CODEX_TOUR_URL = 'http://127.0.0.1:43117/tours/latest';
   const TOUR_PANEL_ID = '__element-picker-tour-panel';
   const TOUR_HIGHLIGHT_ID = '__element-picker-tour-highlight';
   const TOUR_PANEL_POSITIONS = ['top-right', 'bottom-right', 'bottom-left', 'top-left'];
   const TOUR_PANEL_OVERLAP_PADDING = 12;
+  const TRACE_PANEL_ID = '__element-picker-trace-panel';
+  const TRACE_SCHEMA_VERSION = '1.0';
+  const TRACE_MAX_EVENTS = 600;
+  const TRACE_MAX_SAMPLES = 600;
+  const TRACE_MAX_MUTATIONS = 300;
+  const TRACE_MAX_NETWORK = 200;
+  const TRACE_MAX_CONSOLE = 120;
+  const TRACE_MAX_DIFFS_PER_SAMPLE = 32;
+  const TRACE_CAUSE_WINDOW_MS = 1400;
+  const TRACE_SAMPLE_DELAY_MS = 60;
+  const TRACE_MUTATION_FLUSH_MS = 90;
 
   const TEST_ID_ATTRIBUTES = [
     'data-testid',
@@ -40,6 +52,10 @@
   let badgeLayer = null;
   let toolbar = null;
   let pauseButton = null;
+  let watchButton = null;
+  let recordButton = null;
+  let traceButton = null;
+  let sendTraceButton = null;
   let countBadge = null;
   let commentInput = null;
   let currentElement = null;
@@ -56,6 +72,29 @@
   let tourAskNotes = new Map();
   let tourPanelPosition = 'top-right';
   let tourPanelPositionLocked = false;
+  let tracePanel = null;
+  let tracePanelOpen = false;
+  let watchTargets = [];
+  let watchTargetCounter = 1;
+  let traceEventCounter = 1;
+  let traceSampleCounter = 1;
+  let isTraceRecording = false;
+  let traceStartedAt = null;
+  let traceStartedAtMs = 0;
+  let traceEndedAt = null;
+  let traceEndedAtMs = 0;
+  let traceEvents = [];
+  let traceSamples = [];
+  let traceMutations = [];
+  let traceNetwork = [];
+  let traceConsole = [];
+  let traceTrimmed = {};
+  let activeTraceCause = null;
+  let latestTraceManifest = null;
+  let mutationObserver = null;
+  let queuedMutations = [];
+  let mutationFlushTimer = null;
+  let watchSampleTimer = null;
 
   function isElementNode(node) {
     return !!node && node.nodeType === Node.ELEMENT_NODE;
@@ -95,6 +134,95 @@
 
   function normalizeText(value) {
     return normalizeWhitespace(value).toLowerCase();
+  }
+
+  function slugifyTracePart(value, fallback = 'item') {
+    const slug = normalizeWhitespace(value)
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 72);
+    return slug || fallback;
+  }
+
+  function shouldRedactTraceKey(key) {
+    return /(password|passwd|secret|token|auth|cookie|session|credential|api[-_]?key)/i.test(String(key || ''));
+  }
+
+  function sanitizeTraceValue(value, depth = 0, seen = new WeakSet(), key = '') {
+    if (shouldRedactTraceKey(key)) return '[redacted]';
+    if (value === null || value === undefined) return value;
+
+    const valueType = typeof value;
+    if (valueType === 'string') {
+      if (/bearer\s+[a-z0-9._-]+/i.test(value)) return '[redacted bearer token]';
+      return truncate(value, 240);
+    }
+    if (valueType === 'number' || valueType === 'boolean') return value;
+    if (valueType === 'function') return '[function]';
+    if (valueType !== 'object') return String(value);
+
+    if (seen.has(value)) return '[circular]';
+    if (depth >= 3) return '[max-depth]';
+    seen.add(value);
+
+    if (Array.isArray(value)) {
+      return value.slice(0, 8).map((item) => sanitizeTraceValue(item, depth + 1, seen));
+    }
+
+    const result = {};
+    let count = 0;
+
+    for (const [nestedKey, nestedValue] of Object.entries(value)) {
+      if (count >= 14) {
+        result.__truncated__ = '[additional keys omitted]';
+        break;
+      }
+      result[nestedKey] = sanitizeTraceValue(nestedValue, depth + 1, seen, nestedKey);
+      count += 1;
+    }
+
+    return result;
+  }
+
+  function cloneForTrace(value) {
+    return sanitizeTraceValue(value);
+  }
+
+  function getTraceTimeOffsetMs() {
+    if (!traceStartedAtMs) return 0;
+    return Math.max(0, Math.round((performance.now() - traceStartedAtMs) * 100) / 100);
+  }
+
+  function pushBoundedTraceItem(list, item, maxItems, fieldName) {
+    if (list.length >= maxItems) {
+      list.shift();
+      traceTrimmed[fieldName] = (traceTrimmed[fieldName] || 0) + 1;
+    }
+    list.push(item);
+  }
+
+  function getTraceCause() {
+    if (!activeTraceCause) return null;
+    if (performance.now() > activeTraceCause.expiresAtMs) return null;
+    return {
+      eventId: activeTraceCause.eventId,
+      kind: activeTraceCause.kind,
+      label: activeTraceCause.label,
+      timeOffsetMs: activeTraceCause.timeOffsetMs,
+      confidence: activeTraceCause.confidence || 'inferred',
+    };
+  }
+
+  function setTraceCause(event, confidence = 'strong', windowMs = TRACE_CAUSE_WINDOW_MS) {
+    activeTraceCause = {
+      eventId: event.eventId,
+      kind: event.kind,
+      label: event.label,
+      timeOffsetMs: event.timeOffsetMs,
+      confidence,
+      expiresAtMs: performance.now() + windowMs,
+    };
   }
 
   function toSerializableValue(value, depth = 0, seen = new WeakSet()) {
@@ -836,6 +964,22 @@
       updateToolbarState();
     });
 
+    watchButton = createToolbarButton('Watch', 'Watch selected or hovered element over time', () => {
+      watchCurrentSelection();
+    });
+
+    recordButton = createToolbarButton('Record', 'Record watched state over time', () => {
+      toggleTraceRecording();
+    });
+
+    traceButton = createToolbarButton('Trace', 'Show the vibe debugger watch window and timeline', () => {
+      toggleTracePanel();
+    });
+
+    sendTraceButton = createToolbarButton('Send Trace', 'Save the vibe debugger trace to the local Codex QA inbox', () => {
+      sendTraceToCodex();
+    }, 'primary');
+
     const copyButton = createToolbarButton('Copy', 'Copy selected element bundle to clipboard', () => {
       exportBundle({ cleanupAfter: true });
     });
@@ -852,9 +996,24 @@
       cleanup();
     });
 
-    toolbar.append(title, countBadge, commentInput, pauseButton, undoButton, copyButton, sendButton, tourButton, closeButton);
+    toolbar.append(
+      title,
+      countBadge,
+      commentInput,
+      pauseButton,
+      undoButton,
+      watchButton,
+      recordButton,
+      traceButton,
+      sendTraceButton,
+      copyButton,
+      sendButton,
+      tourButton,
+      closeButton
+    );
     document.body.appendChild(toolbar);
     updateToolbarState();
+    updateTraceUi();
   }
 
   function getReactFiberNode(element) {
@@ -1882,10 +2041,263 @@
     return info;
   }
 
+  function getTraceAttributesSnapshot(element) {
+    const attributes = {};
+    const importantNames = new Set([
+      'id',
+      'class',
+      'style',
+      'hidden',
+      'disabled',
+      'aria-hidden',
+      'aria-disabled',
+      'aria-expanded',
+      'aria-selected',
+      'aria-busy',
+      'role',
+      'type',
+      'name',
+      'value',
+      'title',
+    ]);
+
+    for (const attribute of Array.from(element.attributes || [])) {
+      if (
+        importantNames.has(attribute.name) ||
+        attribute.name.startsWith('data-') ||
+        attribute.name.startsWith('aria-')
+      ) {
+        attributes[attribute.name] = sanitizeTraceValue(attribute.value, 0, new WeakSet(), attribute.name);
+      }
+    }
+
+    return attributes;
+  }
+
+  function getHiddenAncestorSnapshot(element) {
+    let current = element;
+    let depth = 0;
+
+    while (current && current !== document.documentElement && depth < 12) {
+      if (!isElementNode(current) || isPickerUi(current)) {
+        current = current?.parentElement || null;
+        depth += 1;
+        continue;
+      }
+
+      const computed = window.getComputedStyle(current);
+      const reason = [];
+
+      if (current.hasAttribute('hidden')) reason.push('hidden attribute');
+      if (current.getAttribute('aria-hidden') === 'true') reason.push('aria-hidden=true');
+      if (computed.display === 'none') reason.push('display=none');
+      if (computed.visibility === 'hidden') reason.push('visibility=hidden');
+      if (Number.parseFloat(computed.opacity || '1') === 0) reason.push('opacity=0');
+
+      if (reason.length > 0) {
+        return {
+          depth,
+          reason,
+          element: describeElementBrief(current, depth),
+          selector: getCssSelector(current),
+        };
+      }
+
+      current = current.parentElement;
+      depth += 1;
+    }
+
+    return null;
+  }
+
+  function getElementVisibilitySnapshot(element) {
+    if (!isElementNode(element) || !element.isConnected) {
+      return {
+        connected: false,
+        visible: false,
+        reason: 'disconnected',
+      };
+    }
+
+    const rect = element.getBoundingClientRect();
+    const computed = window.getComputedStyle(element);
+    const hiddenAncestor = getHiddenAncestorSnapshot(element);
+    const visible = (
+      rect.width > 0 &&
+      rect.height > 0 &&
+      computed.display !== 'none' &&
+      computed.visibility !== 'hidden' &&
+      Number.parseFloat(computed.opacity || '1') > 0 &&
+      !hiddenAncestor
+    );
+
+    return {
+      connected: true,
+      visible,
+      inViewport: isVisibleInViewport(rect),
+      display: computed.display,
+      visibility: computed.visibility,
+      opacity: computed.opacity,
+      pointerEvents: computed.pointerEvents,
+      hidden: element.hasAttribute('hidden'),
+      ariaHidden: element.getAttribute('aria-hidden') || null,
+      hiddenAncestor,
+    };
+  }
+
+  function getElementDomSnapshot(element) {
+    const text = getTextPreview(element);
+    return {
+      tag: element.tagName.toLowerCase(),
+      id: element.id || null,
+      text,
+      textLength: normalizeWhitespace(element.innerText || element.textContent || '').length,
+      attributes: getTraceAttributesSnapshot(element),
+      className: truncate(element.className || '', 240) || null,
+    };
+  }
+
+  function getElementLayoutSnapshot(element) {
+    const rect = toRectObject(element.getBoundingClientRect());
+    return {
+      viewportRect: rect,
+      scroll: {
+        left: Math.round(element.scrollLeft || 0),
+        top: Math.round(element.scrollTop || 0),
+        width: Math.round(element.scrollWidth || 0),
+        height: Math.round(element.scrollHeight || 0),
+        clientWidth: Math.round(element.clientWidth || 0),
+        clientHeight: Math.round(element.clientHeight || 0),
+      },
+    };
+  }
+
+  function getElementReactSnapshot(element) {
+    const components = getReactInfo(element);
+    const state = getReactState(element);
+    const nativeProps = getReactNativeWebProps(element);
+
+    if (!components && !state && !nativeProps) return null;
+
+    return {
+      components,
+      props: state?.props || null,
+      state: state?.state || null,
+      nativeProps,
+    };
+  }
+
+  function getElementFormSnapshot(element) {
+    if (!isElementNode(element)) return null;
+    const formState = getFormState(element);
+    if (!formState) return null;
+
+    const type = String(element.getAttribute('type') || '').toLowerCase();
+    const name = element.getAttribute('name') || element.id || '';
+    const sanitized = { ...formState };
+
+    if (type === 'password' || shouldRedactTraceKey(name)) {
+      if ('value' in sanitized) sanitized.value = '[redacted]';
+      if ('validationMessage' in sanitized) sanitized.validationMessage = '[redacted]';
+    }
+
+    return sanitized;
+  }
+
+  function buildWatchSnapshot(element) {
+    if (!isElementNode(element)) {
+      return {
+        connected: false,
+        disconnectedReason: 'not-an-element',
+        url: window.location.href,
+        capturedAt: new Date().toISOString(),
+      };
+    }
+
+    if (!element.isConnected) {
+      return {
+        connected: false,
+        disconnectedReason: 'element-disconnected',
+        url: window.location.href,
+        capturedAt: new Date().toISOString(),
+      };
+    }
+
+    const snapshot = {
+      connected: true,
+      url: window.location.href,
+      capturedAt: new Date().toISOString(),
+      dom: getElementDomSnapshot(element),
+      visibility: getElementVisibilitySnapshot(element),
+      layout: getElementLayoutSnapshot(element),
+    };
+
+    const form = getElementFormSnapshot(element);
+    if (form) snapshot.form = form;
+
+    const react = getElementReactSnapshot(element);
+    if (react) snapshot.react = react;
+
+    const styles = getDebugStyles(element);
+    if (styles) snapshot.styles = styles;
+
+    const scroll = getScrollDiagnostics(element);
+    if (scroll?.containers?.length || scroll?.nearestHorizontalContainer || scroll?.nearestVerticalContainer) {
+      snapshot.scrollDiagnostics = scroll;
+    }
+
+    return cloneForTrace(snapshot);
+  }
+
+  function isTraceObject(value) {
+    return !!value && typeof value === 'object' && !Array.isArray(value);
+  }
+
+  function traceValuesEqual(a, b, path = '') {
+    if (path.startsWith('layout.viewportRect.') && typeof a === 'number' && typeof b === 'number') {
+      return Math.abs(a - b) < 1;
+    }
+
+    return JSON.stringify(a) === JSON.stringify(b);
+  }
+
+  function diffTraceValues(before, after, path = '', diffs = []) {
+    if (diffs.length >= TRACE_MAX_DIFFS_PER_SAMPLE) return diffs;
+
+    if (traceValuesEqual(before, after, path)) return diffs;
+
+    if (Array.isArray(before) || Array.isArray(after)) {
+      diffs.push({
+        path: path || 'value',
+        before: cloneForTrace(before),
+        after: cloneForTrace(after),
+      });
+      return diffs;
+    }
+
+    if (isTraceObject(before) && isTraceObject(after)) {
+      const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+      for (const key of keys) {
+        if (key === 'capturedAt') continue;
+        diffTraceValues(before[key], after[key], path ? `${path}.${key}` : key, diffs);
+        if (diffs.length >= TRACE_MAX_DIFFS_PER_SAMPLE) break;
+      }
+      return diffs;
+    }
+
+    diffs.push({
+      path: path || 'value',
+      before: cloneForTrace(before),
+      after: cloneForTrace(after),
+    });
+    return diffs;
+  }
+
   function clearSelections() {
     selections = [];
     updateBadges();
     updateToolbarState();
+    updateTraceUi();
   }
 
   function addSelection(element, options = {}) {
@@ -1910,6 +2322,7 @@
     selections.push({ element, info });
     updateBadges();
     updateToolbarState();
+    updateTraceUi();
 
     const count = selections.length;
     if (!silent) {
@@ -1929,9 +2342,1043 @@
     const removed = selections.pop();
     updateBadges();
     updateToolbarState();
+    updateTraceUi();
 
     const label = `${removed.info.tag}${removed.info.id ? `#${removed.info.id}` : ''}`;
     showToast(`Removed ${label}. ${selections.length} selected.`);
+  }
+
+  function getWatchTargetLabel(element) {
+    const accessibleName = getAccessibleName(element);
+    const text = getTextPreview(element);
+    const role = inferRole(element);
+    const tag = element.tagName.toLowerCase();
+
+    if (accessibleName) return truncate(accessibleName, 64);
+    if (text) return truncate(text, 64);
+    if (role) return `${role} ${tag}`;
+    if (element.id) return `${tag}#${element.id}`;
+    return tag;
+  }
+
+  function getWatchTargetLocator(element) {
+    const selector = getCssSelector(element);
+    const xpath = getXPath(element);
+    const text = getTextPreview(element);
+    const locatorCandidates = buildLocatorCandidates(element, selector, xpath, text);
+    const primary = locatorCandidates[0] || null;
+
+    return {
+      selector,
+      xpath,
+      primary,
+      candidates: locatorCandidates.slice(0, 6),
+    };
+  }
+
+  function getSerializableWatchTargets() {
+    return watchTargets.map((target) => ({
+      watchId: target.watchId,
+      kind: target.kind,
+      label: target.label,
+      createdAt: target.createdAt,
+      selector: target.selector || null,
+      locator: target.locator || null,
+      source: target.source || null,
+      latestSampleAt: target.latestSampleAt || null,
+      latestSnapshot: target.latestSnapshot || null,
+    }));
+  }
+
+  function addElementWatchTarget(element, source = {}) {
+    if (!isElementNode(element) || isPickerUi(element)) return null;
+
+    const existing = watchTargets.find((target) => target.kind === 'element' && target.element === element);
+    if (existing) {
+      showToast(`Already watching ${existing.label}.`, 1500);
+      return existing;
+    }
+
+    const locator = getWatchTargetLocator(element);
+    const watchId = `watch-${watchTargetCounter++}`;
+    const snapshot = buildWatchSnapshot(element);
+    const target = {
+      watchId,
+      kind: 'element',
+      label: getWatchTargetLabel(element),
+      createdAt: new Date().toISOString(),
+      element,
+      selector: locator.selector,
+      locator: {
+        type: locator.primary?.strategy || 'css',
+        value: locator.primary?.playwright || locator.selector,
+        selector: locator.primary?.selector || locator.selector,
+      },
+      locatorCandidates: locator.candidates,
+      source,
+      latestSnapshot: snapshot,
+      latestSampleAt: null,
+    };
+
+    watchTargets.push(target);
+    if (isTraceRecording) {
+      sampleWatchTarget(target, { force: true, reason: 'watch.added' });
+    }
+    updateTraceUi();
+    return target;
+  }
+
+  function addAppWatchTarget(name, value, options = {}) {
+    const safeName = normalizeWhitespace(name || 'App value') || 'App value';
+    const watchId = `app-${slugifyTracePart(safeName)}`;
+    let target = watchTargets.find((item) => item.watchId === watchId);
+
+    if (!target) {
+      target = {
+        watchId,
+        kind: 'app',
+        label: safeName,
+        createdAt: new Date().toISOString(),
+        source: { selectedBy: 'vibe-debugger-app-probe', options: sanitizeTraceValue(options) },
+        latestSnapshot: null,
+        latestSampleAt: null,
+      };
+      watchTargets.push(target);
+    }
+
+    const snapshot = {
+      connected: true,
+      capturedAt: new Date().toISOString(),
+      app: {
+        name: safeName,
+        value: sanitizeTraceValue(value),
+        options: sanitizeTraceValue(options),
+      },
+    };
+    const previous = target.latestSnapshot;
+    const diffs = previous ? diffTraceValues(previous, snapshot) : [];
+    target.latestSnapshot = snapshot;
+
+    if (isTraceRecording && (!previous || diffs.length > 0)) {
+      const cause = getTraceCause() || {
+        eventId: null,
+        kind: 'app.watch',
+        label: safeName,
+        confidence: 'direct',
+      };
+      const sample = {
+        sampleId: `sample-${traceSampleCounter++}`,
+        watchId,
+        timeOffsetMs: getTraceTimeOffsetMs(),
+        causeEventId: cause.eventId || null,
+        cause,
+        snapshot,
+        diffs: previous ? diffs : [{
+          path: 'app.value',
+          before: undefined,
+          after: snapshot.app.value,
+        }],
+        reason: 'app.watch',
+        confidence: 'direct',
+      };
+      pushBoundedTraceItem(traceSamples, sample, TRACE_MAX_SAMPLES, 'samples');
+    }
+
+    updateTraceUi();
+    return target;
+  }
+
+  function watchCurrentSelection() {
+    const elements = selections.length > 0
+      ? selections.map((selection) => selection.element).filter((element) => isElementNode(element))
+      : currentElement
+        ? [currentElement]
+        : [];
+
+    if (elements.length === 0) {
+      showToast('Hover or select an element before adding a watch.', 2200);
+      return;
+    }
+
+    const before = watchTargets.length;
+    elements.forEach((element, index) => {
+      addElementWatchTarget(element, {
+        selectionIndex: index + 1,
+        selectedBy: selections.length > 0 ? 'qa-bridge-selection' : 'qa-bridge-hover',
+      });
+    });
+
+    const added = watchTargets.length - before;
+    tracePanelOpen = true;
+    ensureTracePanel();
+    updateTraceUi();
+    showToast(
+      added > 0
+        ? `Watching ${watchTargets.length} ${pluralize(watchTargets.length, 'target', 'targets')}.`
+        : 'No new watch targets were added.',
+      2200
+    );
+  }
+
+  function clearTraceData(options = {}) {
+    const { keepWatchTargets = true } = options;
+    isTraceRecording = false;
+    traceStartedAt = null;
+    traceStartedAtMs = 0;
+    traceEndedAt = null;
+    traceEndedAtMs = 0;
+    traceEvents = [];
+    traceSamples = [];
+    traceMutations = [];
+    traceNetwork = [];
+    traceConsole = [];
+    traceTrimmed = {};
+    activeTraceCause = null;
+    latestTraceManifest = null;
+    traceEventCounter = 1;
+    traceSampleCounter = 1;
+
+    stopMutationRecording();
+    if (watchSampleTimer) {
+      window.clearTimeout(watchSampleTimer);
+      watchSampleTimer = null;
+    }
+
+    if (!keepWatchTargets) {
+      watchTargets = [];
+    }
+
+    updateTraceUi();
+  }
+
+  function recordTraceEvent(kind, label, details = {}, options = {}) {
+    if (!isTraceRecording && !options.always) return null;
+
+    const event = {
+      eventId: `evt-${traceEventCounter++}`,
+      timeOffsetMs: getTraceTimeOffsetMs(),
+      kind,
+      label: label || kind,
+      details: sanitizeTraceValue(details),
+      url: window.location.href,
+    };
+
+    if (details?.target) event.target = details.target;
+    pushBoundedTraceItem(traceEvents, event, TRACE_MAX_EVENTS, 'events');
+
+    if (options.cause !== false) {
+      setTraceCause(event, options.confidence || 'strong', options.causeWindowMs || TRACE_CAUSE_WINDOW_MS);
+    }
+
+    if (options.sample !== false) {
+      scheduleWatchSample(kind, options.sampleDelayMs ?? TRACE_SAMPLE_DELAY_MS);
+    }
+
+    updateTraceUi();
+    return event;
+  }
+
+  function sampleWatchTarget(target, options = {}) {
+    if (!target) return null;
+
+    let snapshot;
+    if (target.kind === 'element') {
+      snapshot = buildWatchSnapshot(target.element);
+    } else {
+      snapshot = target.latestSnapshot || {
+        connected: true,
+        capturedAt: new Date().toISOString(),
+        app: {
+          name: target.label,
+          value: null,
+        },
+      };
+    }
+
+    const previous = target.latestSnapshot;
+    const diffs = previous ? diffTraceValues(previous, snapshot) : [];
+    const hasDiffs = diffs.length > 0;
+
+    target.latestSnapshot = snapshot;
+
+    if (!isTraceRecording && !options.force) {
+      updateTraceUi();
+      return null;
+    }
+
+    if (!options.force && !hasDiffs) {
+      updateTraceUi();
+      return null;
+    }
+
+    const cause = getTraceCause();
+    const sample = {
+      sampleId: `sample-${traceSampleCounter++}`,
+      watchId: target.watchId,
+      timeOffsetMs: getTraceTimeOffsetMs(),
+      causeEventId: cause?.eventId || null,
+      cause,
+      snapshot,
+      diffs: previous ? diffs : [{
+        path: 'snapshot',
+        before: undefined,
+        after: snapshot,
+      }],
+      reason: options.reason || 'watch.sample',
+      confidence: cause?.confidence || (options.force ? 'direct' : 'inferred'),
+    };
+
+    target.latestSampleAt = new Date().toISOString();
+    pushBoundedTraceItem(traceSamples, sample, TRACE_MAX_SAMPLES, 'samples');
+    updateTraceUi();
+    return sample;
+  }
+
+  function sampleAllWatchTargets(reason = 'watch.sample') {
+    if (watchTargets.length === 0) return;
+    watchTargets.forEach((target) => sampleWatchTarget(target, { reason }));
+  }
+
+  function scheduleWatchSample(reason = 'event', delay = TRACE_SAMPLE_DELAY_MS) {
+    if (watchTargets.length === 0) return;
+    if (watchSampleTimer) {
+      window.clearTimeout(watchSampleTimer);
+    }
+    watchSampleTimer = window.setTimeout(() => {
+      watchSampleTimer = null;
+      sampleAllWatchTargets(reason);
+    }, delay);
+  }
+
+  function startMutationRecording() {
+    if (mutationObserver || !document.documentElement) return;
+
+    mutationObserver = new MutationObserver((mutations) => {
+      if (!isTraceRecording) return;
+
+      queuedMutations.push(...mutations.map(summarizeMutation).filter(Boolean));
+      if (queuedMutations.length > 80) {
+        queuedMutations = queuedMutations.slice(-80);
+      }
+
+      if (!mutationFlushTimer) {
+        mutationFlushTimer = window.setTimeout(flushMutationQueue, TRACE_MUTATION_FLUSH_MS);
+      }
+    });
+
+    mutationObserver.observe(document.documentElement, {
+      attributes: true,
+      childList: true,
+      subtree: true,
+      characterData: true,
+      attributeOldValue: true,
+      characterDataOldValue: false,
+    });
+  }
+
+  function stopMutationRecording() {
+    if (mutationObserver) {
+      mutationObserver.disconnect();
+      mutationObserver = null;
+    }
+
+    if (mutationFlushTimer) {
+      window.clearTimeout(mutationFlushTimer);
+      mutationFlushTimer = null;
+    }
+    queuedMutations = [];
+  }
+
+  function isMutationRelatedToWatchTarget(node, target) {
+    if (!node || target.kind !== 'element' || !target.element) return false;
+    if (!isElementNode(node)) {
+      node = node.parentElement || null;
+    }
+    if (!node || !isElementNode(node)) return false;
+    return node === target.element || node.contains(target.element) || target.element.contains(node);
+  }
+
+  function summarizeMutation(mutation) {
+    const targetNode = mutation.target?.nodeType === Node.TEXT_NODE
+      ? mutation.target.parentElement
+      : mutation.target;
+
+    if (!isElementNode(targetNode) || isPickerUi(targetNode)) return null;
+
+    const relatedWatchIds = watchTargets
+      .filter((target) => isMutationRelatedToWatchTarget(targetNode, target))
+      .map((target) => target.watchId);
+
+    return {
+      type: mutation.type,
+      attributeName: mutation.attributeName || null,
+      oldValue: mutation.attributeName ? sanitizeTraceValue(mutation.oldValue, 0, new WeakSet(), mutation.attributeName) : null,
+      target: describeElementBrief(targetNode),
+      selector: getCssSelector(targetNode),
+      addedNodes: mutation.addedNodes?.length || 0,
+      removedNodes: mutation.removedNodes?.length || 0,
+      relatedWatchIds,
+    };
+  }
+
+  function flushMutationQueue() {
+    mutationFlushTimer = null;
+    if (!isTraceRecording || queuedMutations.length === 0) {
+      queuedMutations = [];
+      return;
+    }
+
+    const mutations = queuedMutations.splice(0, queuedMutations.length);
+    const relatedWatchIds = Array.from(new Set(mutations.flatMap((mutation) => mutation.relatedWatchIds || [])));
+    const summary = {
+      mutationId: `mut-${traceMutations.length + 1}`,
+      timeOffsetMs: getTraceTimeOffsetMs(),
+      count: mutations.length,
+      relatedWatchIds,
+      items: mutations.slice(0, 20),
+    };
+
+    pushBoundedTraceItem(traceMutations, summary, TRACE_MAX_MUTATIONS, 'mutations');
+    recordTraceEvent(
+      'dom.mutation',
+      relatedWatchIds.length
+        ? `DOM changed near ${relatedWatchIds.join(', ')}`
+        : `${mutations.length} DOM ${pluralize(mutations.length, 'mutation', 'mutations')}`,
+      {
+        count: mutations.length,
+        relatedWatchIds,
+        first: mutations[0],
+      },
+      { confidence: 'inferred', causeWindowMs: 500, sampleDelayMs: 40 }
+    );
+  }
+
+  function resetTraceBuffers() {
+    traceEvents = [];
+    traceSamples = [];
+    traceMutations = [];
+    traceNetwork = [];
+    traceConsole = [];
+    traceTrimmed = {};
+    activeTraceCause = null;
+    traceEventCounter = 1;
+    traceSampleCounter = 1;
+  }
+
+  function startTraceRecording() {
+    if (isTraceRecording) return;
+
+    if (watchTargets.length === 0 && selections.length > 0) {
+      selections.forEach((selection, index) => {
+        addElementWatchTarget(selection.element, {
+          selectionIndex: index + 1,
+          selectedBy: 'qa-bridge-selection',
+        });
+      });
+    } else if (watchTargets.length === 0 && currentElement) {
+      addElementWatchTarget(currentElement, {
+        selectedBy: 'qa-bridge-hover',
+      });
+    }
+
+    resetTraceBuffers();
+    isTraceRecording = true;
+    traceStartedAt = new Date().toISOString();
+    traceStartedAtMs = performance.now();
+    traceEndedAt = null;
+    traceEndedAtMs = 0;
+    latestTraceManifest = null;
+    startMutationRecording();
+    recordTraceEvent('trace.start', 'Trace recording started', {
+      watchTargets: watchTargets.length,
+    }, { always: true, cause: false, sample: false });
+    watchTargets.forEach((target) => sampleWatchTarget(target, { force: true, reason: 'trace.start' }));
+    tracePanelOpen = true;
+    ensureTracePanel();
+    updateTraceUi();
+    showToast(`Vibe trace recording. Watching ${watchTargets.length} ${pluralize(watchTargets.length, 'target', 'targets')}.`, 2600);
+  }
+
+  function stopTraceRecording(options = {}) {
+    if (!isTraceRecording) return;
+
+    sampleAllWatchTargets('trace.stop');
+    recordTraceEvent('trace.stop', 'Trace recording stopped', {}, { always: true, cause: false, sample: false });
+    isTraceRecording = false;
+    traceEndedAt = new Date().toISOString();
+    traceEndedAtMs = performance.now();
+    stopMutationRecording();
+    updateTraceUi();
+
+    if (!options.silent) {
+      showToast('Vibe trace stopped. Use Send Trace to hand it to Codex.', 2400);
+    }
+  }
+
+  function toggleTraceRecording() {
+    if (isTraceRecording) {
+      stopTraceRecording();
+    } else {
+      startTraceRecording();
+    }
+  }
+
+  function formatTraceValue(value) {
+    if (value === null) return 'null';
+    if (value === undefined) return 'undefined';
+    if (typeof value === 'string') return truncate(value, 120);
+    if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+
+    try {
+      const json = JSON.stringify(value);
+      return truncate(json, 160);
+    } catch {
+      return '[unserializable]';
+    }
+  }
+
+  function formatTraceDiff(diff) {
+    return `${diff.path || 'value'}: ${formatTraceValue(diff.before)} -> ${formatTraceValue(diff.after)}`;
+  }
+
+  function getRecentDiffSamples(limit = 20) {
+    return traceSamples
+      .filter((sample) => Array.isArray(sample.diffs) && sample.diffs.length > 0)
+      .slice(-limit);
+  }
+
+  function buildTraceSummaries() {
+    const summaries = [];
+
+    for (const target of watchTargets) {
+      const snapshot = target.latestSnapshot;
+      if (!snapshot) continue;
+
+      if (snapshot.connected === false) {
+        summaries.push({
+          kind: 'stale',
+          watchId: target.watchId,
+          title: `${target.label} is stale`,
+          body: 'The watched element disconnected from the DOM.',
+          confidence: 'direct',
+        });
+        continue;
+      }
+
+      const visibility = snapshot.visibility;
+      if (visibility && !visibility.visible) {
+        const hiddenAncestor = visibility.hiddenAncestor;
+        const reason = hiddenAncestor
+          ? `${hiddenAncestor.reason.join(', ')} on ${formatBriefElement(hiddenAncestor.element)}`
+          : `display=${visibility.display}, visibility=${visibility.visibility}, opacity=${visibility.opacity}`;
+        summaries.push({
+          kind: 'hidden',
+          watchId: target.watchId,
+          title: `${target.label} is hidden`,
+          body: reason,
+          confidence: hiddenAncestor ? 'strong' : 'direct',
+        });
+      }
+
+      const disabledAttr = snapshot.dom?.attributes?.disabled !== undefined ||
+        snapshot.dom?.attributes?.['aria-disabled'] === 'true' ||
+        snapshot.form?.disabled === true ||
+        snapshot.react?.props?.disabled === true;
+
+      if (disabledAttr) {
+        summaries.push({
+          kind: 'disabled',
+          watchId: target.watchId,
+          title: `${target.label} is disabled`,
+          body: snapshot.react?.props?.disabled === true
+            ? 'React props include disabled=true.'
+            : 'The DOM or form state marks the target disabled.',
+          confidence: snapshot.react?.props?.disabled === true ? 'strong' : 'direct',
+        });
+      }
+
+      if (snapshot.dom && snapshot.dom.textLength === 0 && visibility?.visible) {
+        summaries.push({
+          kind: 'empty',
+          watchId: target.watchId,
+          title: `${target.label} has no visible text`,
+          body: 'The target is visible but its text snapshot is empty.',
+          confidence: 'direct',
+        });
+      }
+    }
+
+    return summaries.slice(0, 40);
+  }
+
+  function buildTracePayload() {
+    const endedAt = traceEndedAt || new Date().toISOString();
+    const endMs = isTraceRecording ? performance.now() : (traceEndedAtMs || performance.now());
+    const durationMs = traceStartedAtMs
+      ? Math.round(endMs - traceStartedAtMs)
+      : 0;
+
+    return {
+      schemaVersion: TRACE_SCHEMA_VERSION,
+      traceId: `${new Date().toISOString()
+        .replace(/\.\d+Z$/, 'Z')
+        .replace(/[:]/g, '')
+        .replace(/[TZ]/g, '-')
+        .replace(/-$/, '')}-${slugifyTracePart(window.location.hostname || 'page')}`,
+      page: {
+        title: document.title,
+        url: window.location.href,
+        referrer: document.referrer || null,
+      },
+      startedAt: traceStartedAt || new Date().toISOString(),
+      endedAt,
+      durationMs,
+      browserContext: getBrowserContextSnapshot(),
+      userComment: getUserComment(),
+      watchTargets: getSerializableWatchTargets(),
+      events: traceEvents,
+      samples: traceSamples,
+      mutations: traceMutations,
+      network: traceNetwork,
+      console: traceConsole,
+      summaries: buildTraceSummaries(),
+      trimmed: Object.keys(traceTrimmed).length > 0 ? traceTrimmed : null,
+    };
+  }
+
+  function formatTraceMarkdown(trace) {
+    const lines = [
+      '# Vibe Debugger Trace',
+      '',
+      `Captured at: ${trace.endedAt}`,
+      `URL: ${trace.page.url}`,
+      `Title: ${trace.page.title}`,
+      `Duration: ${trace.durationMs} ms`,
+      `Recording active at export: ${isTraceRecording ? 'yes' : 'no'}`,
+      `Watch targets: ${trace.watchTargets.length}`,
+      `Events: ${trace.events.length}`,
+      `Samples: ${trace.samples.length}`,
+      `Mutations: ${trace.mutations.length}`,
+      '',
+    ];
+
+    if (trace.userComment) {
+      lines.push('## User Comment', '', trace.userComment, '');
+    }
+
+    if (trace.watchTargets.length > 0) {
+      lines.push('## Watch Targets', '');
+      trace.watchTargets.forEach((target) => {
+        lines.push(`- ${target.watchId}: ${target.label} (${target.kind})`);
+      });
+      lines.push('');
+    }
+
+    if (trace.summaries.length > 0) {
+      lines.push('## Current Explanations', '');
+      trace.summaries.forEach((summary) => {
+        lines.push(`- ${summary.title}: ${summary.body} (${summary.confidence || 'inferred'})`);
+      });
+      lines.push('');
+    }
+
+    const recentDiffs = getRecentDiffSamples(30);
+    if (recentDiffs.length > 0) {
+      lines.push('## Recent Diffs', '');
+      recentDiffs.forEach((sample) => {
+        const target = watchTargets.find((item) => item.watchId === sample.watchId);
+        const cause = sample.cause?.label || sample.causeEventId || 'unknown cause';
+        lines.push(`### +${sample.timeOffsetMs} ms - ${target?.label || sample.watchId} (${cause})`);
+        sample.diffs.slice(0, 10).forEach((diff) => {
+          lines.push(`- ${formatTraceDiff(diff)}`);
+        });
+        lines.push('');
+      });
+    }
+
+    if (trace.events.length > 0) {
+      lines.push('## Timeline', '');
+      trace.events.slice(-80).forEach((event) => {
+        lines.push(`- +${event.timeOffsetMs} ms ${event.kind}: ${event.label}`);
+      });
+      lines.push('');
+    }
+
+    lines.push('## JSON Trace');
+    lines.push('```json');
+    lines.push(JSON.stringify(trace, null, 2));
+    lines.push('```');
+
+    return lines.join('\n');
+  }
+
+  async function sendTraceToCodex() {
+    if (watchTargets.length === 0 && traceEvents.length === 0) {
+      showToast('No trace yet. Add a watch or start recording first.', 2600);
+      return;
+    }
+
+    if (isTraceRecording) {
+      sampleAllWatchTargets('trace.export');
+    }
+
+    const trace = buildTracePayload();
+    const markdown = formatTraceMarkdown(trace);
+    showToast('Sending vibe trace to Codex QA inbox...', 2400);
+
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: 'ELEMENT_PICKER_SEND_TRACE_TO_CODEX',
+        traceUrl: CODEX_TRACE_URL,
+        trace,
+        markdown,
+      });
+
+      if (!response?.ok) {
+        throw new Error(response?.error || 'Codex QA inbox did not accept the trace');
+      }
+
+      latestTraceManifest = {
+        traceId: response.traceId || null,
+        traceDir: response.traceDir || null,
+        latestDir: response.latestDir || null,
+      };
+      updateTraceUi();
+      showToast(`Saved vibe trace ${response.traceId || ''}. Tell Codex: "look at latest trace."`, 4200);
+    } catch (error) {
+      console.error('Failed to send vibe trace:', error);
+      showToast(`Trace send failed: ${error?.message || 'start the Codex QA inbox server'}`, 4200);
+    }
+  }
+
+  function getEventTargetSummary(target) {
+    if (!isElementNode(target) || isPickerUi(target)) return null;
+    const summary = describeElementBrief(target);
+
+    if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) {
+      const key = target.getAttribute('name') || target.id || target.getAttribute('autocomplete') || '';
+      if (target.type === 'password' || shouldRedactTraceKey(key)) {
+        summary.value = '[redacted]';
+      } else if (target.type === 'checkbox' || target.type === 'radio') {
+        summary.checked = target.checked;
+      } else {
+        summary.value = truncate(target.value || '', 120);
+      }
+    }
+
+    summary.selector = getCssSelector(target);
+    return summary;
+  }
+
+  function onRecordedUserEvent(event) {
+    if (!isTraceRecording || isPickerUi(event.target)) return;
+
+    const target = getEventTargetSummary(event.target);
+    if (!target) return;
+
+    const details = {
+      eventType: event.type,
+      target,
+      key: event.type === 'keydown' ? event.key : null,
+      inputType: event.inputType || null,
+    };
+
+    recordTraceEvent(`user.${event.type}`, `${event.type} ${target.text || target.role || target.tag}`, details, {
+      confidence: 'strong',
+      sampleDelayMs: event.type === 'input' ? 120 : TRACE_SAMPLE_DELAY_MS,
+    });
+  }
+
+  function recordExternalProbeEvent(data) {
+    if (!data || data.source !== 'element-picker-vibe-probe') return;
+
+    const kind = data.kind || 'probe.event';
+    const details = sanitizeTraceValue(data.details || {});
+
+    if (kind === 'app.watch') {
+      addAppWatchTarget(details.name, details.value, details.options || {});
+      recordTraceEvent(kind, `watch ${details.name || 'app value'}`, details, {
+        confidence: 'direct',
+        causeWindowMs: TRACE_CAUSE_WINDOW_MS,
+        sample: false,
+      });
+      return;
+    }
+
+    if (!isTraceRecording) return;
+
+    if (kind.startsWith('network.')) {
+      const networkEvent = {
+        networkId: data.eventId || `network-${traceNetwork.length + 1}`,
+        timeOffsetMs: getTraceTimeOffsetMs(),
+        kind,
+        details,
+      };
+      pushBoundedTraceItem(traceNetwork, networkEvent, TRACE_MAX_NETWORK, 'network');
+    } else if (kind.startsWith('console.')) {
+      const consoleEvent = {
+        consoleId: data.eventId || `console-${traceConsole.length + 1}`,
+        timeOffsetMs: getTraceTimeOffsetMs(),
+        kind,
+        details,
+      };
+      pushBoundedTraceItem(traceConsole, consoleEvent, TRACE_MAX_CONSOLE, 'console');
+    }
+
+    const label = details.name ||
+      details.url ||
+      details.to ||
+      details.key ||
+      kind.replace(/\./g, ' ');
+    const confidence = kind.startsWith('app.') ? 'direct' : kind.startsWith('network.') ? 'strong' : 'inferred';
+    recordTraceEvent(kind, `${kind}: ${truncate(label, 80)}`, details, {
+      confidence,
+      sampleDelayMs: kind.endsWith('.end') || kind.endsWith('.fire') ? 80 : 20,
+      causeWindowMs: kind.startsWith('network.') ? 1200 : TRACE_CAUSE_WINDOW_MS,
+    });
+  }
+
+  function onVibeProbeMessage(event) {
+    if (event.source !== window) return;
+    recordExternalProbeEvent(event.data);
+  }
+
+  function createTracePanelButton(label, onClick, variant = 'secondary') {
+    const button = document.createElement('button');
+    markPickerUi(button);
+    button.type = 'button';
+    button.textContent = label;
+    button.className = `element-picker-trace-button element-picker-trace-button-${variant}`;
+    button.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+      onClick();
+    });
+    return button;
+  }
+
+  function ensureTracePanel() {
+    if (tracePanel) return tracePanel;
+
+    tracePanel = document.createElement('div');
+    tracePanel.id = TRACE_PANEL_ID;
+    markPickerUi(tracePanel);
+    document.body.appendChild(tracePanel);
+    return tracePanel;
+  }
+
+  function toggleTracePanel() {
+    tracePanelOpen = !tracePanelOpen;
+    if (tracePanelOpen) {
+      ensureTracePanel();
+    }
+    updateTraceUi();
+  }
+
+  function getTraceStatusText() {
+    if (isTraceRecording) {
+      return `Recording +${getTraceTimeOffsetMs()} ms`;
+    }
+    if (traceEndedAt) {
+      return `Stopped at ${new Date(traceEndedAt).toLocaleTimeString()}`;
+    }
+    return 'Ready';
+  }
+
+  function renderTracePanel() {
+    if (!tracePanelOpen) {
+      if (tracePanel) tracePanel.style.display = 'none';
+      return;
+    }
+
+    const panel = ensureTracePanel();
+    panel.style.display = 'block';
+    panel.textContent = '';
+
+    const header = document.createElement('div');
+    header.className = 'element-picker-trace-header';
+
+    const title = document.createElement('div');
+    title.className = 'element-picker-trace-title';
+    title.textContent = 'Vibe Debugger';
+
+    const status = document.createElement('div');
+    status.className = 'element-picker-trace-status';
+    status.textContent = getTraceStatusText();
+
+    header.append(title, status);
+
+    const metrics = document.createElement('div');
+    metrics.className = 'element-picker-trace-metrics';
+    metrics.textContent = `${watchTargets.length} watched | ${traceEvents.length} events | ${getRecentDiffSamples(999).length} diffs`;
+
+    const controls = document.createElement('div');
+    controls.className = 'element-picker-trace-controls';
+    controls.append(
+      createTracePanelButton('Watch selected', watchCurrentSelection),
+      createTracePanelButton(isTraceRecording ? 'Stop' : 'Record', toggleTraceRecording, isTraceRecording ? 'danger' : 'primary'),
+      createTracePanelButton('Send Trace', sendTraceToCodex, 'primary'),
+      createTracePanelButton('Clear', () => {
+        clearTraceData({ keepWatchTargets: true });
+        showToast('Trace timeline cleared. Watch targets kept.', 1800);
+      }),
+      createTracePanelButton('Close', () => {
+        tracePanelOpen = false;
+        updateTraceUi();
+      })
+    );
+
+    const watchSection = document.createElement('div');
+    watchSection.className = 'element-picker-trace-section';
+    const watchHeading = document.createElement('div');
+    watchHeading.className = 'element-picker-trace-section-title';
+    watchHeading.textContent = 'Watch Window';
+    watchSection.appendChild(watchHeading);
+
+    if (watchTargets.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'element-picker-trace-empty';
+      empty.textContent = 'Select or hover a page element, then click Watch selected.';
+      watchSection.appendChild(empty);
+    } else {
+      watchTargets.slice(-8).forEach((target) => {
+        const row = document.createElement('div');
+        row.className = 'element-picker-trace-watch-row';
+
+        const name = document.createElement('div');
+        name.className = 'element-picker-trace-watch-name';
+        name.textContent = `${target.label} (${target.watchId})`;
+
+        const snapshot = target.latestSnapshot;
+        const state = document.createElement('div');
+        state.className = 'element-picker-trace-watch-state';
+        if (!snapshot) {
+          state.textContent = 'No sample yet';
+        } else if (snapshot.connected === false) {
+          state.textContent = 'stale / disconnected';
+        } else if (target.kind === 'app') {
+          state.textContent = formatTraceValue(snapshot.app?.value);
+        } else {
+          const visibleText = snapshot.visibility?.visible ? 'visible' : 'hidden';
+          const domText = snapshot.dom?.text ? ` | "${truncate(snapshot.dom.text, 54)}"` : '';
+          state.textContent = `${visibleText}${domText}`;
+        }
+
+        row.append(name, state);
+        watchSection.appendChild(row);
+      });
+    }
+
+    const summarySection = document.createElement('div');
+    summarySection.className = 'element-picker-trace-section';
+    const summaryHeading = document.createElement('div');
+    summaryHeading.className = 'element-picker-trace-section-title';
+    summaryHeading.textContent = 'Why';
+    summarySection.appendChild(summaryHeading);
+    const summaries = buildTraceSummaries();
+    if (summaries.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'element-picker-trace-empty';
+      empty.textContent = 'No hidden, disabled, empty, or stale explanation yet.';
+      summarySection.appendChild(empty);
+    } else {
+      summaries.slice(0, 6).forEach((summary) => {
+        const row = document.createElement('div');
+        row.className = 'element-picker-trace-summary-row';
+        row.textContent = `${summary.title}: ${summary.body}`;
+        summarySection.appendChild(row);
+      });
+    }
+
+    const diffSection = document.createElement('div');
+    diffSection.className = 'element-picker-trace-section';
+    const diffHeading = document.createElement('div');
+    diffHeading.className = 'element-picker-trace-section-title';
+    diffHeading.textContent = 'Recent Diffs';
+    diffSection.appendChild(diffHeading);
+    const recentDiffs = getRecentDiffSamples(8);
+    if (recentDiffs.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'element-picker-trace-empty';
+      empty.textContent = 'No watched value changes recorded yet.';
+      diffSection.appendChild(empty);
+    } else {
+      recentDiffs.reverse().forEach((sample) => {
+        const target = watchTargets.find((item) => item.watchId === sample.watchId);
+        const row = document.createElement('div');
+        row.className = 'element-picker-trace-diff-row';
+
+        const label = document.createElement('div');
+        label.className = 'element-picker-trace-diff-label';
+        label.textContent = `+${sample.timeOffsetMs} ms ${target?.label || sample.watchId}`;
+
+        const body = document.createElement('div');
+        body.className = 'element-picker-trace-diff-body';
+        body.textContent = sample.diffs.slice(0, 3).map(formatTraceDiff).join(' | ');
+
+        const cause = document.createElement('div');
+        cause.className = 'element-picker-trace-diff-cause';
+        cause.textContent = `Cause: ${sample.cause?.label || 'unknown'} (${sample.confidence || 'inferred'})`;
+
+        row.append(label, body, cause);
+        diffSection.appendChild(row);
+      });
+    }
+
+    const eventSection = document.createElement('div');
+    eventSection.className = 'element-picker-trace-section';
+    const eventHeading = document.createElement('div');
+    eventHeading.className = 'element-picker-trace-section-title';
+    eventHeading.textContent = 'Timeline';
+    eventSection.appendChild(eventHeading);
+    const recentEvents = traceEvents.slice(-10).reverse();
+    if (recentEvents.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'element-picker-trace-empty';
+      empty.textContent = 'Record user actions, route changes, network calls, timers, and app probes.';
+      eventSection.appendChild(empty);
+    } else {
+      recentEvents.forEach((traceEvent) => {
+        const row = document.createElement('div');
+        row.className = 'element-picker-trace-event-row';
+        row.textContent = `+${traceEvent.timeOffsetMs} ms ${traceEvent.kind}: ${truncate(traceEvent.label, 86)}`;
+        eventSection.appendChild(row);
+      });
+    }
+
+    const footer = document.createElement('div');
+    footer.className = 'element-picker-trace-footer';
+    footer.textContent = latestTraceManifest?.latestDir
+      ? `Latest sent: ${latestTraceManifest.latestDir}`
+      : 'Trace exports write to ~/CodexInbox/web-qa/traces/latest.';
+
+    panel.append(header, metrics, controls, watchSection, summarySection, diffSection, eventSection, footer);
+  }
+
+  function updateTraceUi() {
+    if (watchButton) {
+      watchButton.textContent = watchTargets.length ? `Watch ${watchTargets.length}` : 'Watch';
+      watchButton.title = watchTargets.length
+        ? `${watchTargets.length} vibe debugger watch ${pluralize(watchTargets.length, 'target', 'targets')}`
+        : 'Watch the selected or hovered element over time';
+    }
+
+    if (recordButton) {
+      recordButton.textContent = isTraceRecording ? 'Stop' : 'Record';
+      recordButton.title = isTraceRecording ? 'Stop vibe trace recording' : 'Record watched state over time';
+      recordButton.classList.toggle('element-picker-toolbar-button-danger', isTraceRecording);
+    }
+
+    if (traceButton) {
+      traceButton.textContent = tracePanelOpen ? 'Hide Trace' : 'Trace';
+    }
+
+    if (sendTraceButton) {
+      sendTraceButton.disabled = watchTargets.length === 0 && traceEvents.length === 0;
+    }
+
+    renderTracePanel();
   }
 
   function getElementRect(selection) {
@@ -2373,6 +3820,37 @@
     };
   }
 
+  function getActiveTraceContext() {
+    if (
+      watchTargets.length === 0 &&
+      traceEvents.length === 0 &&
+      traceSamples.length === 0 &&
+      !latestTraceManifest
+    ) {
+      return null;
+    }
+
+    return {
+      schemaVersion: TRACE_SCHEMA_VERSION,
+      recording: isTraceRecording,
+      startedAt: traceStartedAt,
+      endedAt: traceEndedAt,
+      watchTargetCount: watchTargets.length,
+      eventCount: traceEvents.length,
+      sampleCount: traceSamples.length,
+      mutationCount: traceMutations.length,
+      latestTrace: latestTraceManifest,
+      watchTargets: getSerializableWatchTargets().map((target) => ({
+        watchId: target.watchId,
+        kind: target.kind,
+        label: target.label,
+        selector: target.selector,
+        locator: target.locator,
+      })),
+      activeCause: getTraceCause(),
+    };
+  }
+
   function buildBundle(screenshotData, options = {}) {
     const elements = selections.map((selection) => {
       const crop = screenshotData.crops.find((item) => item.index === selection.info.index) || null;
@@ -2393,6 +3871,7 @@
       browserContext: getBrowserContextSnapshot(),
       userComment: getUserComment(),
       tourContext: options.tourContext || getActiveTourContext(),
+      traceContext: getActiveTraceContext(),
       totalElements: elements.length,
       screenshot: {
         status: screenshotData.status,
@@ -2683,6 +4162,36 @@
     return lines;
   }
 
+  function formatTraceContextLines(traceContext) {
+    if (!traceContext) return [];
+
+    const lines = [
+      '## Vibe Trace Context',
+      `Recording: ${traceContext.recording ? 'yes' : 'no'}`,
+      `Watch targets: ${traceContext.watchTargetCount}`,
+      `Events: ${traceContext.eventCount}`,
+      `Samples: ${traceContext.sampleCount}`,
+    ];
+
+    if (traceContext.latestTrace?.latestDir) {
+      lines.push(`Latest trace directory: ${traceContext.latestTrace.latestDir}`);
+    }
+
+    if (traceContext.activeCause) {
+      lines.push(`Active cause: ${traceContext.activeCause.label} (${traceContext.activeCause.confidence})`);
+    }
+
+    if (traceContext.watchTargets?.length) {
+      lines.push('Watched targets:');
+      traceContext.watchTargets.slice(0, 8).forEach((target) => {
+        lines.push(`- ${target.watchId}: ${target.label}`);
+      });
+    }
+
+    lines.push('');
+    return lines;
+  }
+
   function formatSessionControlLines(bundle) {
     if (bundle.tourContext) {
       return [
@@ -2719,6 +4228,7 @@
       bundle.userComment || null,
       bundle.userComment ? '' : null,
       ...formatTourContextLines(bundle.tourContext),
+      ...formatTraceContextLines(bundle.traceContext),
       ...formatSessionControlLines(bundle),
       '## Visual Capture',
       `Status: ${bundle.screenshot.status}`,
@@ -2954,6 +4464,9 @@
       queueTourPanelPlacement();
     }
     updateBadges();
+    if (isTraceRecording) {
+      scheduleWatchSample('viewport.change', 120);
+    }
   }
 
   function onKeyDown(event) {
@@ -2994,26 +4507,44 @@
   }
 
   function cleanup() {
+    stopTraceRecording({ silent: true });
+    window.postMessage({ source: 'element-picker-vibe-probe-control', command: 'stop' }, '*');
     document.removeEventListener('mousemove', onMouseMove, true);
     document.removeEventListener('click', onClick, true);
     document.removeEventListener('keydown', onKeyDown, true);
+    document.removeEventListener('click', onRecordedUserEvent, true);
+    document.removeEventListener('input', onRecordedUserEvent, true);
+    document.removeEventListener('change', onRecordedUserEvent, true);
+    document.removeEventListener('submit', onRecordedUserEvent, true);
+    document.removeEventListener('keydown', onRecordedUserEvent, true);
+    document.removeEventListener('pointerdown', onRecordedUserEvent, true);
+    window.removeEventListener('message', onVibeProbeMessage);
     window.removeEventListener('scroll', onViewportChange, true);
     window.removeEventListener('resize', onViewportChange, true);
     chrome.runtime.onMessage.removeListener(onRuntimeMessage);
+    stopMutationRecording();
 
     if (overlay) overlay.remove();
     if (badgeLayer) badgeLayer.remove();
     if (toolbar) toolbar.remove();
+    if (tracePanel) tracePanel.remove();
     clearTour();
 
     overlay = null;
     badgeLayer = null;
     toolbar = null;
     pauseButton = null;
+    watchButton = null;
+    recordButton = null;
+    traceButton = null;
+    sendTraceButton = null;
     countBadge = null;
     commentInput = null;
+    tracePanel = null;
+    tracePanelOpen = false;
     currentElement = null;
     selections = [];
+    watchTargets = [];
     isExporting = false;
     isPaused = true;
     window.__elementPickerActive = false;
@@ -3026,9 +4557,16 @@
   document.addEventListener('mousemove', onMouseMove, true);
   document.addEventListener('click', onClick, true);
   document.addEventListener('keydown', onKeyDown, true);
+  document.addEventListener('click', onRecordedUserEvent, true);
+  document.addEventListener('input', onRecordedUserEvent, true);
+  document.addEventListener('change', onRecordedUserEvent, true);
+  document.addEventListener('submit', onRecordedUserEvent, true);
+  document.addEventListener('keydown', onRecordedUserEvent, true);
+  document.addEventListener('pointerdown', onRecordedUserEvent, true);
+  window.addEventListener('message', onVibeProbeMessage);
   window.addEventListener('scroll', onViewportChange, true);
   window.addEventListener('resize', onViewportChange, true);
   chrome.runtime.onMessage.addListener(onRuntimeMessage);
 
-  showToast('QA Bridge paused: click elements, then Send to Codex or Copy. Resume restores page interaction.', 3600);
+  showToast('QA Bridge paused: click elements, watch them, then record or send captures to Codex.', 3600);
 })();

@@ -1,11 +1,11 @@
 ---
 name: web-qa-capture
-description: Inspect and explain the latest local web QA capture, or post a guided review tour, using the Element Picker QA Bridge Chrome extension. Use when the user says "look at latest QA capture", "explain this page capture", "inspect the QA inbox", "what is going on here", "walk me through this page", or asks Codex to debug or annotate a selected webpage element from a Chrome extension capture.
+description: Inspect and explain the latest local web QA capture or Vibe Debugger trace, or post a guided review tour, using the Element Picker QA Bridge Chrome extension. Use when the user says "look at latest QA capture", "look at latest trace", "why did this disappear", "explain this page capture", "inspect the QA inbox", "what is going on here", "walk me through this page", or asks Codex to debug or annotate a selected webpage element from a Chrome extension capture.
 ---
 
 # Web QA Capture
 
-Use this skill when the user wants Codex to consume a capture from the local Element Picker QA Bridge.
+Use this skill when the user wants Codex to consume a capture or Vibe Debugger trace from the local Element Picker QA Bridge.
 
 Use the guided review workflow when the user wants Codex to talk back to the page, walk them through a web UI, or annotate an engineer's delivered work.
 
@@ -15,12 +15,22 @@ The extension writes captures to:
 
 `~/CodexInbox/web-qa/latest`
 
+The Vibe Debugger writes temporal traces to:
+
+`~/CodexInbox/web-qa/traces/latest`
+
 Expected files:
 
 - `manifest.json`: capture ID, timestamp, page URL, selected element count, and artifact paths.
 - `bundle.md`: Markdown summary intended for quick reading.
 - `bundle.json`: structured page, user comment, guided tour context when present, selected element, locator, style, React, scroll, screenshot, and Playwright repro data.
 - `images/`: highlighted viewport and crop images when available.
+
+Expected trace files:
+
+- `manifest.json`: trace ID, timestamp, page URL, watch/event/sample counts, and artifact paths.
+- `trace.md`: Markdown summary with watched targets, recent diffs, explanations, and timeline rows.
+- `trace.json`: structured watch targets, events, samples, DOM mutations, network events, console events, and summaries.
 
 ## Workflow
 
@@ -30,8 +40,25 @@ Expected files:
 4. Use `view_image` for `images/highlighted-viewport.*` and relevant `images/element-XX.*` files when present.
 5. Treat `userComment` as the user's live observation or question about the selected elements, and answer it directly before branching into broader analysis.
 6. If `tourContext` is present, treat it as the active guided-review step. Read `tourContext.askText`, the tour title/summary, the step index, step title/body, URL, selector/text target, and target-found flags before analyzing broader page state.
-7. Explain what the selected UI appears to be, what state it is in, and what evidence supports that interpretation.
-8. If the user wants a fix, map the capture back to the likely owning repo/code path from the URL, locators, text, React component chain, and nearby DOM context, then inspect the real repo before editing.
+7. If `traceContext` is present, check whether `latestTrace.latestDir` exists and inspect the related trace when the user's question is about changes over time.
+8. Explain what the selected UI appears to be, what state it is in, and what evidence supports that interpretation.
+9. If the user wants a fix, map the capture back to the likely owning repo/code path from the URL, locators, text, React component chain, and nearby DOM context, then inspect the real repo before editing.
+
+## Vibe Debugger Trace Workflow
+
+Use this workflow when the user says `look at latest trace`, asks why a UI became hidden/disabled/empty/stale, or asks what changed over time.
+
+1. Read `~/CodexInbox/web-qa/traces/latest/manifest.json` first.
+2. Read `trace.md` for a compact timeline and explanation summary.
+3. Read `trace.json` when exact paths, values, cause confidence, app probe values, network status, or mutation details matter.
+4. Lead with the strongest confirmed before/after diff. Include the watch target, changed path, old value, new value, and time offset.
+5. Then name the likely cause. Separate direct evidence from inferred cause attribution:
+   - `direct`: app probe emitted the value/action.
+   - `strong`: change happened during a known user/network/timer event window.
+   - `inferred`: change was near a mutation/timer/route event, but not directly observed.
+   - `unknown`: no cause evidence.
+6. Use `summaries` for quick hidden/disabled/empty/stale explanations, but verify important claims against `samples`.
+7. If the trace points to a likely source component or route, inspect the real repo before proposing a fix.
 
 ## Guided Review Workflow
 
@@ -72,6 +99,7 @@ curl -sS http://127.0.0.1:43117/tours \
 ## Response Expectations
 
 - Lead with the practical explanation of what is happening on the page.
+- For traces, lead with the practical explanation of what changed over time.
 - Call out suspicious evidence: disabled controls, hidden overflow, pointer-events, stale route/state, duplicated labels, wrong role/name, offscreen content, failed capture, missing image, or non-unique locators.
 - Separate confirmed capture facts from inferences.
 - Include exact file paths for the capture artifacts you inspected.
@@ -84,5 +112,9 @@ ls -la ~/CodexInbox/web-qa/latest
 jq '.captureId, .page, .totalElements, .files' ~/CodexInbox/web-qa/latest/manifest.json
 jq '{userComment, tourContext}' ~/CodexInbox/web-qa/latest/bundle.json
 jq '.elements[] | {index, tag, text, primaryLocator, reactComponents, styles, formState, scrollDiagnostics}' ~/CodexInbox/web-qa/latest/bundle.json
+ls -la ~/CodexInbox/web-qa/traces/latest
+jq '.traceId, .page, .totalWatchTargets, .totalEvents, .totalSamples, .files' ~/CodexInbox/web-qa/traces/latest/manifest.json
+jq '.summaries, .samples[-10:] | .' ~/CodexInbox/web-qa/traces/latest/trace.json
 curl -sS http://127.0.0.1:43117/tours/latest | jq '{title: .tour.title, steps: [.tour.steps[] | {title, url, selector, text}]}'
+curl -sS http://127.0.0.1:43117/traces/latest | jq '{traceId: .trace.traceId, events: (.trace.events | length), samples: (.trace.samples | length)}'
 ```

@@ -15,6 +15,7 @@
   const CODEX_INBOX_URL = 'http://127.0.0.1:43117/captures';
   const CODEX_TRACE_URL = 'http://127.0.0.1:43117/traces';
   const CODEX_TOUR_URL = 'http://127.0.0.1:43117/tours/latest';
+  const CODEX_HEALTH_URL = 'http://127.0.0.1:43117/health';
   const TOUR_PANEL_ID = '__element-picker-tour-panel';
   const TOUR_HIGHLIGHT_ID = '__element-picker-tour-highlight';
   const TOUR_PANEL_POSITIONS = ['top-right', 'bottom-right', 'bottom-left', 'top-left'];
@@ -58,6 +59,12 @@
   let sendTraceButton = null;
   let countBadge = null;
   let commentInput = null;
+  let toastLayer = null;
+  let statusPill = null;
+  let inboxHealth = 'unknown';
+  let vibeToggleButton = null;
+  let vibeGroup = null;
+  let vibeGroupOpen = false;
   let currentElement = null;
   let selections = [];
   let isExporting = false;
@@ -370,14 +377,33 @@
     });
   }
 
+  function ensureToastLayer() {
+    if (toastLayer && toastLayer.isConnected) return toastLayer;
+
+    toastLayer = document.createElement('div');
+    markPickerUi(toastLayer);
+    toastLayer.style.cssText = [
+      'position: fixed',
+      'top: 16px',
+      'left: 16px',
+      'z-index: 2147483647',
+      'display: flex',
+      'flex-direction: column',
+      'gap: 8px',
+      'pointer-events: none',
+      'max-width: min(460px, calc(100vw - 32px))',
+    ].join(';');
+    document.body.appendChild(toastLayer);
+    return toastLayer;
+  }
+
   function showToast(message, duration = 2000) {
+    const layer = ensureToastLayer();
+
     const toast = document.createElement('div');
     markPickerUi(toast);
     toast.textContent = message;
     toast.style.cssText = [
-      'position: fixed',
-      'top: 16px',
-      'left: 16px',
       'background: #111827',
       'color: #fff',
       'padding: 12px 18px',
@@ -385,15 +411,19 @@
       'font-family: ui-sans-serif, system-ui, sans-serif',
       'font-size: 13px',
       'line-height: 1.25',
-      'z-index: 2147483647',
       'box-shadow: 0 10px 20px rgba(0,0,0,0.35)',
       'pointer-events: none',
-      'max-width: min(460px, calc(100vw - 32px))',
       'text-align: left',
     ].join(';');
 
-    document.body.appendChild(toast);
-    window.setTimeout(() => toast.remove(), duration);
+    layer.appendChild(toast);
+    window.setTimeout(() => {
+      toast.remove();
+      if (toastLayer && !toastLayer.childElementCount) {
+        toastLayer.remove();
+        toastLayer = null;
+      }
+    }, duration);
   }
 
   function createTourHighlight() {
@@ -846,6 +876,7 @@
       isPaused = true;
       renderTourStep();
       updateToolbarState();
+      setInboxHealth('online');
       showToast(`Loaded guided review: ${activeTour.title}`, 2400);
     } catch (error) {
       console.error('Failed to load Codex guided review:', error);
@@ -853,7 +884,15 @@
     }
   }
 
-  function onRuntimeMessage(message) {
+  function onRuntimeMessage(message, sender, sendResponse) {
+    if (message?.type === 'ELEMENT_PICKER_TOGGLE') {
+      cleanup();
+      if (typeof sendResponse === 'function') {
+        sendResponse({ ok: true, closed: true });
+      }
+      return;
+    }
+
     if (message?.type !== 'ELEMENT_PICKER_RESUME_TOUR' || !message.tour) {
       return;
     }
@@ -900,6 +939,92 @@
 
   function getUserComment() {
     return normalizeWhitespace(commentInput?.value || '') || null;
+  }
+
+  const INBOX_HEALTH_LABELS = {
+    online: 'Inbox',
+    offline: 'Inbox off',
+    checking: 'Inbox…',
+    unknown: 'Inbox?',
+  };
+
+  const INBOX_HEALTH_TITLES = {
+    online: 'Codex QA inbox is reachable. Click to re-check.',
+    offline: 'Codex QA inbox is offline. Run `npm run inbox`, then click to re-check.',
+    checking: 'Checking the Codex QA inbox connection…',
+    unknown: 'Click to check the Codex QA inbox connection.',
+  };
+
+  function setInboxHealth(state) {
+    inboxHealth = state;
+    if (!statusPill) return;
+
+    statusPill.dataset.state = state;
+    const label = statusPill.querySelector('.element-picker-toolbar-status-label');
+    if (label) label.textContent = INBOX_HEALTH_LABELS[state] || INBOX_HEALTH_LABELS.unknown;
+    statusPill.title = INBOX_HEALTH_TITLES[state] || INBOX_HEALTH_TITLES.unknown;
+  }
+
+  async function checkInboxHealth({ silent = true } = {}) {
+    setInboxHealth('checking');
+
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: 'ELEMENT_PICKER_CHECK_INBOX',
+        healthUrl: CODEX_HEALTH_URL,
+      });
+
+      if (response?.ok) {
+        setInboxHealth('online');
+        if (!silent) showToast('Codex QA inbox is reachable.', 1800);
+        return true;
+      }
+
+      setInboxHealth('offline');
+      if (!silent) showToast('Codex QA inbox is offline. Run `npm run inbox` to enable Send to Codex.', 3400);
+      return false;
+    } catch {
+      setInboxHealth('offline');
+      if (!silent) showToast('Codex QA inbox is offline. Run `npm run inbox` to enable Send to Codex.', 3400);
+      return false;
+    }
+  }
+
+  function createStatusPill() {
+    const pill = document.createElement('button');
+    markPickerUi(pill);
+    pill.type = 'button';
+    pill.className = 'element-picker-toolbar-status';
+    pill.dataset.state = 'unknown';
+
+    const dot = document.createElement('span');
+    dot.className = 'element-picker-toolbar-status-dot';
+
+    const label = document.createElement('span');
+    label.className = 'element-picker-toolbar-status-label';
+    label.textContent = INBOX_HEALTH_LABELS.unknown;
+
+    pill.append(dot, label);
+    pill.title = INBOX_HEALTH_TITLES.unknown;
+    pill.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+      checkInboxHealth({ silent: false });
+    });
+    return pill;
+  }
+
+  function setVibeGroupOpen(open) {
+    vibeGroupOpen = open;
+    if (vibeGroup) {
+      vibeGroup.classList.toggle('element-picker-toolbar-group-hidden', !open);
+      vibeGroup.setAttribute('aria-hidden', open ? 'false' : 'true');
+    }
+    if (vibeToggleButton) {
+      vibeToggleButton.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }
+    updateTraceUi();
   }
 
   function isTextEntryElement(element) {
@@ -951,6 +1076,8 @@
     markPickerUi(countBadge);
     countBadge.className = 'element-picker-toolbar-count';
 
+    statusPill = createStatusPill();
+
     commentInput = createCommentInput();
 
     pauseButton = createToolbarButton('Resume', 'Resume normal page interaction', () => {
@@ -963,6 +1090,12 @@
       removeLastSelection();
       updateToolbarState();
     });
+
+    vibeToggleButton = createToolbarButton('Vibe ▾', 'Show or hide the Vibe Debugger controls (Watch, Record, Trace)', () => {
+      setVibeGroupOpen(!vibeGroupOpen);
+      if (vibeGroupOpen) showToast('Vibe Debugger controls shown.', 1200);
+    });
+    vibeToggleButton.setAttribute('aria-expanded', 'false');
 
     watchButton = createToolbarButton('Watch', 'Watch selected or hovered element over time', () => {
       watchCurrentSelection();
@@ -980,8 +1113,14 @@
       sendTraceToCodex();
     }, 'primary');
 
-    const copyButton = createToolbarButton('Copy', 'Copy selected element bundle to clipboard', () => {
-      exportBundle({ cleanupAfter: true });
+    vibeGroup = document.createElement('div');
+    markPickerUi(vibeGroup);
+    vibeGroup.className = 'element-picker-toolbar-group element-picker-toolbar-group-hidden';
+    vibeGroup.setAttribute('aria-hidden', 'true');
+    vibeGroup.append(watchButton, recordButton, traceButton, sendTraceButton);
+
+    const copyButton = createToolbarButton('Copy', 'Copy selected element bundle to clipboard (keeps the bridge open)', () => {
+      exportBundle();
     });
 
     const sendButton = createToolbarButton('Send to Codex', 'Save selected element bundle to the local Codex QA inbox', () => {
@@ -998,14 +1137,13 @@
 
     toolbar.append(
       title,
+      statusPill,
       countBadge,
       commentInput,
       pauseButton,
       undoButton,
-      watchButton,
-      recordButton,
-      traceButton,
-      sendTraceButton,
+      vibeToggleButton,
+      vibeGroup,
       copyButton,
       sendButton,
       tourButton,
@@ -1014,6 +1152,7 @@
     document.body.appendChild(toolbar);
     updateToolbarState();
     updateTraceUi();
+    checkInboxHealth({ silent: true });
   }
 
   function getReactFiberNode(element) {
@@ -3044,9 +3183,11 @@
         latestDir: response.latestDir || null,
       };
       updateTraceUi();
+      setInboxHealth('online');
       showToast(`Saved vibe trace ${response.traceId || ''}. Tell Codex: "look at latest trace."`, 4200);
     } catch (error) {
       console.error('Failed to send vibe trace:', error);
+      setInboxHealth('offline');
       showToast(`Trace send failed: ${error?.message || 'start the Codex QA inbox server'}`, 4200);
     }
   }
@@ -3357,6 +3498,22 @@
   }
 
   function updateTraceUi() {
+    if (vibeToggleButton) {
+      const caret = vibeGroupOpen ? '▴' : '▾';
+      const activitySuffix = isTraceRecording
+        ? ' ●'
+        : watchTargets.length
+          ? ` ${watchTargets.length}`
+          : '';
+      vibeToggleButton.textContent = `Vibe${activitySuffix} ${caret}`;
+      vibeToggleButton.classList.toggle('element-picker-toolbar-button-danger', isTraceRecording);
+      vibeToggleButton.title = isTraceRecording
+        ? 'Recording a Vibe trace. Click to show or hide the controls.'
+        : watchTargets.length
+          ? `${watchTargets.length} Vibe watch ${pluralize(watchTargets.length, 'target', 'targets')}. Click to show or hide the controls.`
+          : 'Show or hide the Vibe Debugger controls (Watch, Record, Trace)';
+    }
+
     if (watchButton) {
       watchButton.textContent = watchTargets.length ? `Watch ${watchTargets.length}` : 'Watch';
       watchButton.title = watchTargets.length
@@ -4347,7 +4504,7 @@
   }
 
   async function exportBundle(options = {}) {
-    const { cleanupAfter = true } = options;
+    const { cleanupAfter = false } = options;
     if (isExporting) return;
 
     if (!ensureSelectionForExport()) {
@@ -4363,7 +4520,7 @@
     try {
       const copyMode = await copyBundleToClipboard(bundle);
       if (copyMode === 'full') {
-        showToast(`Copied full debug bundle (${count} ${pluralize(count, 'element', 'elements')}).`, 2400);
+        showToast(`Copied full debug bundle (${count} ${pluralize(count, 'element', 'elements')}). Press ESC or Close when done.`, 2600);
       } else if (copyMode === 'slim') {
         showToast('Copied bundle without inline crop images.', 2600);
       } else {
@@ -4407,10 +4564,12 @@
         throw new Error(response?.error || 'Codex QA inbox did not accept the capture');
       }
 
+      setInboxHealth('online');
       showToast(`Saved QA capture ${response.captureId || ''}. Tell Codex: "look at latest QA capture."`, 4200);
       isExporting = false;
     } catch (error) {
       console.error('Failed to send bundle to Codex QA inbox:', error);
+      setInboxHealth('offline');
       isExporting = false;
       showToast(`Send failed: ${error?.message || 'start the Codex QA inbox server'}`, 4200);
     }
@@ -4528,6 +4687,7 @@
     if (badgeLayer) badgeLayer.remove();
     if (toolbar) toolbar.remove();
     if (tracePanel) tracePanel.remove();
+    if (toastLayer) toastLayer.remove();
     clearTour();
 
     overlay = null;
@@ -4540,6 +4700,12 @@
     sendTraceButton = null;
     countBadge = null;
     commentInput = null;
+    toastLayer = null;
+    statusPill = null;
+    inboxHealth = 'unknown';
+    vibeToggleButton = null;
+    vibeGroup = null;
+    vibeGroupOpen = false;
     tracePanel = null;
     tracePanelOpen = false;
     currentElement = null;

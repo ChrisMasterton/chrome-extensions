@@ -71,15 +71,17 @@ The skill tells Codex to read `~/CodexInbox/web-qa/latest/manifest.json`, inspec
 
 ## Usage
 
-1. Click the extension icon in your toolbar
+1. Click the extension icon in your toolbar (click it again to close the bridge)
 2. The page starts paused with a floating **QA Bridge** toolbar
 3. Hover elements to preview the highlight
 4. Click elements to add them to the current bundle
 5. Add a short comment in the toolbar when you want Codex to know what you noticed
 6. Click **Send to Codex** to write the bundle to `~/CodexInbox/web-qa/latest`
-7. Click **Copy** or press `Enter` to export the bundle to clipboard
+7. Click **Copy** or press `Enter` to export the bundle to clipboard; the bridge stays open so you can keep selecting
 8. Press `Backspace`/`Delete` (or `Cmd/Ctrl + Z`) to undo the last selection
-9. Click **Resume** to restore page interaction or press `ESC` to cancel
+9. Click **Resume** to restore page interaction, or click **Close**/the toolbar icon/`ESC` to end the session
+
+> The toolbar icon toggles the QA Bridge on a tab. On pages where extensions cannot run (for example `chrome://` pages, the Web Store, or PDFs) the icon shows a red **!** badge instead of failing silently.
 
 ## Local Codex Inbox
 
@@ -122,12 +124,15 @@ The server keeps a stable `latest` folder for the most recent capture and a time
 The Vibe Debugger adds a lightweight watch window and timeline to the same QA Bridge surface:
 
 1. Click the extension icon on a page.
-2. Select or hover the UI you care about.
-3. Click **Watch** to track that target.
-4. Click **Record**, then click **Resume** and use the page normally.
-5. Open **Trace** to see watched values, recent diffs, timeline events, and quick explanations like hidden, disabled, empty, or stale.
-6. Click **Send Trace** to write `trace.json`, `trace.md`, and `manifest.json` to `~/CodexInbox/web-qa/traces/latest`.
-7. In Codex, say: `look at latest trace`.
+2. Click **Vibe ▾** in the toolbar to reveal the Vibe Debugger controls (they are collapsed by default to keep the toolbar compact).
+3. Select or hover the UI you care about.
+4. Click **Watch** to track that target.
+5. Click **Record**, then click **Resume** and use the page normally.
+6. Open **Trace** to see watched values, recent diffs, timeline events, and quick explanations like hidden, disabled, empty, or stale.
+7. Click **Send Trace** to write `trace.json`, `trace.md`, and `manifest.json` to `~/CodexInbox/web-qa/traces/latest`.
+8. In Codex, say: `look at latest trace`.
+
+The **Vibe** toggle shows a `●` while recording and a count of active watch targets even when the controls are collapsed, so background activity stays visible.
 
 The generic browser-extension recorder observes user events, DOM mutations, route changes, fetch/XHR, timers, storage writes, console warnings/errors, selected-element React fiber props/state when available, and optional app probe events. It stores diffs instead of repeated identical snapshots.
 

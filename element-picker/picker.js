@@ -31,6 +31,15 @@
   const TRACE_CAUSE_WINDOW_MS = 1400;
   const TRACE_SAMPLE_DELAY_MS = 60;
   const TRACE_MUTATION_FLUSH_MS = 90;
+  const BREAK_ON_LOAD_DELAY_MS = 180;
+  const TRACE_ACTION_HELP = {
+    watch: 'Watch: choose the selected or hovered UI as a target and keep snapshots of its visible text, DOM state, layout, form state, styles, and React state when available.',
+    record: 'Record: start or stop the timeline that captures user actions, DOM changes, route changes, network calls, console output, app probes, and diffs for watched targets.',
+    trace: 'Trace: open the Vibe Debugger panel to review watched targets, recent diffs, likely causes, timeline events, and export status.',
+    send: 'Send Trace: save trace.json, trace.md, and manifest.json to the local Codex QA inbox so Codex can inspect them with "look at latest trace."',
+  };
+  const BREAK_ON_LOAD_HELP = 'Break on Load: pause the QA Bridge after route changes or same-origin full page loads so you can pick and watch the new screen.';
+  const CLICK_THROUGH_HELP = 'Click Through: let the next page click go to the app instead of selecting another element.';
 
   const TEST_ID_ATTRIBUTES = [
     'data-testid',
@@ -53,6 +62,8 @@
   let badgeLayer = null;
   let toolbar = null;
   let pauseButton = null;
+  let breakOnLoadButton = null;
+  let clickThroughButton = null;
   let watchButton = null;
   let recordButton = null;
   let traceButton = null;
@@ -69,6 +80,8 @@
   let selections = [];
   let isExporting = false;
   let isPaused = true;
+  let breakOnLoadEnabled = false;
+  let clickThroughArmed = false;
   let hiddenPickerUiSnapshot = [];
   let activeTour = null;
   let activeTourStepIndex = 0;
@@ -102,6 +115,7 @@
   let queuedMutations = [];
   let mutationFlushTimer = null;
   let watchSampleTimer = null;
+  let breakOnLoadTimer = null;
 
   function isElementNode(node) {
     return !!node && node.nodeType === Node.ELEMENT_NODE;
@@ -893,6 +907,14 @@
       return;
     }
 
+    if (message?.type === 'ELEMENT_PICKER_BREAK_ON_LOAD_RESUME') {
+      setBreakOnLoadEnabled(true, { persist: false });
+      isPaused = true;
+      updateToolbarState();
+      showToast('Break on Load paused this page. Pick a target, then click Watch.', 3000);
+      return;
+    }
+
     if (message?.type !== 'ELEMENT_PICKER_RESUME_TOUR' || !message.tour) {
       return;
     }
@@ -916,6 +938,7 @@
     button.type = 'button';
     button.textContent = label;
     button.title = title;
+    button.setAttribute('aria-label', title || label);
     button.className = `element-picker-toolbar-button element-picker-toolbar-button-${variant}`;
     button.addEventListener('click', (event) => {
       event.preventDefault();
@@ -1053,6 +1076,26 @@
         : 'Pause page interaction and inspect elements';
     }
 
+    if (breakOnLoadButton) {
+      breakOnLoadButton.textContent = breakOnLoadEnabled ? 'Break Load On' : 'Break on Load';
+      breakOnLoadButton.title = breakOnLoadEnabled
+        ? 'Break on Load is on. QA Bridge will pause after route changes or same-origin page loads.'
+        : BREAK_ON_LOAD_HELP;
+      breakOnLoadButton.setAttribute('aria-label', breakOnLoadButton.title);
+      breakOnLoadButton.setAttribute('aria-pressed', breakOnLoadEnabled ? 'true' : 'false');
+      breakOnLoadButton.classList.toggle('element-picker-toolbar-button-primary', breakOnLoadEnabled);
+    }
+
+    if (clickThroughButton) {
+      clickThroughButton.textContent = clickThroughArmed ? 'Click Armed' : 'Click Through';
+      clickThroughButton.title = clickThroughArmed
+        ? 'The next page click will go to the app instead of selecting another element.'
+        : CLICK_THROUGH_HELP;
+      clickThroughButton.setAttribute('aria-label', clickThroughButton.title);
+      clickThroughButton.setAttribute('aria-pressed', clickThroughArmed ? 'true' : 'false');
+      clickThroughButton.classList.toggle('element-picker-toolbar-button-primary', clickThroughArmed);
+    }
+
     if (countBadge) {
       countBadge.textContent = `${selections.length} selected`;
     }
@@ -1060,6 +1103,63 @@
     if (overlay) {
       overlay.style.display = isPaused && !tourActive && currentElement ? overlay.style.display : 'none';
     }
+  }
+
+  function persistBreakOnLoadState() {
+    try {
+      chrome.runtime.sendMessage({
+        type: 'ELEMENT_PICKER_SET_BREAK_ON_LOAD',
+        enabled: breakOnLoadEnabled,
+      }, () => {
+        if (chrome.runtime.lastError) {
+          console.warn('Unable to persist Break on Load state:', chrome.runtime.lastError.message);
+        }
+      });
+    } catch (error) {
+      console.warn('Unable to persist Break on Load state:', error);
+    }
+  }
+
+  function setBreakOnLoadEnabled(enabled, options = {}) {
+    const { notify = false, persist = true } = options;
+    breakOnLoadEnabled = !!enabled;
+
+    if (!breakOnLoadEnabled && breakOnLoadTimer) {
+      window.clearTimeout(breakOnLoadTimer);
+      breakOnLoadTimer = null;
+    }
+
+    if (persist) {
+      persistBreakOnLoadState();
+    }
+
+    updateToolbarState();
+
+    if (notify) {
+      showToast(
+        breakOnLoadEnabled
+          ? 'Break on Load enabled. Resume and navigate; QA Bridge will pause on the next screen.'
+          : 'Break on Load disabled.',
+        2400
+      );
+    }
+  }
+
+  function pauseForBreakOnLoad(reason = 'route change') {
+    if (!breakOnLoadEnabled || isTourActive()) return;
+
+    if (breakOnLoadTimer) {
+      window.clearTimeout(breakOnLoadTimer);
+    }
+
+    breakOnLoadTimer = window.setTimeout(() => {
+      breakOnLoadTimer = null;
+      if (!breakOnLoadEnabled || isTourActive()) return;
+
+      isPaused = true;
+      updateToolbarState();
+      showToast(`Break on Load paused after ${reason}. Pick a target, then click Watch.`, 3000);
+    }, BREAK_ON_LOAD_DELAY_MS);
   }
 
   function createToolbar() {
@@ -1082,8 +1182,26 @@
 
     pauseButton = createToolbarButton('Resume', 'Resume normal page interaction', () => {
       isPaused = !isPaused;
+      if (!isPaused) {
+        clickThroughArmed = false;
+      }
       updateToolbarState();
       showToast(isPaused ? 'Page paused. Click elements to inspect.' : 'Page interaction resumed. Toolbar remains available.', 1800);
+    });
+
+    breakOnLoadButton = createToolbarButton('Break on Load', BREAK_ON_LOAD_HELP, () => {
+      setBreakOnLoadEnabled(!breakOnLoadEnabled, { notify: true });
+    });
+
+    clickThroughButton = createToolbarButton('Click Through', CLICK_THROUGH_HELP, () => {
+      clickThroughArmed = !clickThroughArmed;
+      updateToolbarState();
+      showToast(
+        clickThroughArmed
+          ? 'Click Through armed. The next page click will go to the app.'
+          : 'Click Through cancelled.',
+        2200
+      );
     });
 
     const undoButton = createToolbarButton('Undo', 'Remove latest selected element', () => {
@@ -1097,19 +1215,19 @@
     });
     vibeToggleButton.setAttribute('aria-expanded', 'false');
 
-    watchButton = createToolbarButton('Watch', 'Watch selected or hovered element over time', () => {
+    watchButton = createToolbarButton('Watch', TRACE_ACTION_HELP.watch, () => {
       watchCurrentSelection();
     });
 
-    recordButton = createToolbarButton('Record', 'Record watched state over time', () => {
+    recordButton = createToolbarButton('Record', TRACE_ACTION_HELP.record, () => {
       toggleTraceRecording();
     });
 
-    traceButton = createToolbarButton('Trace', 'Show the vibe debugger watch window and timeline', () => {
+    traceButton = createToolbarButton('Trace', TRACE_ACTION_HELP.trace, () => {
       toggleTracePanel();
     });
 
-    sendTraceButton = createToolbarButton('Send Trace', 'Save the vibe debugger trace to the local Codex QA inbox', () => {
+    sendTraceButton = createToolbarButton('Send Trace', TRACE_ACTION_HELP.send, () => {
       sendTraceToCodex();
     }, 'primary');
 
@@ -1141,6 +1259,8 @@
       countBadge,
       commentInput,
       pauseButton,
+      breakOnLoadButton,
+      clickThroughButton,
       undoButton,
       vibeToggleButton,
       vibeGroup,
@@ -3236,6 +3356,10 @@
     const kind = data.kind || 'probe.event';
     const details = sanitizeTraceValue(data.details || {});
 
+    if (kind.startsWith('route.')) {
+      pauseForBreakOnLoad('route change');
+    }
+
     if (kind === 'app.watch') {
       addAppWatchTarget(details.name, details.value, details.options || {});
       recordTraceEvent(kind, `watch ${details.name || 'app value'}`, details, {
@@ -3284,11 +3408,13 @@
     recordExternalProbeEvent(event.data);
   }
 
-  function createTracePanelButton(label, onClick, variant = 'secondary') {
+  function createTracePanelButton(label, onClick, variant = 'secondary', title = '') {
     const button = document.createElement('button');
     markPickerUi(button);
     button.type = 'button';
     button.textContent = label;
+    button.title = title || label;
+    button.setAttribute('aria-label', title || label);
     button.className = `element-picker-trace-button element-picker-trace-button-${variant}`;
     button.addEventListener('click', (event) => {
       event.preventDefault();
@@ -3357,17 +3483,17 @@
     const controls = document.createElement('div');
     controls.className = 'element-picker-trace-controls';
     controls.append(
-      createTracePanelButton('Watch selected', watchCurrentSelection),
-      createTracePanelButton(isTraceRecording ? 'Stop' : 'Record', toggleTraceRecording, isTraceRecording ? 'danger' : 'primary'),
-      createTracePanelButton('Send Trace', sendTraceToCodex, 'primary'),
+      createTracePanelButton('Watch selected', watchCurrentSelection, 'secondary', TRACE_ACTION_HELP.watch),
+      createTracePanelButton(isTraceRecording ? 'Stop' : 'Record', toggleTraceRecording, isTraceRecording ? 'danger' : 'primary', TRACE_ACTION_HELP.record),
+      createTracePanelButton('Send Trace', sendTraceToCodex, 'primary', TRACE_ACTION_HELP.send),
       createTracePanelButton('Clear', () => {
         clearTraceData({ keepWatchTargets: true });
         showToast('Trace timeline cleared. Watch targets kept.', 1800);
-      }),
+      }, 'secondary', 'Clear the trace timeline while keeping watched targets.'),
       createTracePanelButton('Close', () => {
         tracePanelOpen = false;
         updateTraceUi();
-      })
+      }, 'secondary', 'Close the Vibe Debugger panel.')
     );
 
     const watchSection = document.createElement('div');
@@ -3517,22 +3643,28 @@
     if (watchButton) {
       watchButton.textContent = watchTargets.length ? `Watch ${watchTargets.length}` : 'Watch';
       watchButton.title = watchTargets.length
-        ? `${watchTargets.length} vibe debugger watch ${pluralize(watchTargets.length, 'target', 'targets')}`
-        : 'Watch the selected or hovered element over time';
+        ? `${watchTargets.length} Vibe Debugger watch ${pluralize(watchTargets.length, 'target', 'targets')}. ${TRACE_ACTION_HELP.watch}`
+        : TRACE_ACTION_HELP.watch;
+      watchButton.setAttribute('aria-label', watchButton.title);
     }
 
     if (recordButton) {
       recordButton.textContent = isTraceRecording ? 'Stop' : 'Record';
-      recordButton.title = isTraceRecording ? 'Stop vibe trace recording' : 'Record watched state over time';
+      recordButton.title = isTraceRecording ? `Stop recording. ${TRACE_ACTION_HELP.record}` : TRACE_ACTION_HELP.record;
+      recordButton.setAttribute('aria-label', recordButton.title);
       recordButton.classList.toggle('element-picker-toolbar-button-danger', isTraceRecording);
     }
 
     if (traceButton) {
       traceButton.textContent = tracePanelOpen ? 'Hide Trace' : 'Trace';
+      traceButton.title = tracePanelOpen ? 'Hide the Vibe Debugger panel.' : TRACE_ACTION_HELP.trace;
+      traceButton.setAttribute('aria-label', traceButton.title);
     }
 
     if (sendTraceButton) {
       sendTraceButton.disabled = watchTargets.length === 0 && traceEvents.length === 0;
+      sendTraceButton.title = TRACE_ACTION_HELP.send;
+      sendTraceButton.setAttribute('aria-label', TRACE_ACTION_HELP.send);
     }
 
     renderTracePanel();
@@ -4592,6 +4724,18 @@
     if (isPickerUi(event.target)) return;
     if (!isPaused) return;
 
+    if (clickThroughArmed) {
+      const clickedElement = document.elementFromPoint(event.clientX, event.clientY);
+      if (isElementNode(clickedElement) && !isPickerUi(clickedElement)) {
+        currentElement = clickedElement;
+        updateOverlay(clickedElement);
+      }
+      clickThroughArmed = false;
+      updateToolbarState();
+      showToast('Click passed through to the page.', 1400);
+      return;
+    }
+
     event.preventDefault();
     event.stopPropagation();
     event.stopImmediatePropagation();
@@ -4666,6 +4810,7 @@
   }
 
   function cleanup() {
+    setBreakOnLoadEnabled(false);
     stopTraceRecording({ silent: true });
     window.postMessage({ source: 'element-picker-vibe-probe-control', command: 'stop' }, '*');
     document.removeEventListener('mousemove', onMouseMove, true);
@@ -4694,6 +4839,8 @@
     badgeLayer = null;
     toolbar = null;
     pauseButton = null;
+    breakOnLoadButton = null;
+    clickThroughButton = null;
     watchButton = null;
     recordButton = null;
     traceButton = null;
@@ -4713,6 +4860,8 @@
     watchTargets = [];
     isExporting = false;
     isPaused = true;
+    breakOnLoadEnabled = false;
+    clickThroughArmed = false;
     window.__elementPickerActive = false;
   }
 

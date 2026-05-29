@@ -123,14 +123,23 @@ The server keeps a stable `latest` folder for the most recent capture and a time
 
 The Vibe Debugger adds a lightweight watch window and timeline to the same QA Bridge surface:
 
+Plain English:
+
+- **Watch** chooses the UI target whose state should be sampled over time.
+- **Record** starts and stops the timeline of actions, DOM changes, route changes, network calls, console output, app probes, and watched-value diffs.
+- **Trace** opens the review panel; **Send Trace** exports the trace artifacts for Codex to inspect.
+- **Break on Load** pauses the QA Bridge after SPA route changes or same-origin page loads so you can add watches on the new screen.
+- **Click Through** arms the next page click so it goes to the app instead of selecting another element.
+
 1. Click the extension icon on a page.
 2. Click **Vibe ▾** in the toolbar to reveal the Vibe Debugger controls (they are collapsed by default to keep the toolbar compact).
 3. Select or hover the UI you care about.
 4. Click **Watch** to track that target.
 5. Click **Record**, then click **Resume** and use the page normally.
-6. Open **Trace** to see watched values, recent diffs, timeline events, and quick explanations like hidden, disabled, empty, or stale.
-7. Click **Send Trace** to write `trace.json`, `trace.md`, and `manifest.json` to `~/CodexInbox/web-qa/traces/latest`.
-8. In Codex, say: `look at latest trace`.
+6. Click **Break on Load** before navigating when you want the QA Bridge to pause again on the next screen.
+7. Open **Trace** to see watched values, recent diffs, timeline events, and quick explanations like hidden, disabled, empty, or stale.
+8. Click **Send Trace** to write `trace.json`, `trace.md`, and `manifest.json` to `~/CodexInbox/web-qa/traces/latest`.
+9. In Codex, say: `look at latest trace`.
 
 The **Vibe** toggle shows a `●` while recording and a count of active watch targets even when the controls are collapsed, so background activity stays visible.
 

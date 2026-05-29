@@ -549,9 +549,22 @@ async function run() {
         }));
       };
       const save = document.querySelector('#save-button');
+      const detailsWrapper = document.querySelector('#details-wrapper');
       click(save);
       await delay(80);
       click(buttonByText('Watch'));
+      await delay(80);
+      click(buttonByText('Click Through'));
+      await delay(80);
+      click(document.querySelector('#toggle-details'));
+      await delay(160);
+      if (!detailsWrapper.classList.contains('is-hidden')) {
+        throw new Error('Click Through should activate the page button while paused');
+      }
+      if (document.querySelector('#__element-picker-toolbar .element-picker-toolbar-count').textContent.trim() !== '1 selected') {
+        throw new Error('Click Through should not add another selected element');
+      }
+      click(buttonByText('Break on Load'));
       await delay(80);
       click(buttonByText('Record'));
       await delay(120);
@@ -572,6 +585,11 @@ async function run() {
       await delay(900);
       click(document.querySelector('#route-button'));
       await delay(300);
+      if (!buttonByText('Resume')) {
+        throw new Error('Break on Load should pause the QA Bridge after a route change');
+      }
+      click(buttonByText('Resume'));
+      await delay(120);
       click(save);
       await delay(220);
       click(buttonByText('Stop'));

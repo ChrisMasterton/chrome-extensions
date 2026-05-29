@@ -1,5 +1,6 @@
 // Handle extension icon click
 const pendingToursByTab = new Map();
+const breakOnLoadTabs = new Map();
 const CODEX_TRACE_URL = 'http://127.0.0.1:43117/traces';
 
 async function injectPicker(tabId) {
@@ -237,22 +238,43 @@ async function getLatestTour(tourUrl) {
 }
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-  if (changeInfo.status !== 'complete' || !pendingToursByTab.has(tabId)) {
+  if (changeInfo.status !== 'complete') {
     return;
   }
 
-  const pendingTour = pendingToursByTab.get(tabId);
-  pendingToursByTab.delete(tabId);
+  if (pendingToursByTab.has(tabId)) {
+    const pendingTour = pendingToursByTab.get(tabId);
+    pendingToursByTab.delete(tabId);
+
+    injectPicker(tabId)
+      .then(() => chrome.tabs.sendMessage(tabId, {
+        type: 'ELEMENT_PICKER_RESUME_TOUR',
+        tour: pendingTour.tour,
+        stepIndex: pendingTour.stepIndex,
+      }))
+      .catch((error) => {
+        console.warn('Unable to continue guided review after navigation:', error);
+      });
+    return;
+  }
+
+  if (!breakOnLoadTabs.has(tabId)) {
+    return;
+  }
 
   injectPicker(tabId)
     .then(() => chrome.tabs.sendMessage(tabId, {
-      type: 'ELEMENT_PICKER_RESUME_TOUR',
-      tour: pendingTour.tour,
-      stepIndex: pendingTour.stepIndex,
+      type: 'ELEMENT_PICKER_BREAK_ON_LOAD_RESUME',
+      reason: 'page-load',
     }))
     .catch((error) => {
-      console.warn('Unable to continue guided review after navigation:', error);
+      console.warn('Unable to pause QA Bridge after page load:', error);
     });
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  pendingToursByTab.delete(tabId);
+  breakOnLoadTabs.delete(tabId);
 });
 
 // Capture the visible tab so the content script can build element crops.
@@ -320,6 +342,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'ELEMENT_PICKER_GET_LATEST_TOUR') {
     getLatestTour(message.tourUrl).then(sendResponse);
     return true;
+  }
+
+  if (message.type === 'ELEMENT_PICKER_SET_BREAK_ON_LOAD') {
+    const tabId = sender?.tab?.id;
+    if (!tabId) {
+      sendResponse({ ok: false, error: 'Missing active tab for Break on Load' });
+      return;
+    }
+
+    if (message.enabled) {
+      breakOnLoadTabs.set(tabId, {
+        enabledAt: new Date().toISOString(),
+        url: sender?.tab?.url || null,
+      });
+    } else {
+      breakOnLoadTabs.delete(tabId);
+    }
+
+    sendResponse({ ok: true, enabled: breakOnLoadTabs.has(tabId) });
+    return;
   }
 
   if (message.type === 'ELEMENT_PICKER_OPEN_TOUR_STEP') {

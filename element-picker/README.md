@@ -124,12 +124,15 @@ The server keeps a stable `latest` folder for the most recent capture and a time
 The Vibe Debugger adds a lightweight watch window and timeline to the same QA Bridge surface:
 
 1. Click the extension icon on a page.
-2. Select or hover the UI you care about.
-3. Click **Watch** to track that target.
-4. Click **Record**, then click **Resume** and use the page normally.
-5. Open **Trace** to see watched values, recent diffs, timeline events, and quick explanations like hidden, disabled, empty, or stale.
-6. Click **Send Trace** to write `trace.json`, `trace.md`, and `manifest.json` to `~/CodexInbox/web-qa/traces/latest`.
-7. In Codex, say: `look at latest trace`.
+2. Click **Vibe ▾** in the toolbar to reveal the Vibe Debugger controls (they are collapsed by default to keep the toolbar compact).
+3. Select or hover the UI you care about.
+4. Click **Watch** to track that target.
+5. Click **Record**, then click **Resume** and use the page normally.
+6. Open **Trace** to see watched values, recent diffs, timeline events, and quick explanations like hidden, disabled, empty, or stale.
+7. Click **Send Trace** to write `trace.json`, `trace.md`, and `manifest.json` to `~/CodexInbox/web-qa/traces/latest`.
+8. In Codex, say: `look at latest trace`.
+
+The **Vibe** toggle shows a `●` while recording and a count of active watch targets even when the controls are collapsed, so background activity stays visible.
 
 The generic browser-extension recorder observes user events, DOM mutations, route changes, fetch/XHR, timers, storage writes, console warnings/errors, selected-element React fiber props/state when available, and optional app probe events. It stores diffs instead of repeated identical snapshots.
 

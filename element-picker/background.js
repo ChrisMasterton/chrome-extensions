@@ -182,6 +182,28 @@ async function postTraceToInbox(traceUrl, payload) {
   }
 }
 
+async function checkInboxHealth(healthUrl) {
+  const targetUrl = healthUrl || 'http://127.0.0.1:43117/health';
+
+  try {
+    const response = await fetch(targetUrl, { method: 'GET' });
+    if (!response.ok) {
+      return { ok: false, status: response.status, error: `Inbox server returned HTTP ${response.status}` };
+    }
+
+    let body = null;
+    try {
+      body = await response.json();
+    } catch {
+      body = null;
+    }
+
+    return { ok: true, root: body?.root || null };
+  } catch (error) {
+    return { ok: false, error: error?.message || 'Unable to reach Codex QA inbox server' };
+  }
+}
+
 async function getLatestTour(tourUrl) {
   const targetUrl = tourUrl || 'http://127.0.0.1:43117/tours/latest';
 
@@ -287,6 +309,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       trace: message.trace,
       markdown: message.markdown || null,
     }).then(sendResponse);
+    return true;
+  }
+
+  if (message.type === 'ELEMENT_PICKER_CHECK_INBOX') {
+    checkInboxHealth(message.healthUrl).then(sendResponse);
     return true;
   }
 

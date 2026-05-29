@@ -853,7 +853,15 @@
     }
   }
 
-  function onRuntimeMessage(message) {
+  function onRuntimeMessage(message, sender, sendResponse) {
+    if (message?.type === 'ELEMENT_PICKER_TOGGLE') {
+      cleanup();
+      if (typeof sendResponse === 'function') {
+        sendResponse({ ok: true, closed: true });
+      }
+      return;
+    }
+
     if (message?.type !== 'ELEMENT_PICKER_RESUME_TOUR' || !message.tour) {
       return;
     }
@@ -980,8 +988,8 @@
       sendTraceToCodex();
     }, 'primary');
 
-    const copyButton = createToolbarButton('Copy', 'Copy selected element bundle to clipboard', () => {
-      exportBundle({ cleanupAfter: true });
+    const copyButton = createToolbarButton('Copy', 'Copy selected element bundle to clipboard (keeps the bridge open)', () => {
+      exportBundle();
     });
 
     const sendButton = createToolbarButton('Send to Codex', 'Save selected element bundle to the local Codex QA inbox', () => {
@@ -4347,7 +4355,7 @@
   }
 
   async function exportBundle(options = {}) {
-    const { cleanupAfter = true } = options;
+    const { cleanupAfter = false } = options;
     if (isExporting) return;
 
     if (!ensureSelectionForExport()) {
@@ -4363,7 +4371,7 @@
     try {
       const copyMode = await copyBundleToClipboard(bundle);
       if (copyMode === 'full') {
-        showToast(`Copied full debug bundle (${count} ${pluralize(count, 'element', 'elements')}).`, 2400);
+        showToast(`Copied full debug bundle (${count} ${pluralize(count, 'element', 'elements')}). Press ESC or Close when done.`, 2600);
       } else if (copyMode === 'slim') {
         showToast('Copied bundle without inline crop images.', 2600);
       } else {

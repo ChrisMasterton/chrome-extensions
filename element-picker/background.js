@@ -24,8 +24,53 @@ async function injectPicker(tabId) {
   });
 }
 
+// Ask an already-running QA Bridge in this tab to close itself. Returns true
+// when an active session handled the click, so the toolbar icon toggles the
+// bridge on and off instead of silently doing nothing on the second click.
+async function closeExistingSession(tabId) {
+  try {
+    const response = await chrome.tabs.sendMessage(tabId, {
+      type: 'ELEMENT_PICKER_TOGGLE',
+    });
+    return !!response?.ok;
+  } catch {
+    return false;
+  }
+}
+
+// Restricted pages (chrome://, the Web Store, the PDF viewer, etc.) reject
+// script injection. Surface that on the action badge so the click does not
+// look like it was ignored.
+function flashRestrictedPageBadge(tabId) {
+  if (typeof tabId !== 'number') return;
+
+  try {
+    chrome.action.setBadgeText({ tabId, text: '!' });
+    chrome.action.setBadgeBackgroundColor({ tabId, color: '#dc2626' });
+    chrome.action.setTitle({
+      tabId,
+      title: "QA Bridge can't run on this page (e.g. chrome:// pages, the Web Store, or PDFs)",
+    });
+    setTimeout(() => {
+      chrome.action.setBadgeText({ tabId, text: '' });
+      chrome.action.setTitle({ tabId, title: 'Pick Element' });
+    }, 4000);
+  } catch {
+    // Ignore badge errors (for example, if the tab was closed in the meantime).
+  }
+}
+
 chrome.action.onClicked.addListener(async (tab) => {
-  await injectPicker(tab.id);
+  if (!tab?.id) return;
+
+  if (await closeExistingSession(tab.id)) return;
+
+  try {
+    await injectPicker(tab.id);
+  } catch (error) {
+    console.warn('Unable to start QA Bridge on this page:', error);
+    flashRestrictedPageBadge(tab.id);
+  }
 });
 
 function downloadDataUrl(dataUrl, filename) {

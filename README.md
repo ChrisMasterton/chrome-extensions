@@ -2,6 +2,12 @@
 
 This repo contains browser tools that make it easier to work with coding agents against real pages, real UI state, and real visual evidence.
 
+## Test Users
+
+Test Users is a local-first role and scenario switcher for SaaS development. It generates disposable credentials, stores role notes, recognizes local apps using `localhost + page name`, and fills login or registration forms from an in-page overlay.
+
+Load the unpacked extension from the [`test-users`](test-users) folder. See the [Test Users README](test-users/README.md) for installation and usage.
+
 ## Element Picker QA Bridge
 
 Element Picker has grown from a selector-copying utility into a two-way QA bridge between Chrome/Arc and Codex. It lets you point at UI, explain what you are seeing in plain language, send the full context to Codex, and ask Codex to guide you back through the page.

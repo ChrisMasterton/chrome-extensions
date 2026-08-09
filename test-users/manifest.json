@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "Test Users",
+  "description": "Generate, organize, and autofill local or staging test accounts by site and role.",
+  "version": "0.1.0",
+  "permissions": ["activeTab", "scripting", "storage"],
+  "action": {
+    "default_title": "Toggle Test Users",
+    "default_icon": {
+      "16": "icon16.png",
+      "48": "icon48.png",
+      "128": "icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["overlay.css", "icons/*.svg"],
+      "matches": ["http://*/*", "https://*/*"]
+    }
+  ]
+}

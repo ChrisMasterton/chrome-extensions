@@ -327,10 +327,17 @@ async function run() {
       'extension overlay'
     );
 
-    const identityText = await page.evaluate(
-      `${shadowRootExpression}.querySelector('.tu-site-identity strong').textContent`
-    );
-    assert.equal(identityText, 'LOCALHOST · HikeStrong');
+    const identity = await page.evaluate(`(() => {
+      const root = ${shadowRootExpression};
+      return {
+        project: root.querySelector('.tu-site-identity strong').textContent,
+        origin: root.querySelector('.tu-site-origin').textContent,
+        environment: root.querySelector('.tu-environment').textContent,
+      };
+    })()`);
+    assert.equal(identity.project, 'HikeStrong');
+    assert.match(identity.origin, /^127\.0\.0\.1:\d+$/);
+    assert.equal(identity.environment, 'LOCAL');
 
     await page.evaluate(`${shadowRootExpression}.querySelector('[data-action="new-user"]').click()`);
     await waitForCondition(
@@ -342,12 +349,14 @@ async function run() {
     const generated = await page.evaluate(`(() => {
       const root = ${shadowRootExpression};
       return {
+        name: root.querySelector('.tu-form input[name="name"]').value,
         email: root.querySelector('input[name="email"]').value,
         password: root.querySelector('input[name="password"]').value,
       };
     })()`);
     assert.match(generated.email, /^hikestrong\.member\.[a-z0-9]{6}@example\.test$/);
     assert.equal(generated.password.length, 16);
+    assert.equal(generated.name, 'Member Tester');
 
     await page.evaluate(`(() => {
       const root = ${shadowRootExpression};
@@ -362,10 +371,18 @@ async function run() {
       `document.querySelector('input[type="email"]').value === ${JSON.stringify(generated.email)}`,
       'email autofill'
     );
-    const filledPassword = await page.evaluate(
-      `document.querySelector('input[type="password"]').value`
+    const filledForm = await page.evaluate(`(() => ({
+      name: document.querySelector('input[name="name"]').value,
+      passwords: [...document.querySelectorAll('input[type="password"]')].map(
+        (input) => input.value
+      ),
+    }))()`);
+    assert.equal(filledForm.name, generated.name, 'label-only name field should be autofilled');
+    assert.deepEqual(
+      filledForm.passwords,
+      [generated.password, generated.password],
+      'both password fields should be autofilled'
     );
-    assert.equal(filledPassword, generated.password);
 
     const stored = await worker.evaluate(`(async () => {
       const result = await chrome.storage.local.get('testUsersStateV1');

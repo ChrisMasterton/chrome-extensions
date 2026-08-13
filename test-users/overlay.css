@@ -53,7 +53,6 @@ button {
 }
 
 .tu-heading-row,
-.tu-title-group,
 .tu-footer-actions,
 .tu-form-actions,
 .tu-form-actions > div,
@@ -77,24 +76,21 @@ button {
   justify-content: space-between;
 }
 
-.tu-title-group {
-  gap: 12px;
-}
-
-.tu-title-group h1 {
+.tu-header h1 {
   margin: 0;
   color: #11152d;
-  font-size: 24px;
+  font-size: 19px;
   font-weight: 750;
-  letter-spacing: -0.035em;
+  letter-spacing: -0.03em;
 }
 
 .tu-environment {
-  padding: 4px 9px;
+  flex: 0 0 auto;
+  padding: 3px 8px;
   border-radius: 6px;
   background: #edf0ff;
   color: #3146c9;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 800;
   letter-spacing: 0.08em;
 }
@@ -103,24 +99,82 @@ button {
   display: flex;
   width: 100%;
   margin-top: 12px;
-  padding: 0;
-  align-items: baseline;
-  justify-content: space-between;
-  border: 0;
-  background: transparent;
+  padding: 10px 12px;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid #dfe3ec;
+  border-radius: 12px;
+  background: #f8f9fc;
   cursor: pointer;
   text-align: left;
 }
 
-.tu-site-identity strong {
-  color: #3146c9;
-  font-size: 13px;
+.tu-site-identity:hover {
+  border-color: #c2cae0;
+  background: #f2f4fb;
+}
+
+.tu-site-badge {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 10px;
+  background: #e8ebff;
+  color: #2740c4;
+  font-size: 15px;
   font-weight: 750;
 }
 
-.tu-site-identity span {
+.tu-site-identity-copy {
+  display: grid;
+  min-width: 0;
+  flex: 1 1 auto;
+  gap: 2px;
+}
+
+.tu-site-identity-name {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.tu-site-identity-name strong {
+  overflow: hidden;
+  color: #11152d;
+  font-size: 15px;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tu-site-origin {
+  overflow: hidden;
   color: #697087;
   font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tu-site-identity-edit {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  color: #8a91a5;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.tu-site-identity:hover .tu-site-identity-edit {
+  color: #263aa9;
+}
+
+.tu-site-identity-edit .tu-icon {
+  width: 14px;
+  height: 14px;
 }
 
 .tu-tabs {
@@ -133,6 +187,10 @@ button {
 
 .tu-tab {
   position: relative;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
   padding: 15px 1px 13px;
   border: 0;
   background: transparent;
@@ -140,6 +198,28 @@ button {
   cursor: pointer;
   font-size: 15px;
   font-weight: 650;
+}
+
+.tu-tab-label {
+  overflow: hidden;
+  max-width: 180px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tu-tab-count {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: #edf0f4;
+  color: #4d566c;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.tu-tab.is-active .tu-tab-count {
+  background: #e8ebff;
+  color: #2740c4;
 }
 
 .tu-tab::after {
@@ -778,6 +858,30 @@ button {
   margin: 7px 0 16px;
   font-size: 12px;
   line-height: 1.55;
+}
+
+.tu-empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+
+.tu-ghost-button {
+  min-height: 38px;
+  padding: 8px 10px;
+  border: 0;
+  background: transparent;
+  color: #263aa9;
+  cursor: pointer;
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.tu-ghost-button:hover {
+  color: #1c2c85;
 }
 
 .tu-empty-icon {

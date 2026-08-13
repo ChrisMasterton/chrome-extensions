@@ -263,26 +263,29 @@
 
   function renderHeader() {
     const environmentLabel = currentIdentity.isLocal
-      ? 'LOCAL ONLY'
+      ? 'LOCAL'
       : currentIdentity.environment.toUpperCase();
-    const identityLabel = currentIdentity.isLocal
-      ? `LOCALHOST · ${currentIdentity.projectName}`
-      : currentIdentity.projectName;
 
     return `
       <header class="tu-header">
         <div class="tu-heading-row">
-          <div class="tu-title-group">
-            <h1>Test Users</h1>
-            <span class="tu-environment">${escapeHtml(environmentLabel)}</span>
-          </div>
+          <h1>Test Users</h1>
           <button class="tu-icon-button" data-action="close" aria-label="Close Test Users">
             ${icon('x')}
           </button>
         </div>
-        <button class="tu-site-identity" data-action="settings" title="Edit site identity">
-          <strong>${escapeHtml(identityLabel)}</strong>
-          <span>${escapeHtml(currentIdentity.originLabel)}</span>
+        <button class="tu-site-identity" data-action="settings" title="Edit how this site is identified">
+          <span class="tu-site-badge" aria-hidden="true">${escapeHtml(
+            initials(currentIdentity.projectName)
+          )}</span>
+          <span class="tu-site-identity-copy">
+            <span class="tu-site-identity-name">
+              <strong>${escapeHtml(currentIdentity.projectName)}</strong>
+              <span class="tu-environment">${escapeHtml(environmentLabel)}</span>
+            </span>
+            <span class="tu-site-origin">${escapeHtml(currentIdentity.originLabel)}</span>
+          </span>
+          <span class="tu-site-identity-edit">${icon('edit')}<span>Edit</span></span>
         </button>
       </header>
     `;
@@ -290,14 +293,26 @@
 
   function renderUsersScreen() {
     const users = getVisibleUsers();
+    const siteCount = storedState.users.filter(
+      (user) => user.siteKey === currentIdentity.siteKey
+    ).length;
+    const allCount = storedState.users.length;
     const userCards = users.length
       ? users.map(renderUserCard).join('')
       : renderEmptyState();
 
     return `
       <div class="tu-tabs" role="tablist" aria-label="User scope">
-        <button class="tu-tab ${appState.activeTab === 'site' ? 'is-active' : ''}" data-tab="site" role="tab" aria-selected="${appState.activeTab === 'site'}">This site</button>
-        <button class="tu-tab ${appState.activeTab === 'all' ? 'is-active' : ''}" data-tab="all" role="tab" aria-selected="${appState.activeTab === 'all'}">All projects</button>
+        <button class="tu-tab ${appState.activeTab === 'site' ? 'is-active' : ''}" data-tab="site" role="tab" aria-selected="${appState.activeTab === 'site'}" title="Test users saved for ${escapeAttribute(
+          currentIdentity.projectName
+        )}">
+          <span class="tu-tab-label">${escapeHtml(currentIdentity.projectName)}</span>
+          <span class="tu-tab-count">${siteCount}</span>
+        </button>
+        <button class="tu-tab ${appState.activeTab === 'all' ? 'is-active' : ''}" data-tab="all" role="tab" aria-selected="${appState.activeTab === 'all'}">
+          <span class="tu-tab-label">All sites</span>
+          <span class="tu-tab-count">${allCount}</span>
+        </button>
       </div>
       <main class="tu-content">
         <label class="tu-search">
@@ -342,20 +357,41 @@
 
   function renderEmptyState() {
     const hasQuery = Boolean(appState.query.trim());
+    if (hasQuery) {
+      return `
+        <div class="tu-empty-state">
+          <div class="tu-empty-icon">${icon('search')}</div>
+          <strong>No matching test users</strong>
+          <p>Try a different name, role, email, or note.</p>
+        </div>
+      `;
+    }
+
+    const totalUsers = storedState.users.length;
+    const onSiteTab = appState.activeTab === 'site';
+    const heading = onSiteTab
+      ? `No test users for ${escapeHtml(currentIdentity.projectName)} yet`
+      : 'No test users yet';
+    const body =
+      onSiteTab && totalUsers
+        ? `Your ${totalUsers} saved ${
+            totalUsers === 1 ? 'login belongs' : 'logins belong'
+          } to other sites. Create one here, or browse everything you have saved.`
+        : 'Generate credentials and fill the current login or sign-up form in one step.';
+
     return `
       <div class="tu-empty-state">
-        <div class="tu-empty-icon">${icon(hasQuery ? 'search' : 'users')}</div>
-        <strong>${hasQuery ? 'No matching test users' : 'No test users for this site'}</strong>
-        <p>${
-          hasQuery
-            ? 'Try a different name, role, email, or note.'
-            : 'Generate credentials and fill the current registration form in one step.'
-        }</p>
-        ${
-          hasQuery
-            ? ''
-            : '<button class="tu-secondary-button" data-action="new-user">+ New test user</button>'
-        }
+        <div class="tu-empty-icon">${icon('users')}</div>
+        <strong>${heading}</strong>
+        <p>${body}</p>
+        <div class="tu-empty-actions">
+          <button class="tu-secondary-button" data-action="new-user">+ New test user</button>
+          ${
+            onSiteTab && totalUsers
+              ? `<button class="tu-ghost-button" data-action="show-all">View all sites (${totalUsers})</button>`
+              : ''
+          }
+        </div>
       </div>
     `;
   }
@@ -375,9 +411,9 @@
               currentIdentity.environment
             )}</p>
           </div>
-          <button class="tu-secondary-button tu-regenerate" data-action="regenerate">${icon(
+          <button class="tu-secondary-button tu-regenerate" data-action="regenerate" title="Replace name, email, and password with fresh values">${icon(
             'sparkles'
-          )}<span>Generate</span></button>
+          )}<span>Regenerate</span></button>
         </div>
         <form class="tu-form" data-form="user">
           <label>
@@ -450,7 +486,7 @@
                 : '<span></span>'
             }
             <div>
-              <button class="tu-secondary-button" type="button" data-action="save-only">Save only</button>
+              <button class="tu-secondary-button" type="button" data-action="save-only">Save</button>
               <button class="tu-primary-button" type="submit">${icon(
                 'login-2'
               )}<span>Save &amp; fill</span></button>
@@ -468,7 +504,7 @@
         <div class="tu-section-heading">
           <div>
             <h2>Site identity</h2>
-            <p>Test accounts are grouped by localhost and page name.</p>
+            <p>Test accounts are grouped by address and page name.</p>
           </div>
         </div>
         <form class="tu-form" data-form="settings">
@@ -672,6 +708,12 @@
     if (action === 'settings') {
       appState.screen = 'settings';
       appState.pendingDeleteSiteKey = null;
+      render();
+      return;
+    }
+
+    if (action === 'show-all') {
+      appState.activeTab = 'all';
       render();
       return;
     }
@@ -891,40 +933,81 @@
     input.dispatchEvent(new Event('change', { bubbles: true }));
   }
 
-  function findEmailInput() {
-    const selectors = [
-      'input[type="email"]',
-      'input[autocomplete="email"]',
-      'input[name*="email" i]',
-      'input[id*="email" i]',
-      'input[placeholder*="email" i]',
-      'input[name*="user" i]',
-      'input[autocomplete="username"]',
-    ];
-    return selectors
-      .flatMap((selector) => [...document.querySelectorAll(selector)])
-      .find((input) => !input.disabled && input.type !== 'hidden');
+  function isInputVisible(input) {
+    if (typeof input.checkVisibility === 'function') {
+      return input.checkVisibility({ visibilityProperty: true });
+    }
+    return input.getClientRects().length > 0;
   }
 
-  function findPasswordInputs() {
-    return [...document.querySelectorAll('input[type="password"]')].filter(
-      (input) => !input.disabled
-    );
+  function collectFillableInputs() {
+    const inputs = [];
+    const visit = (root) => {
+      root.querySelectorAll('input').forEach((input) => {
+        if (input.disabled || input.readOnly) return;
+        if (String(input.type).toLowerCase() === 'hidden') return;
+        if (!isInputVisible(input)) return;
+        inputs.push(input);
+      });
+      root.querySelectorAll('*').forEach((element) => {
+        if (element.shadowRoot && element.id !== HOST_ID) visit(element.shadowRoot);
+      });
+    };
+    visit(document);
+    return inputs;
+  }
+
+  function labelTextFor(input) {
+    const texts = new Set();
+    [...(input.labels || [])].forEach((label) => texts.add(label.textContent));
+
+    const labelledBy = input.getAttribute('aria-labelledby');
+    if (labelledBy) {
+      const rootNode = input.getRootNode();
+      labelledBy.split(/\s+/).forEach((id) => {
+        const element = rootNode.getElementById?.(id);
+        if (element) texts.add(element.textContent);
+      });
+    }
+
+    return [...texts].join(' ');
+  }
+
+  function describeFillTarget(input, forms) {
+    let formIndex = null;
+    if (input.form) {
+      if (!forms.includes(input.form)) forms.push(input.form);
+      formIndex = forms.indexOf(input.form);
+    }
+
+    return {
+      type: input.type,
+      autocomplete: input.getAttribute('autocomplete'),
+      name: input.name,
+      id: input.id,
+      placeholder: input.placeholder,
+      ariaLabel: input.getAttribute('aria-label'),
+      labelText: labelTextFor(input),
+      formIndex,
+    };
   }
 
   async function fillCredentials(user) {
-    const emailInput = findEmailInput();
-    const passwordInputs = findPasswordInputs();
+    const inputs = collectFillableInputs();
+    const forms = [];
+    const plan = Core.buildFillPlan(
+      inputs.map((input) => describeFillTarget(input, forms)),
+      user
+    );
 
-    if (!emailInput && passwordInputs.length === 0) {
-      showToast('No login or registration fields found', 'error');
+    if (!plan.length) {
+      showToast('No login or sign-up fields found on this page', 'error');
       return false;
     }
 
-    if (emailInput) setInputValue(emailInput, user.email);
-    passwordInputs.forEach((input) => setInputValue(input, user.password));
-    emailInput?.focus();
-    showToast('Credentials filled');
+    plan.forEach((step) => setInputValue(inputs[step.index], step.value));
+    inputs[plan[0].index]?.focus();
+    showToast(`Filled ${Core.describeFillPlan(plan)}`);
     return true;
   }
 

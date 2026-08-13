@@ -12,8 +12,8 @@ localhost:3000 + HikeStrong
 
 - Generate a unique `@example.test` email and strong password for a chosen role.
 - Save a short name, role, and scenario note with each account.
-- Fill login and registration forms, including password-confirmation fields.
-- Filter accounts for the current site or search across all projects.
+- Fill login and sign-up forms: full or first/last name, username, email, and every password field. Fields are matched by labels, placeholders, `autocomplete` attributes, and name/id hints, including inside open shadow DOM, and a toast confirms exactly which fields were filled.
+- Filter accounts for the current site or search across all sites.
 - Correct the detected page name once when a local app uses a generic tab title.
 - Delete an individual login from its edit screen, or delete a saved site identity and every login beneath it from **Settings → Saved sites**.
 - Keep all extension state in `chrome.storage.local` on the current Chrome profile.

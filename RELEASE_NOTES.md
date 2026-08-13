@@ -1,5 +1,17 @@
 # Release Notes
 
+## 2026-08-13 — Test Users
+### Added
+- Autofill now fills name fields — full name, first/last name, and username — alongside email and every password field. Fields are matched by labels, placeholders, `autocomplete` attributes, and name/id hints, and inputs inside open shadow DOM are included.
+- The fill toast now reports exactly what was filled (for example, `Filled name, email & 2 password fields`) instead of a generic confirmation.
+- Tabs show live counts, and the current-site tab is named after the detected project so it is obvious which site the list is scoped to.
+- An empty current-site list now says where your saved logins actually live and offers a one-click jump to `All sites`.
+
+### Changed
+- The header now leads with a prominent site-identity card — site initial, project name, address, and environment chip — with a visible `Edit` affordance, replacing the small caption text that made the active project easy to miss.
+- Hidden, disabled, and read-only inputs are skipped during autofill so decoy or honeypot fields no longer swallow credentials.
+- Editor buttons were clarified: `Generate` is now `Regenerate` and `Save only` is now `Save`.
+
 ## 2026-05-30
 ### Added
 - Added `Break on Load` so QA Bridge can pause again after SPA route changes or same-origin page loads, making it easier to keep Vibe Debugger workflows going across navigation.

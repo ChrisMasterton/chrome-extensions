@@ -17,6 +17,7 @@ localhost:3000 + HikeStrong
 - Correct the detected page name once when a local app uses a generic tab title.
 - Delete an individual login from its edit screen, or delete a saved site identity and every login beneath it from **Settings → Saved sites**.
 - Keep all extension state in `chrome.storage.local` on the current Chrome profile.
+- Tint the environment chip amber on staging hosts and red on real websites as a reminder to use generated accounts only.
 
 > Use generated test accounts only. Chrome extension local storage is device-local but is not a password vault for real credentials.
 

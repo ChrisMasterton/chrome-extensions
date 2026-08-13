@@ -6,6 +6,7 @@
 - Autofill now reaches forms inside same-origin iframes: the overlay script is injected into all permitted frames, the background aggregates what each frame filled, and the toast reports the combined result.
 - Pressing `Escape` while the panel has focus collapses it to the launcher, matching the close button.
 - The local demo page now includes name and confirm-password fields so the full fill behavior is visible out of the box.
+- The environment chip is now tinted by risk — indigo for local, amber for staging hosts, red for real websites — with a tooltip reminding you to use generated test accounts only.
 - The fill toast now reports exactly what was filled (for example, `Filled name, email & 2 password fields`) instead of a generic confirmation.
 - Tabs show live counts, and the current-site tab is named after the detected project so it is obvious which site the list is scoped to.
 - An empty current-site list now says where your saved logins actually live and offers a one-click jump to `All sites`.

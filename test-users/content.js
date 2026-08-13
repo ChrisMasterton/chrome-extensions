@@ -269,6 +269,12 @@
     bindEvents();
   }
 
+  const ENVIRONMENT_TITLES = {
+    local: 'Local development site',
+    staging: 'Looks like a staging site — use generated test accounts only',
+    web: 'Real website — use generated test accounts only',
+  };
+
   function renderHeader() {
     const environmentLabel = currentIdentity.isLocal
       ? 'LOCAL'
@@ -289,7 +295,11 @@
           <span class="tu-site-identity-copy">
             <span class="tu-site-identity-name">
               <strong>${escapeHtml(currentIdentity.projectName)}</strong>
-              <span class="tu-environment">${escapeHtml(environmentLabel)}</span>
+              <span class="tu-environment tu-environment--${escapeAttribute(
+                currentIdentity.environment
+              )}" title="${escapeAttribute(
+                ENVIRONMENT_TITLES[currentIdentity.environment] || ''
+              )}">${escapeHtml(environmentLabel)}</span>
             </span>
             <span class="tu-site-origin">${escapeHtml(currentIdentity.originLabel)}</span>
           </span>

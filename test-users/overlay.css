@@ -95,6 +95,16 @@ button {
   letter-spacing: 0.08em;
 }
 
+.tu-environment--staging {
+  background: #fdf3e0;
+  color: #92610e;
+}
+
+.tu-environment--web {
+  background: #fdecec;
+  color: #b42318;
+}
+
 .tu-site-identity {
   display: flex;
   width: 100%;

@@ -333,11 +333,13 @@ async function run() {
         project: root.querySelector('.tu-site-identity strong').textContent,
         origin: root.querySelector('.tu-site-origin').textContent,
         environment: root.querySelector('.tu-environment').textContent,
+        environmentClass: root.querySelector('.tu-environment').className,
       };
     })()`);
     assert.equal(identity.project, 'HikeStrong');
     assert.match(identity.origin, /^127\.0\.0\.1:\d+$/);
     assert.equal(identity.environment, 'LOCAL');
+    assert.match(identity.environmentClass, /tu-environment--local/);
 
     await page.evaluate(`${shadowRootExpression}.querySelector('[data-action="new-user"]').click()`);
     await waitForCondition(

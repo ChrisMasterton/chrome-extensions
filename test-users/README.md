@@ -12,7 +12,7 @@ localhost:3000 + HikeStrong
 
 - Generate a unique `@example.test` email and strong password for a chosen role.
 - Save a short name, role, and scenario note with each account.
-- Fill login and sign-up forms: full or first/last name, username, email, and every password field. Fields are matched by labels, placeholders, `autocomplete` attributes, and name/id hints, including inside open shadow DOM, and a toast confirms exactly which fields were filled.
+- Fill login and sign-up forms: full or first/last name, username, email, and every password field. Fields are matched by labels, placeholders, `autocomplete` attributes, and name/id hints, including inside open shadow DOM and same-origin iframes, and a toast confirms exactly which fields were filled.
 - Filter accounts for the current site or search across all sites.
 - Correct the detected page name once when a local app uses a generic tab title.
 - Delete an individual login from its edit screen, or delete a saved site identity and every login beneath it from **Settings → Saved sites**.
@@ -27,6 +27,8 @@ localhost:3000 + HikeStrong
 3. Click **Load unpacked**.
 4. Select this `test-users` folder.
 5. Open a local or staging login page and click the **Test Users** toolbar icon.
+
+Click the toolbar icon again to collapse the panel, or press **Escape** while the panel has focus.
 
 The extension requests `activeTab`, `scripting`, and `storage`. It does not request permanent access to every website; the overlay is injected only after you click the toolbar icon.
 

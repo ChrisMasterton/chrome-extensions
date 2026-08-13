@@ -1,5 +1,7 @@
 # Test Users design QA
 
+> **2026-08-13 note:** This document records the original 0.1.0 comparison pass and its screenshots are now historical. The header was since redesigned — a site-identity card (initial badge, project name, address, environment chip, Edit affordance) replaced the `LOCALHOST · <project>` caption, and the scope tabs are now named after the detected project with counts. See `RELEASE_NOTES.md` at the repo root for the current state.
+
 ## Evidence
 
 - Source visual truth: `design/login-overlay-reference.png`

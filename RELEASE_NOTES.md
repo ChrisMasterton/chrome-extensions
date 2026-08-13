@@ -1,8 +1,11 @@
 # Release Notes
 
-## 2026-08-13 — Test Users
+## 2026-08-13 — Test Users (0.2.0)
 ### Added
 - Autofill now fills name fields — full name, first/last name, and username — alongside email and every password field. Fields are matched by labels, placeholders, `autocomplete` attributes, and name/id hints, and inputs inside open shadow DOM are included.
+- Autofill now reaches forms inside same-origin iframes: the overlay script is injected into all permitted frames, the background aggregates what each frame filled, and the toast reports the combined result.
+- Pressing `Escape` while the panel has focus collapses it to the launcher, matching the close button.
+- The local demo page now includes name and confirm-password fields so the full fill behavior is visible out of the box.
 - The fill toast now reports exactly what was filled (for example, `Filled name, email & 2 password fields`) instead of a generic confirmation.
 - Tabs show live counts, and the current-site tab is named after the detected project so it is obvious which site the list is scoped to.
 - An empty current-site list now says where your saved logins actually live and offers a one-click jump to `All sites`.

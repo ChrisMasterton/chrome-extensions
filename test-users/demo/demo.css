@@ -33,6 +33,27 @@ body {
   transform: translateY(-24px);
 }
 
+.demo-embed {
+  display: grid;
+  padding: 18px;
+  place-items: center;
+}
+
+.demo-embed .login-card {
+  width: 100%;
+  padding: 22px;
+  transform: none;
+}
+
+.embedded-login {
+  width: min(540px, 90vw);
+  height: 300px;
+  margin-top: 22px;
+  border: 1px solid #e0e4ec;
+  border-radius: 14px;
+  background: #ffffff;
+}
+
 .login-heading span {
   color: #3c51ca;
   font-size: 11px;

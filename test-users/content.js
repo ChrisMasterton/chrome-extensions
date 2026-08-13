@@ -11,6 +11,14 @@
     return;
   }
 
+  // Every frame exposes the fill hook so the background can reach same-origin
+  // subframes, but only the top frame owns the overlay, storage, and messaging.
+  if (!globalThis.__testUsersFillHook) {
+    globalThis.__testUsersFillHook = (user) => applyFillPlan(user);
+  }
+
+  if (window !== window.top) return;
+
   const existingHost = document.getElementById(HOST_ID);
   if (existingHost?.__testUsersApi) {
     existingHost.__testUsersApi.toggle();
@@ -992,7 +1000,7 @@
     };
   }
 
-  async function fillCredentials(user) {
+  function applyFillPlan(user) {
     const inputs = collectFillableInputs();
     const forms = [];
     const plan = Core.buildFillPlan(
@@ -1000,14 +1008,38 @@
       user
     );
 
-    if (!plan.length) {
+    if (!plan.length) return [];
+
+    plan.forEach((step) => setInputValue(inputs[step.index], step.value));
+    // Only the top frame claims focus so a filled subframe cannot steal it.
+    if (window === window.top) inputs[plan[0].index]?.focus();
+    return plan.map((step) => step.purpose);
+  }
+
+  async function fillEveryFrame(user) {
+    if (!isExtensionRuntime) return null;
+
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: 'TEST_USERS_FILL_ALL_FRAMES',
+        user,
+      });
+      return Array.isArray(response?.purposes) ? response.purposes : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function fillCredentials(user) {
+    const framePurposes = await fillEveryFrame(user);
+    const purposes = framePurposes ?? applyFillPlan(user);
+
+    if (!purposes.length) {
       showToast('No login or sign-up fields found on this page', 'error');
       return false;
     }
 
-    plan.forEach((step) => setInputValue(inputs[step.index], step.value));
-    inputs[plan[0].index]?.focus();
-    showToast(`Filled ${Core.describeFillPlan(plan)}`);
+    showToast(`Filled ${Core.describeFillPlan(purposes.map((purpose) => ({ purpose })))}`);
     return true;
   }
 
@@ -1043,6 +1075,14 @@
     toggle,
     getState: () => ({ appState, storedState, currentIdentity }),
   };
+
+  // Bound once at startup because bindEvents re-runs on every render.
+  shadow.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape' || !appState.open) return;
+    event.stopPropagation();
+    appState.open = false;
+    render();
+  });
 
   if (isExtensionRuntime) {
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {

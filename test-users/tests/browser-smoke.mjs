@@ -314,7 +314,7 @@ async function run() {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (!tab?.id) throw new Error('Runtime tab not found');
       await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
+        target: { tabId: tab.id, allFrames: true },
         files: ['core.js', 'content.js']
       });
       return tab.id;
@@ -384,6 +384,23 @@ async function run() {
       'both password fields should be autofilled'
     );
 
+    await waitForCondition(
+      page,
+      `document.querySelector('iframe').contentDocument.querySelector('input[type="email"]').value === ${JSON.stringify(
+        generated.email
+      )}`,
+      'same-origin iframe autofill'
+    );
+    const filledFrame = await page.evaluate(`(() => {
+      const frameDocument = document.querySelector('iframe').contentDocument;
+      return {
+        email: frameDocument.querySelector('input[type="email"]').value,
+        password: frameDocument.querySelector('input[type="password"]').value,
+      };
+    })()`);
+    assert.equal(filledFrame.email, generated.email, 'iframe email should be autofilled');
+    assert.equal(filledFrame.password, generated.password, 'iframe password should be autofilled');
+
     const stored = await worker.evaluate(`(async () => {
       const result = await chrome.storage.local.get('testUsersStateV1');
       return result.testUsersStateV1;
@@ -392,6 +409,23 @@ async function run() {
     assert.equal(stored.users[0].siteLabel, 'HikeStrong');
     assert.equal(stored.users[0].notes, 'Browser smoke scenario');
     assert.match(stored.users[0].siteKey, /^local:127\.0\.0\.1:\d+:hikestrong$/);
+
+    await page.evaluate(`(() => {
+      const search = ${shadowRootExpression}.querySelector('[data-input="search"]');
+      search.focus();
+      search.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    })()`);
+    await waitForCondition(
+      page,
+      `!${shadowRootExpression}.querySelector('.tu-panel') && !!${shadowRootExpression}.querySelector('.tu-launcher')`,
+      'escape collapsing the panel'
+    );
+    await page.evaluate(`${shadowRootExpression}.querySelector('.tu-launcher').click()`);
+    await waitForCondition(
+      page,
+      `!!${shadowRootExpression}.querySelector('.tu-panel')`,
+      'launcher reopening the panel'
+    );
 
     await page.evaluate(`${shadowRootExpression}.querySelector('[data-action="edit"]').click()`);
     await waitForCondition(
@@ -474,7 +508,9 @@ async function run() {
     assert.deepEqual(storedAfterSiteDelete.users, []);
     assert.deepEqual(storedAfterSiteDelete.siteProfiles, {});
 
-    log('passed: load, recognize, generate, save, autofill, delete login, and delete site');
+    log(
+      'passed: load, recognize, generate, save, autofill top frame and iframe, escape to close, delete login, and delete site'
+    );
   } finally {
     await browser?.close();
     await staticServer.close();

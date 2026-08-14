@@ -172,7 +172,7 @@
       }
 
       if (!query) return true;
-      return [user.name, user.email, user.role, user.notes, user.siteLabel]
+      return [user.name, user.email, user.username, user.role, user.notes, user.siteLabel]
         .join(' ')
         .toLowerCase()
         .includes(query);
@@ -355,8 +355,8 @@
               String(user.role || 'User').toUpperCase()
             )}</span>
           </div>
-          <div class="tu-email" title="${escapeAttribute(user.email)}">${escapeHtml(
-            user.email
+          <div class="tu-email" title="${escapeAttribute(user.email || user.username)}">${escapeHtml(
+            user.email || user.username
           )}</div>
           <div class="tu-notes">${escapeHtml(user.notes || 'No notes yet')}</div>
           ${showProject ? `<div class="tu-project-label">${escapeHtml(user.siteLabel)}</div>` : ''}
@@ -456,8 +456,19 @@
             <div class="tu-inline-field">
               <input name="email" type="email" autocomplete="off" value="${escapeAttribute(
                 generated.email
-              )}" required>
+              )}">
               <button type="button" data-action="copy-field" data-field="email" aria-label="Copy email">${icon(
+                'copy'
+              )}</button>
+            </div>
+          </label>
+          <label class="tu-form-wide">
+            <span>Username</span>
+            <div class="tu-inline-field">
+              <input name="username" autocomplete="off" value="${escapeAttribute(
+                generated.username || ''
+              )}" placeholder="Only for sites that sign in with a username">
+              <button type="button" data-action="copy-field" data-field="username" aria-label="Copy username">${icon(
                 'copy'
               )}</button>
             </div>
@@ -749,7 +760,8 @@
 
     if (action === 'copy-field') {
       const field = shadow.querySelector(`[name="${event.currentTarget.dataset.field}"]`);
-      if (field) await copyText(field.value, `${field.name === 'email' ? 'Email' : 'Password'} copied`);
+      const labels = { email: 'Email', username: 'Username', password: 'Password' };
+      if (field) await copyText(field.value, `${labels[field.name] || 'Value'} copied`);
       return;
     }
 
@@ -834,6 +846,9 @@
   }
 
   async function saveUserFromForm(form) {
+    const hasIdentifier =
+      form.elements.email.value.trim() || form.elements.username.value.trim();
+    form.elements.email.setCustomValidity(hasIdentifier ? '' : 'Add an email or a username');
     if (!form.reportValidity()) return null;
 
     const data = new FormData(form);
@@ -845,6 +860,7 @@
       name: Core.normalizeWhitespace(data.get('name')),
       role: Core.normalizeWhitespace(data.get('role')) || 'Member',
       email: Core.normalizeWhitespace(data.get('email')),
+      username: Core.normalizeWhitespace(data.get('username')),
       password: String(data.get('password') || ''),
       notes: Core.normalizeWhitespace(data.get('notes')),
       siteKey: currentIdentity.siteKey,

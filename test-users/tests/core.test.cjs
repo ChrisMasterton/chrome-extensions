@@ -55,6 +55,7 @@ test('generates deterministic test credentials with required password classes', 
   const identity = Core.buildGeneratedIdentity('HikeStrong', 'Admin', random);
 
   assert.match(identity.email, /^hikestrong\.admin\.[a-z0-9]{6}@example\.test$/);
+  assert.equal(identity.username, '');
   assert.equal(identity.password.length, 16);
   assert.match(identity.password, /[A-Z]/);
   assert.match(identity.password, /[a-z]/);
@@ -158,6 +159,53 @@ test('fills username with the email local part when an email field also exists',
   );
 
   assert.equal(plan[0].value, 'hikestrong.member.x7k2p9');
+});
+
+test('prefers a stored username over email-derived fallbacks', () => {
+  const userWithUsername = { ...testUser, username: 'hike_member' };
+  const fields = [
+    { type: 'text', name: 'username', formIndex: 0 },
+    { type: 'email', name: 'email', formIndex: 0 },
+    { type: 'password', formIndex: 0 },
+  ];
+
+  const plan = Core.buildFillPlan(fields, userWithUsername);
+  assert.equal(plan[0].value, 'hike_member');
+  assert.equal(plan[1].value, testUser.email);
+
+  const loginOnlyPlan = Core.buildFillPlan(fields.slice(0, 1).concat(fields.slice(2)), userWithUsername);
+  assert.equal(loginOnlyPlan[0].value, 'hike_member');
+});
+
+test('fills only matching fields for a username-only user', () => {
+  const usernameOnlyUser = { name: 'Member Tester', username: 'hike_member', password: 'Secret!234Secret' };
+
+  const plan = Core.buildFillPlan(
+    [
+      { type: 'text', name: 'username', formIndex: 0 },
+      { type: 'password', formIndex: 0 },
+    ],
+    usernameOnlyUser
+  );
+  assert.deepEqual(
+    plan.map((step) => [step.purpose, step.value]),
+    [
+      ['username', 'hike_member'],
+      ['password', usernameOnlyUser.password],
+    ]
+  );
+
+  const emailFormPlan = Core.buildFillPlan(
+    [
+      { type: 'email', name: 'email', formIndex: 0 },
+      { type: 'password', formIndex: 0 },
+    ],
+    usernameOnlyUser
+  );
+  assert.deepEqual(
+    emailFormPlan.map((step) => step.purpose),
+    ['password']
+  );
 });
 
 test('treats a lone unlabeled text input beside a password as the username', () => {

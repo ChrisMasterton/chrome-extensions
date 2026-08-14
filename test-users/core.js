@@ -148,6 +148,7 @@
       name: `${normalizedRole} Tester`,
       role: normalizedRole,
       email: generateEmail(projectName, normalizedRole, randomValues),
+      username: '',
       password: generatePassword(randomValues),
       notes: '',
     };
@@ -268,13 +269,16 @@
     const hasEmailField = entries.some((entry) => entry.purpose === 'email');
     const personName = splitPersonName(user?.name);
     const email = String(user?.email || '');
+    const username = normalizeWhitespace(user?.username);
     const valueByPurpose = {
       email,
       password: String(user?.password || ''),
       'full-name': normalizeWhitespace(user?.name) || `${personName.first} ${personName.last}`,
       'first-name': personName.first,
       'last-name': personName.last,
-      username: hasEmailField ? email.split('@')[0] : email,
+      // Without a stored username, fall back to the email: its local part when
+      // the form also has an email field, otherwise the full address.
+      username: username || (hasEmailField ? email.split('@')[0] : email),
     };
 
     return entries

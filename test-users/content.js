@@ -164,6 +164,12 @@
     currentIdentity = Core.getSiteIdentity(window.location, document.title, override);
   }
 
+  function getPasswordSymbols() {
+    return Core.sanitizePasswordSymbols(
+      storedState.siteProfiles[window.location.origin]?.passwordSymbols
+    );
+  }
+
   function getVisibleUsers() {
     const query = appState.query.trim().toLowerCase();
     return storedState.users.filter((user) => {
@@ -212,6 +218,9 @@
     });
 
     Object.entries(storedState.siteProfiles).forEach(([origin, profile]) => {
+      // Profiles holding only preferences (e.g. password symbols) are not
+      // named site identities and should not appear as saved sites.
+      if (!profile?.projectName) return;
       const identity = identityFromSavedProfile(origin, profile);
       if (!identity) return;
       const existing = sites.get(identity.siteKey);
@@ -332,12 +341,14 @@
           <span class="tu-tab-count">${allCount}</span>
         </button>
       </div>
-      <main class="tu-content">
+      <div class="tu-search-bar">
         <label class="tu-search">
           ${icon('search')}
           <span class="tu-sr-only">Search users or notes</span>
           <input data-input="search" type="search" placeholder="Search users or notes" value="${escapeAttribute(appState.query)}">
         </label>
+      </div>
+      <main class="tu-content">
         <div class="tu-user-list">${userCards}</div>
       </main>
     `;
@@ -416,7 +427,10 @@
 
   function renderEditorScreen() {
     const existingUser = storedState.users.find((user) => user.id === appState.editingId);
-    const generated = existingUser || Core.buildGeneratedIdentity(currentIdentity.projectName, 'Member');
+    const passwordSymbols = getPasswordSymbols();
+    const generated =
+      existingUser ||
+      Core.buildGeneratedIdentity(currentIdentity.projectName, 'Member', undefined, passwordSymbols);
     const title = existingUser ? 'Edit test user' : 'New test user';
 
     return `
@@ -484,6 +498,22 @@
               )}</button>
             </div>
           </label>
+          <div class="tu-symbol-toggles tu-form-wide" role="group" aria-label="Symbols allowed in generated passwords">
+            <span class="tu-symbol-toggles-label">Symbols in generated passwords</span>
+            <div class="tu-symbol-options">
+              ${[...Core.PASSWORD_SYMBOL_CHOICES]
+                .map(
+                  (symbol) => `<label class="tu-symbol-option">
+                    <input type="checkbox" data-symbol="${escapeAttribute(symbol)}" ${
+                      passwordSymbols.includes(symbol) ? 'checked' : ''
+                    }>
+                    <span>${escapeHtml(symbol)}</span>
+                  </label>`
+                )
+                .join('')}
+            </div>
+            <small>Untick any this site rejects — with none ticked, passwords are letters and numbers only. Remembered for this site.</small>
+          </div>
           <label class="tu-form-wide">
             <span>Notes</span>
             <textarea name="notes" rows="2" maxlength="160" placeholder="What role or scenario is this for?">${escapeHtml(
@@ -687,6 +717,10 @@
       nextSearch?.setSelectionRange(appState.query.length, appState.query.length);
     });
 
+    shadow.querySelectorAll('[data-symbol]').forEach((element) => {
+      element.addEventListener('change', handleSymbolToggle);
+    });
+
     shadow.querySelector('[data-form="user"]')?.addEventListener('submit', async (event) => {
       event.preventDefault();
       const user = await saveUserFromForm(event.currentTarget);
@@ -817,12 +851,39 @@
     const form = shadow.querySelector('[data-form="user"]');
     if (!form) return;
     const role = form.elements.role.value;
-    const generated = Core.buildGeneratedIdentity(currentIdentity.projectName, role);
+    const generated = Core.buildGeneratedIdentity(
+      currentIdentity.projectName,
+      role,
+      undefined,
+      getPasswordSymbols()
+    );
     form.elements.name.value = generated.name;
     form.elements.email.value = generated.email;
     form.elements.password.value = generated.password;
     form.elements.email.focus();
     showToast('Fresh credentials generated');
+  }
+
+  // Persists the allowed-symbol choice for this site and refreshes the
+  // password so the visible value always matches the current rules.
+  async function handleSymbolToggle() {
+    const symbols = [...shadow.querySelectorAll('[data-symbol]')]
+      .filter((input) => input.checked)
+      .map((input) => input.dataset.symbol)
+      .join('');
+    const origin = window.location.origin;
+    const siteProfiles = {
+      ...storedState.siteProfiles,
+      [origin]: {
+        ...storedState.siteProfiles[origin],
+        passwordSymbols: symbols,
+        updatedAt: new Date().toISOString(),
+      },
+    };
+    await writeStoredState({ ...storedState, siteProfiles });
+
+    const passwordInput = shadow.querySelector('[data-form="user"] [name="password"]');
+    if (passwordInput) passwordInput.value = Core.generatePassword(undefined, symbols);
   }
 
   function scrollPendingConfirmationIntoView(selector) {
@@ -932,6 +993,7 @@
     const siteProfiles = {
       ...storedState.siteProfiles,
       [previousIdentity.origin]: {
+        ...storedState.siteProfiles[previousIdentity.origin],
         projectName,
         updatedAt: new Date().toISOString(),
       },

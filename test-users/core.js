@@ -114,18 +114,29 @@
     return result;
   }
 
-  function generatePassword(randomValues) {
+  const PASSWORD_SYMBOL_CHOICES = '!@#$%';
+
+  // Accepts a stored preference (string or array) and returns only known
+  // symbols in canonical order. null/undefined means "all symbols allowed";
+  // an empty value means alphanumeric-only passwords.
+  function sanitizePasswordSymbols(value) {
+    const requested = new Set(
+      Array.isArray(value) ? value : String(value ?? PASSWORD_SYMBOL_CHOICES).split('')
+    );
+    return [...PASSWORD_SYMBOL_CHOICES].filter((symbol) => requested.has(symbol)).join('');
+  }
+
+  function generatePassword(randomValues, symbols = PASSWORD_SYMBOL_CHOICES) {
     const uppercase = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
     const lowercase = 'abcdefghijkmnopqrstuvwxyz';
     const digits = '23456789';
-    const symbols = '!@#$%';
     const all = `${uppercase}${lowercase}${digits}${symbols}`;
     const characters = [
       pick(uppercase, randomValues),
       pick(lowercase, randomValues),
       pick(digits, randomValues),
-      pick(symbols, randomValues),
     ];
+    if (symbols) characters.push(pick(symbols, randomValues));
 
     while (characters.length < 16) {
       characters.push(pick(all, randomValues));
@@ -142,14 +153,14 @@
     return `${slugify(projectName)}.${slugify(role, 'user')}.${suffix}@example.test`;
   }
 
-  function buildGeneratedIdentity(projectName, role = 'Member', randomValues) {
+  function buildGeneratedIdentity(projectName, role = 'Member', randomValues, passwordSymbols) {
     const normalizedRole = normalizeWhitespace(role) || 'Member';
     return {
       name: `${normalizedRole} Tester`,
       role: normalizedRole,
       email: generateEmail(projectName, normalizedRole, randomValues),
       username: '',
-      password: generatePassword(randomValues),
+      password: generatePassword(randomValues, sanitizePasswordSymbols(passwordSymbols)),
       notes: '',
     };
   }
@@ -321,6 +332,7 @@
   }
 
   return {
+    PASSWORD_SYMBOL_CHOICES,
     buildFillPlan,
     buildGeneratedIdentity,
     classifyFillField,
@@ -328,6 +340,7 @@
     describeFillPlan,
     generateEmail,
     generatePassword,
+    sanitizePasswordSymbols,
     getEnvironment,
     getSiteIdentity,
     isLocalHostname,

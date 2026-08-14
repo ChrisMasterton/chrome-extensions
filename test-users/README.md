@@ -10,7 +10,7 @@ localhost:3000 + HikeStrong
 
 ## Current functionality
 
-- Generate a unique `@example.test` email and strong password for a chosen role.
+- Generate a unique `@example.test` email and strong password for a chosen role. Per-site checkboxes control which symbols (`!@#$%`) generated passwords may contain, for password fields that reject certain characters — untick them all for alphanumeric-only passwords.
 - Save a short name, role, and scenario note with each account, plus an optional username for sites that sign in with a username instead of an email — at least one of email or username is required. Username fields are filled with the stored username when set, falling back to the email (or its local part when the form also has an email field).
 - Fill login and sign-up forms: full or first/last name, username, email, and every password field. Fields are matched by labels, placeholders, `autocomplete` attributes, and name/id hints, including inside open shadow DOM and same-origin iframes, and a toast confirms exactly which fields were filled.
 - Filter accounts for the current site or search across all sites.

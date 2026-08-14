@@ -63,6 +63,33 @@ test('generates deterministic test credentials with required password classes', 
   assert.match(identity.password, /[!@#$%]/);
 });
 
+test('restricts generated passwords to the allowed symbols', () => {
+  let cursor = 0;
+  const values = [0.01, 0.2, 0.4, 0.6, 0.8];
+  const random = () => values[(cursor += 1) % values.length];
+
+  const alphanumeric = Core.generatePassword(random, '');
+  assert.equal(alphanumeric.length, 16);
+  assert.match(alphanumeric, /^[A-Za-z0-9]+$/);
+
+  const restricted = Core.generatePassword(random, '#$');
+  assert.equal(restricted.length, 16);
+  assert.match(restricted, /^[A-Za-z0-9#$]+$/);
+  assert.match(restricted, /[#$]/);
+
+  const identity = Core.buildGeneratedIdentity('HikeStrong', 'Admin', random, '');
+  assert.match(identity.password, /^[A-Za-z0-9]+$/);
+});
+
+test('sanitizes stored password symbol preferences', () => {
+  assert.equal(Core.sanitizePasswordSymbols(undefined), '!@#$%');
+  assert.equal(Core.sanitizePasswordSymbols(null), '!@#$%');
+  assert.equal(Core.sanitizePasswordSymbols(''), '');
+  assert.equal(Core.sanitizePasswordSymbols('#!'), '!#');
+  assert.equal(Core.sanitizePasswordSymbols(['$', '@']), '@$');
+  assert.equal(Core.sanitizePasswordSymbols('&*~'), '');
+});
+
 const testUser = {
   name: 'Member Tester',
   email: 'hikestrong.member.x7k2p9@example.test',

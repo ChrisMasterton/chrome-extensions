@@ -1,7 +1,7 @@
 :host {
   color: #12162f;
   font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-size: 15px;
+  font-size: 13px;
   line-height: 1.4;
 }
 
@@ -26,29 +26,29 @@ button {
   inset: 0;
   color: #12162f;
   font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-size: 14px;
+  font-size: 13px;
   line-height: 1.4;
   pointer-events: none;
 }
 
 .tu-panel {
   position: absolute;
-  top: 18px;
-  right: clamp(20px, 7vw, 110px);
+  top: 12px;
+  right: clamp(16px, 5vw, 80px);
   display: flex;
-  width: min(560px, calc(100vw - 32px));
-  max-height: calc(100vh - 36px);
+  width: min(400px, calc(100vw - 24px));
+  max-height: calc(100vh - 24px);
   flex-direction: column;
   overflow: hidden;
   border: 1px solid #dce1ec;
-  border-radius: 16px;
+  border-radius: 12px;
   background: #ffffff;
   box-shadow: 0 24px 60px rgba(22, 29, 54, 0.18), 0 8px 24px rgba(22, 29, 54, 0.08);
   pointer-events: auto;
 }
 
 .tu-header {
-  padding: 22px 24px 16px;
+  padding: 12px 14px 10px;
   border-bottom: 1px solid #e7eaf1;
 }
 
@@ -79,15 +79,15 @@ button {
 .tu-header h1 {
   margin: 0;
   color: #11152d;
-  font-size: 19px;
+  font-size: 15px;
   font-weight: 750;
   letter-spacing: -0.03em;
 }
 
 .tu-environment {
   flex: 0 0 auto;
-  padding: 3px 8px;
-  border-radius: 6px;
+  padding: 2px 6px;
+  border-radius: 5px;
   background: #edf0ff;
   color: #3146c9;
   font-size: 10px;
@@ -108,12 +108,12 @@ button {
 .tu-site-identity {
   display: flex;
   width: 100%;
-  margin-top: 12px;
-  padding: 10px 12px;
+  margin-top: 8px;
+  padding: 7px 9px;
   align-items: center;
-  gap: 12px;
+  gap: 9px;
   border: 1px solid #dfe3ec;
-  border-radius: 12px;
+  border-radius: 10px;
   background: #f8f9fc;
   cursor: pointer;
   text-align: left;
@@ -126,14 +126,14 @@ button {
 
 .tu-site-badge {
   display: grid;
-  width: 36px;
-  height: 36px;
+  width: 28px;
+  height: 28px;
   flex: 0 0 auto;
   place-items: center;
-  border-radius: 10px;
+  border-radius: 8px;
   background: #e8ebff;
   color: #2740c4;
-  font-size: 15px;
+  font-size: 12px;
   font-weight: 750;
 }
 
@@ -141,20 +141,20 @@ button {
   display: grid;
   min-width: 0;
   flex: 1 1 auto;
-  gap: 2px;
+  gap: 1px;
 }
 
 .tu-site-identity-name {
   display: flex;
   min-width: 0;
   align-items: center;
-  gap: 8px;
+  gap: 7px;
 }
 
 .tu-site-identity-name strong {
   overflow: hidden;
   color: #11152d;
-  font-size: 15px;
+  font-size: 13px;
   font-weight: 750;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -163,7 +163,7 @@ button {
 .tu-site-origin {
   overflow: hidden;
   color: #697087;
-  font-size: 12px;
+  font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -172,9 +172,9 @@ button {
   display: flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
   color: #8a91a5;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 700;
 }
 
@@ -183,14 +183,14 @@ button {
 }
 
 .tu-site-identity-edit .tu-icon {
-  width: 14px;
-  height: 14px;
+  width: 13px;
+  height: 13px;
 }
 
 .tu-tabs {
   display: flex;
-  padding: 0 24px;
-  gap: 28px;
+  padding: 0 14px;
+  gap: 18px;
   border-bottom: 1px solid #e7eaf1;
   background: #fbfcfe;
 }
@@ -199,31 +199,31 @@ button {
   position: relative;
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
   min-width: 0;
-  padding: 15px 1px 13px;
+  padding: 9px 1px 8px;
   border: 0;
   background: transparent;
   color: #4d5469;
   cursor: pointer;
-  font-size: 15px;
+  font-size: 13px;
   font-weight: 650;
 }
 
 .tu-tab-label {
   overflow: hidden;
-  max-width: 180px;
+  max-width: 150px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .tu-tab-count {
   flex: 0 0 auto;
-  padding: 1px 7px;
+  padding: 1px 6px;
   border-radius: 999px;
   background: #edf0f4;
   color: #4d566c;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 750;
 }
 
@@ -237,8 +237,8 @@ button {
   right: 0;
   bottom: -1px;
   left: 0;
-  height: 3px;
-  border-radius: 3px 3px 0 0;
+  height: 2px;
+  border-radius: 2px 2px 0 0;
   background: transparent;
   content: "";
 }
@@ -251,20 +251,26 @@ button {
   background: #3049d8;
 }
 
+.tu-search-bar {
+  padding: 8px 14px;
+  border-bottom: 1px solid #e7eaf1;
+  background: #ffffff;
+}
+
 .tu-content {
   min-height: 0;
-  padding: 20px 24px;
+  padding: 10px 14px 12px;
   overflow-y: auto;
 }
 
 .tu-search {
   display: flex;
-  height: 48px;
+  height: 32px;
   align-items: center;
-  gap: 11px;
-  padding: 0 14px;
+  gap: 8px;
+  padding: 0 10px;
   border: 1px solid #d6dbe6;
-  border-radius: 10px;
+  border-radius: 8px;
   background: #ffffff;
   color: #6f778e;
   box-shadow: 0 1px 2px rgba(20, 25, 49, 0.02);
@@ -289,18 +295,16 @@ button {
 
 .tu-user-list {
   display: grid;
-  margin-top: 16px;
-  gap: 12px;
+  gap: 7px;
 }
 
 .tu-user-card {
   display: grid;
-  grid-template-columns: 48px minmax(0, 1fr) auto;
-  gap: 14px;
-  min-height: 124px;
-  padding: 16px;
+  grid-template-columns: 30px minmax(0, 1fr) auto;
+  gap: 9px;
+  padding: 9px 10px;
   border: 1px solid #dce1eb;
-  border-radius: 12px;
+  border-radius: 9px;
   background: #ffffff;
   box-shadow: 0 2px 6px rgba(20, 25, 49, 0.025);
 }
@@ -312,13 +316,13 @@ button {
 
 .tu-avatar {
   display: grid;
-  width: 48px;
-  height: 48px;
+  width: 30px;
+  height: 30px;
   place-items: center;
   border-radius: 50%;
   background: #eef0ff;
   color: #202b7c;
-  font-size: 17px;
+  font-size: 12px;
   font-weight: 750;
 }
 
@@ -327,22 +331,22 @@ button {
 }
 
 .tu-user-title-row {
-  gap: 10px;
+  gap: 8px;
 }
 
 .tu-user-title-row strong {
   overflow: hidden;
   color: #11152d;
-  font-size: 16px;
+  font-size: 13px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .tu-role {
   flex: 0 0 auto;
-  padding: 3px 7px;
-  border-radius: 6px;
-  font-size: 10px;
+  padding: 2px 5px;
+  border-radius: 5px;
+  font-size: 9px;
   font-weight: 800;
   letter-spacing: 0.065em;
 }
@@ -376,43 +380,42 @@ button {
 }
 
 .tu-email {
-  margin-top: 4px;
+  margin-top: 2px;
   color: #4d556c;
-  font-size: 13px;
+  font-size: 11px;
 }
 
 .tu-notes {
-  margin-top: 5px;
+  margin-top: 1px;
   color: #737b90;
-  font-size: 13px;
+  font-size: 11px;
 }
 
 .tu-project-label {
-  margin-top: 6px;
+  margin-top: 2px;
   color: #3146c9;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 700;
 }
 
 .tu-card-actions {
   display: flex;
-  min-width: 112px;
   flex-direction: column;
   align-items: flex-end;
   justify-content: space-between;
-  gap: 10px;
+  gap: 5px;
 }
 
 .tu-edit-button,
 .tu-icon-button,
 .tu-inline-field button {
   display: grid;
-  width: 34px;
-  height: 34px;
+  width: 26px;
+  height: 26px;
   padding: 0;
   place-items: center;
   border: 1px solid transparent;
-  border-radius: 8px;
+  border-radius: 7px;
   background: transparent;
   color: #697087;
   cursor: pointer;
@@ -431,8 +434,8 @@ button {
 .tu-danger-button,
 .tu-back-button {
   justify-content: center;
-  gap: 7px;
-  border-radius: 9px;
+  gap: 6px;
+  border-radius: 8px;
   cursor: pointer;
   font-weight: 700;
 }
@@ -440,8 +443,8 @@ button {
 .tu-primary-button,
 .tu-secondary-button,
 .tu-danger-button {
-  min-height: 38px;
-  padding: 8px 13px;
+  min-height: 29px;
+  padding: 5px 10px;
 }
 
 .tu-primary-button {
@@ -474,7 +477,7 @@ button {
 }
 
 .tu-back-button {
-  margin-bottom: 14px;
+  margin-bottom: 10px;
   padding: 0;
   border: 0;
   background: transparent;
@@ -482,17 +485,17 @@ button {
 }
 
 .tu-fill-button {
-  min-width: 112px;
+  min-width: 92px;
 }
 
 .tu-footer {
-  padding: 16px 24px 17px;
+  padding: 10px 14px;
   border-top: 1px solid #e7eaf1;
   background: #fbfcfe;
 }
 
 .tu-footer-actions {
-  gap: 12px;
+  gap: 9px;
 }
 
 .tu-settings-button {
@@ -502,15 +505,15 @@ button {
 
 .tu-storage-note,
 .tu-footer--compact span {
-  margin-top: 11px;
-  gap: 7px;
+  margin-top: 8px;
+  gap: 6px;
   color: #747c91;
-  font-size: 11px;
+  font-size: 10px;
 }
 
 .tu-footer--compact {
-  padding-top: 12px;
-  padding-bottom: 12px;
+  padding-top: 8px;
+  padding-bottom: 8px;
 }
 
 .tu-footer--compact span {
@@ -519,8 +522,8 @@ button {
 
 .tu-icon {
   display: block;
-  width: 18px;
-  height: 18px;
+  width: 15px;
+  height: 15px;
 }
 
 .tu-primary-button .tu-icon,
@@ -529,8 +532,8 @@ button {
 .tu-back-button .tu-icon,
 .tu-storage-note .tu-icon,
 .tu-footer--compact .tu-icon {
-  width: 16px;
-  height: 16px;
+  width: 14px;
+  height: 14px;
 }
 
 .tu-primary-button .tu-icon,
@@ -540,44 +543,44 @@ button {
 
 .tu-editor,
 .tu-settings {
-  padding-top: 16px;
+  padding-top: 10px;
 }
 
 .tu-section-heading {
   align-items: flex-start;
-  gap: 16px;
-  margin-bottom: 18px;
+  gap: 12px;
+  margin-bottom: 12px;
 }
 
 .tu-section-heading h2 {
   margin: 0;
   color: #11152d;
-  font-size: 20px;
+  font-size: 15px;
   letter-spacing: -0.02em;
 }
 
 .tu-section-heading p {
-  margin: 4px 0 0;
+  margin: 3px 0 0;
   color: #747c91;
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .tu-regenerate {
-  min-height: 36px;
+  min-height: 29px;
   white-space: nowrap;
 }
 
 .tu-form {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 14px;
+  gap: 10px;
 }
 
 .tu-form > label {
   display: grid;
-  gap: 7px;
+  gap: 4px;
   color: #343b52;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 700;
 }
 
@@ -587,7 +590,7 @@ button {
   width: 100%;
   min-width: 0;
   border: 1px solid #d5dae5;
-  border-radius: 9px;
+  border-radius: 8px;
   outline: 0;
   background: #ffffff;
   color: #171b34;
@@ -595,12 +598,12 @@ button {
 
 .tu-form input,
 .tu-form select {
-  height: 42px;
-  padding: 0 11px;
+  height: 32px;
+  padding: 0 9px;
 }
 
 .tu-form textarea {
-  padding: 10px 11px;
+  padding: 7px 9px;
   resize: vertical;
 }
 
@@ -613,7 +616,7 @@ button {
 
 .tu-form small {
   color: #7c8498;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 450;
   line-height: 1.45;
 }
@@ -624,9 +627,9 @@ button {
 
 .tu-inline-field {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 42px;
+  grid-template-columns: minmax(0, 1fr) 32px;
   border: 1px solid #d5dae5;
-  border-radius: 9px;
+  border-radius: 8px;
   background: #ffffff;
 }
 
@@ -644,90 +647,132 @@ button {
   align-self: center;
 }
 
+.tu-symbol-toggles {
+  display: grid;
+  gap: 5px;
+}
+
+.tu-symbol-toggles-label {
+  color: #343b52;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.tu-symbol-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tu-symbol-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 7px;
+  border: 1px solid #d5dae5;
+  border-radius: 7px;
+  background: #ffffff;
+  color: #171b34;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.tu-symbol-option:focus-within {
+  border-color: #7786df;
+  box-shadow: 0 0 0 3px rgba(48, 73, 216, 0.12);
+}
+
+.tu-form .tu-symbol-option input {
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  accent-color: #3049d8;
+}
+
 .tu-form-actions {
-  margin-top: 4px;
-  gap: 12px;
+  margin-top: 2px;
+  gap: 8px;
 }
 
 .tu-form-actions > div {
-  gap: 9px;
+  gap: 7px;
 }
 
 .tu-identity-preview {
   display: grid;
-  gap: 6px;
-  padding: 14px;
+  gap: 4px;
+  padding: 10px;
   border: 1px solid #dfe3ec;
-  border-radius: 10px;
+  border-radius: 9px;
   background: #f8f9fc;
 }
 
 .tu-identity-preview span {
   color: #737b90;
-  font-size: 11px;
+  font-size: 10px;
 }
 
 .tu-identity-preview strong {
   color: #263aa9;
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .tu-privacy-card {
   display: flex;
-  margin-top: 20px;
-  gap: 12px;
-  padding: 14px;
+  margin-top: 14px;
+  gap: 9px;
+  padding: 10px;
   border: 1px solid #e1e5ed;
-  border-radius: 10px;
+  border-radius: 9px;
   background: #fbfcfe;
   color: #596177;
 }
 
 .tu-privacy-card strong {
   color: #30374e;
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .tu-privacy-card p {
-  margin: 4px 0 0;
-  font-size: 11px;
+  margin: 3px 0 0;
+  font-size: 10px;
   line-height: 1.5;
 }
 
 .tu-manage-sites {
-  margin-top: 22px;
-  padding-top: 20px;
+  margin-top: 14px;
+  padding-top: 12px;
   border-top: 1px solid #e5e8ef;
 }
 
 .tu-manage-sites-heading h3 {
   margin: 0;
   color: #1d233b;
-  font-size: 15px;
+  font-size: 13px;
 }
 
 .tu-manage-sites-heading p {
-  margin: 4px 0 0;
+  margin: 3px 0 0;
   color: #737b90;
-  font-size: 11px;
+  font-size: 10px;
   line-height: 1.45;
 }
 
 .tu-saved-site-list {
   display: grid;
-  margin-top: 12px;
-  gap: 9px;
+  margin-top: 9px;
+  gap: 7px;
 }
 
 .tu-saved-site {
   display: flex;
-  min-height: 66px;
-  padding: 12px;
+  padding: 8px 9px;
   align-items: center;
   justify-content: space-between;
-  gap: 14px;
+  gap: 10px;
   border: 1px solid #dfe3ec;
-  border-radius: 10px;
+  border-radius: 9px;
   background: #ffffff;
 }
 
@@ -735,14 +780,14 @@ button {
 .tu-site-delete-copy {
   display: grid;
   min-width: 0;
-  gap: 4px;
+  gap: 2px;
 }
 
 .tu-saved-site-copy strong,
 .tu-site-delete-copy strong {
   overflow: hidden;
   color: #232941;
-  font-size: 13px;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -750,24 +795,24 @@ button {
 .tu-saved-site-copy span {
   overflow: hidden;
   color: #737b90;
-  font-size: 11px;
+  font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .tu-site-delete-button {
   display: flex;
-  min-height: 34px;
+  min-height: 28px;
   flex: 0 0 auto;
-  padding: 6px 9px;
+  padding: 4px 8px;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   border: 1px solid transparent;
-  border-radius: 8px;
+  border-radius: 7px;
   background: transparent;
   color: #a9342c;
   cursor: pointer;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 700;
 }
 
@@ -777,8 +822,8 @@ button {
 }
 
 .tu-site-delete-button .tu-icon {
-  width: 15px;
-  height: 15px;
+  width: 13px;
+  height: 13px;
 }
 
 .tu-saved-site--confirming {
@@ -790,83 +835,83 @@ button {
 .tu-site-delete-copy p {
   margin: 0;
   color: #725450;
-  font-size: 11px;
+  font-size: 10px;
   line-height: 1.45;
 }
 
 .tu-site-confirm-actions {
   display: flex;
   justify-content: flex-end;
-  gap: 8px;
+  gap: 7px;
 }
 
 .tu-site-confirm-actions .tu-secondary-button,
 .tu-site-confirm-actions .tu-danger-button {
-  min-height: 34px;
-  padding: 6px 10px;
-  font-size: 11px;
+  min-height: 27px;
+  padding: 4px 8px;
+  font-size: 10px;
 }
 
 .tu-inline-delete-confirm {
   display: grid;
-  gap: 12px;
-  padding: 13px;
+  gap: 9px;
+  padding: 10px;
   border: 1px solid #e5bcbc;
-  border-radius: 10px;
+  border-radius: 9px;
   background: #fffafa;
 }
 
 .tu-inline-delete-confirm > div:first-child {
   display: grid;
-  gap: 4px;
+  gap: 3px;
 }
 
 .tu-inline-delete-confirm strong {
   color: #7f261f;
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .tu-inline-delete-confirm p {
   margin: 0;
   color: #725450;
-  font-size: 11px;
+  font-size: 10px;
   line-height: 1.45;
 }
 
 .tu-inline-delete-confirm > div:last-child {
   display: flex;
   justify-content: flex-end;
-  gap: 8px;
+  gap: 7px;
 }
 
 .tu-inline-delete-confirm .tu-secondary-button,
 .tu-inline-delete-confirm .tu-danger-button {
-  min-height: 34px;
-  padding: 6px 10px;
-  font-size: 11px;
+  min-height: 27px;
+  padding: 4px 8px;
+  font-size: 10px;
 }
 
 .tu-empty-state {
   display: grid;
-  min-height: 260px;
+  min-height: 170px;
   place-items: center;
   align-content: center;
-  padding: 32px;
+  padding: 20px;
   border: 1px dashed #d6dbe6;
-  border-radius: 12px;
+  border-radius: 10px;
   color: #697087;
   text-align: center;
 }
 
 .tu-empty-state strong {
   color: #232941;
-  font-size: 15px;
+  font-size: 13px;
 }
 
 .tu-empty-state p {
-  max-width: 290px;
-  margin: 7px 0 16px;
-  font-size: 12px;
+  max-width: 260px;
+  margin: 5px 0 12px;
+  font-size: 11px;
   line-height: 1.55;
 }
 
@@ -875,12 +920,12 @@ button {
   flex-wrap: wrap;
   align-items: center;
   justify-content: center;
-  gap: 10px;
+  gap: 8px;
 }
 
 .tu-ghost-button {
-  min-height: 38px;
-  padding: 8px 10px;
+  min-height: 29px;
+  padding: 5px 8px;
   border: 0;
   background: transparent;
   color: #263aa9;
@@ -896,26 +941,26 @@ button {
 
 .tu-empty-icon {
   display: grid;
-  width: 44px;
-  height: 44px;
-  margin-bottom: 12px;
+  width: 34px;
+  height: 34px;
+  margin-bottom: 9px;
   place-items: center;
-  border-radius: 12px;
+  border-radius: 10px;
   background: #eef0ff;
   color: #3049d8;
 }
 
 .tu-launcher {
   position: absolute;
-  right: 24px;
-  bottom: 24px;
+  right: 20px;
+  bottom: 20px;
   display: flex;
-  height: 46px;
-  padding: 0 16px;
+  height: 38px;
+  padding: 0 13px;
   align-items: center;
-  gap: 9px;
+  gap: 7px;
   border: 1px solid #263fc6;
-  border-radius: 24px;
+  border-radius: 20px;
   background: #3049d8;
   color: #ffffff;
   box-shadow: 0 10px 28px rgba(48, 73, 216, 0.28);
@@ -926,17 +971,17 @@ button {
 
 .tu-page-toast {
   position: fixed;
-  bottom: 48px;
+  bottom: 40px;
   left: 50%;
   display: flex;
-  min-width: 280px;
-  min-height: 58px;
-  padding: 0 18px;
+  min-width: 240px;
+  min-height: 44px;
+  padding: 0 14px;
   align-items: center;
-  gap: 12px;
+  gap: 9px;
   border: 1px solid #dbe2df;
   border-left: 4px solid #24a365;
-  border-radius: 10px;
+  border-radius: 9px;
   background: #ffffff;
   color: #30374e;
   box-shadow: 0 14px 34px rgba(25, 31, 57, 0.16);
@@ -970,19 +1015,14 @@ button {
 
 @media (max-width: 680px) {
   .tu-panel {
-    top: 12px;
-    right: 12px;
-    width: calc(100vw - 24px);
-    max-height: calc(100vh - 24px);
+    top: 10px;
+    right: 10px;
+    width: calc(100vw - 20px);
+    max-height: calc(100vh - 20px);
   }
 
   .tu-user-card {
-    grid-template-columns: 42px minmax(0, 1fr);
-  }
-
-  .tu-avatar {
-    width: 42px;
-    height: 42px;
+    grid-template-columns: 30px minmax(0, 1fr);
   }
 
   .tu-card-actions {
@@ -994,7 +1034,7 @@ button {
   }
 
   .tu-fill-button {
-    min-width: 108px;
+    min-width: 92px;
   }
 
   .tu-form {
@@ -1006,9 +1046,9 @@ button {
   }
 
   .tu-page-toast {
-    right: 16px;
-    bottom: 20px;
-    left: 16px;
+    right: 14px;
+    bottom: 16px;
+    left: 14px;
     min-width: 0;
     transform: none;
   }

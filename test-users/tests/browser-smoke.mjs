@@ -510,8 +510,169 @@ async function run() {
     assert.deepEqual(storedAfterSiteDelete.users, []);
     assert.deepEqual(storedAfterSiteDelete.siteProfiles, {});
 
+    log('navigating to the profile form page for the snapshot scenario');
+    await page.evaluate(`location.assign('/demo/runtime-profile.html')`);
+    await waitForCondition(
+      page,
+      `location.pathname === '/demo/runtime-profile.html' && document.readyState === 'complete'`,
+      'profile page load'
+    );
+    await worker.evaluate(`(async () => {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tab?.id) throw new Error('Profile tab not found');
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id, allFrames: true },
+        files: ['core.js', 'content.js']
+      });
+      return tab.id;
+    })()`);
+    await waitForCondition(
+      page,
+      `!!${shadowRootExpression}?.querySelector('.tu-panel')`,
+      'overlay on the profile page'
+    );
+
+    log('filling the long form and capturing a snapshot');
+    await page.evaluate(`(() => {
+      const set = (selector, value) => {
+        const element = document.querySelector(selector);
+        element.value = value;
+        element.dispatchEvent(new Event('input', { bubbles: true }));
+      };
+      set('input[name="first_name"]', 'Ava');
+      set('input[name="last_name"]', 'Tester');
+      set('input[name="company"]', 'HikeStrong QA');
+      set('input[name="phone"]', '555-0100');
+      set('input[name="address_line1"]', '1 Trail Way');
+      set('input[name="city"]', 'Boulder');
+      set('input[name="zip"]', '80301');
+      set('input[name="email"]', 'real.person@example.com');
+      set('input[name="password"]', 'SuperSecret1!');
+      set('input[name="card_number"]', '4111111111111111');
+      set('input[name="promo_code"]', 'SAVE20');
+      set('textarea[name="bio"]', 'Debugging run notes.');
+      document.querySelector('select[name="country"]').value = 'US';
+      document.querySelector('input[name="plan"][value="pro"]').checked = true;
+      document.querySelector('input[name="newsletter"]').checked = true;
+    })()`);
+    await page.evaluate(
+      `${shadowRootExpression}.querySelector('[data-action="new-snapshot"]').click()`
+    );
+    await waitForCondition(
+      page,
+      `!!${shadowRootExpression}.querySelector('[data-form="snapshot"]')`,
+      'snapshot editor'
+    );
+
+    const snapshotRows = await page.evaluate(`(() => {
+      const root = ${shadowRootExpression};
+      return [...root.querySelectorAll('.tu-snapshot-field')].map((row) => ({
+        label: row.querySelector('.tu-snapshot-field-label').textContent,
+        included: row.querySelector('[data-snapshot-include]').checked,
+      }));
+    })()`);
+    for (const expected of [/company/i, /city/i, /country/i, /plan/i, /newsletter|trail/i, /bio/i]) {
+      assert.ok(
+        snapshotRows.some((row) => expected.test(row.label)),
+        `snapshot should capture a field matching ${expected}`
+      );
+    }
+    assert.ok(
+      snapshotRows.every((row) => !/email|password|card|promo/i.test(row.label)),
+      'credential, payment, and promo fields must never be captured'
+    );
+
+    log('excluding the phone field and editing the company value');
+    await page.evaluate(`(() => {
+      const root = ${shadowRootExpression};
+      const rows = [...root.querySelectorAll('.tu-snapshot-field')];
+      const phoneRow = rows.find((row) =>
+        /phone/i.test(row.querySelector('.tu-snapshot-field-label').textContent)
+      );
+      phoneRow.querySelector('[data-snapshot-include]').click();
+    })()`);
+    await page.evaluate(`(() => {
+      const root = ${shadowRootExpression};
+      const rows = [...root.querySelectorAll('.tu-snapshot-field')];
+      const companyRow = rows.find((row) =>
+        /company/i.test(row.querySelector('.tu-snapshot-field-label').textContent)
+      );
+      const input = companyRow.querySelector('[data-snapshot-value]');
+      input.value = 'HikeStrong QA West';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      root.querySelector('[data-form="snapshot"] button[type="submit"]').click();
+    })()`);
+    await waitForCondition(
+      page,
+      `!!${shadowRootExpression}.querySelector('.tu-snapshot-card')`,
+      'saved snapshot card'
+    );
+
+    log('clearing the form and refilling from the snapshot');
+    await page.evaluate(`(() => {
+      document.querySelectorAll('form input, form textarea').forEach((element) => {
+        if (element.type === 'checkbox' || element.type === 'radio') element.checked = false;
+        else element.value = '';
+      });
+      document.querySelector('select[name="country"]').value = '';
+    })()`);
+    await page.evaluate(
+      `${shadowRootExpression}.querySelector('[data-action="refill-snapshot"]').click()`
+    );
+    await waitForCondition(
+      page,
+      `document.querySelector('input[name="company"]').value === 'HikeStrong QA West'`,
+      'snapshot refill'
+    );
+    const refilled = await page.evaluate(`(() => ({
+      firstName: document.querySelector('input[name="first_name"]').value,
+      lastName: document.querySelector('input[name="last_name"]').value,
+      company: document.querySelector('input[name="company"]').value,
+      phone: document.querySelector('input[name="phone"]').value,
+      address: document.querySelector('input[name="address_line1"]').value,
+      city: document.querySelector('input[name="city"]').value,
+      zip: document.querySelector('input[name="zip"]').value,
+      email: document.querySelector('input[name="email"]').value,
+      password: document.querySelector('input[name="password"]').value,
+      cardNumber: document.querySelector('input[name="card_number"]').value,
+      promoCode: document.querySelector('input[name="promo_code"]').value,
+      country: document.querySelector('select[name="country"]').value,
+      plan: document.querySelector('input[name="plan"]:checked')?.value || null,
+      newsletter: document.querySelector('input[name="newsletter"]').checked,
+      bio: document.querySelector('textarea[name="bio"]').value,
+    }))()`);
+    assert.equal(refilled.firstName, 'Ava');
+    assert.equal(refilled.lastName, 'Tester');
+    assert.equal(refilled.company, 'HikeStrong QA West', 'edited value should win over capture');
+    assert.equal(refilled.address, '1 Trail Way');
+    assert.equal(refilled.city, 'Boulder');
+    assert.equal(refilled.zip, '80301');
+    assert.equal(refilled.country, 'US');
+    assert.equal(refilled.plan, 'pro');
+    assert.equal(refilled.newsletter, true);
+    assert.equal(refilled.bio, 'Debugging run notes.');
+    assert.equal(refilled.phone, '', 'excluded field must stay empty');
+    assert.equal(refilled.email, '', 'email must never be refilled');
+    assert.equal(refilled.password, '', 'password must never be refilled');
+    assert.equal(refilled.cardNumber, '', 'card number must never be refilled');
+    assert.equal(refilled.promoCode, '', 'promo code must never be refilled');
+
+    const storedSnapshots = await worker.evaluate(`(async () => {
+      const result = await chrome.storage.local.get('testUsersStateV1');
+      return result.testUsersStateV1.snapshots;
+    })()`);
+    assert.equal(storedSnapshots.length, 1);
+    assert.equal(storedSnapshots[0].name, 'Runtime profile form');
+    assert.equal(storedSnapshots[0].path, '/demo/runtime-profile.html');
+    assert.ok(
+      storedSnapshots[0].fields.every(
+        (field) => !/password|SuperSecret|4111|SAVE20|real\.person/.test(JSON.stringify(field))
+      ),
+      'stored snapshot must not contain credential, card, or promo values'
+    );
+
     log(
-      'passed: load, recognize, generate, save, autofill top frame and iframe, escape to close, delete login, and delete site'
+      'passed: load, recognize, generate, save, autofill top frame and iframe, escape to close, delete login, delete site, and snapshot capture/exclude/edit/refill'
     );
   } finally {
     await browser?.close();

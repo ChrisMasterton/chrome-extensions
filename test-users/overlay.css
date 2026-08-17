@@ -891,6 +891,169 @@ button {
   font-size: 10px;
 }
 
+.tu-snapshots {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid #e5e8ef;
+}
+
+.tu-snapshots-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.tu-snapshots-heading h3 {
+  margin: 0;
+  color: #1d233b;
+  font-size: 13px;
+}
+
+.tu-snapshot-new {
+  min-height: 27px;
+  padding: 4px 8px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.tu-snapshots-hint {
+  margin: 7px 0 0;
+  color: #737b90;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.tu-snapshot-list {
+  display: grid;
+  margin-top: 9px;
+  gap: 7px;
+}
+
+.tu-snapshot-card {
+  display: flex;
+  padding: 8px 9px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 1px solid #dfe3ec;
+  border-radius: 9px;
+  background: #ffffff;
+}
+
+.tu-snapshot-card:hover {
+  border-color: #c9d0e1;
+  box-shadow: 0 6px 18px rgba(29, 35, 65, 0.07);
+}
+
+.tu-snapshot-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.tu-snapshot-copy strong {
+  overflow: hidden;
+  color: #232941;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tu-snapshot-copy span {
+  overflow: hidden;
+  color: #737b90;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tu-snapshot-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+}
+
+.tu-refill-button {
+  min-width: 78px;
+}
+
+.tu-snapshot-fields {
+  display: grid;
+  gap: 6px;
+}
+
+.tu-snapshot-field {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 8px;
+  padding: 7px 8px;
+  align-items: start;
+  border: 1px solid #dfe3ec;
+  border-radius: 9px;
+  background: #ffffff;
+}
+
+.tu-snapshot-field.is-excluded {
+  background: #f8f9fc;
+  opacity: 0.72;
+}
+
+.tu-snapshot-include {
+  display: grid;
+  padding-top: 3px;
+}
+
+.tu-form .tu-snapshot-include input,
+.tu-form .tu-snapshot-checked input {
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  padding: 0;
+  accent-color: #3049d8;
+}
+
+.tu-snapshot-field-main {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.tu-snapshot-field-label {
+  overflow: hidden;
+  color: #343b52;
+  font-size: 10px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tu-form .tu-snapshot-field input[data-snapshot-value],
+.tu-form .tu-snapshot-field select[data-snapshot-value] {
+  height: 28px;
+  padding: 0 8px;
+  font-size: 12px;
+}
+
+.tu-form .tu-snapshot-field textarea[data-snapshot-value] {
+  font-size: 12px;
+}
+
+.tu-snapshot-static,
+.tu-snapshot-checked {
+  color: #4d556c;
+  font-size: 11px;
+  font-weight: 450;
+}
+
+.tu-snapshot-checked {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+}
+
 .tu-empty-state {
   display: grid;
   min-height: 170px;

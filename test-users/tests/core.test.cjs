@@ -272,9 +272,197 @@ test('describes a fill plan for the confirmation toast', () => {
 });
 
 test('normalizes malformed stored state safely', () => {
-  assert.deepEqual(Core.normalizeStoredState(null), { users: [], siteProfiles: {} });
-  assert.deepEqual(Core.normalizeStoredState({ users: 'bad', siteProfiles: [] }), {
+  assert.deepEqual(Core.normalizeStoredState(null), {
     users: [],
+    snapshots: [],
     siteProfiles: {},
   });
+  assert.deepEqual(
+    Core.normalizeStoredState({ users: 'bad', snapshots: 'bad', siteProfiles: [] }),
+    {
+      users: [],
+      snapshots: [],
+      siteProfiles: {},
+    }
+  );
+});
+
+test('never snapshots credential, payment, or one-time-code fields', () => {
+  assert.equal(Core.snapshotExclusionReason({ type: 'password', name: 'pw' }), 'credential');
+  assert.equal(Core.snapshotExclusionReason({ type: 'email', name: 'contact' }), 'credential');
+  assert.equal(Core.snapshotExclusionReason({ type: 'text', name: 'username' }), 'credential');
+  assert.equal(
+    Core.snapshotExclusionReason({ type: 'text', autocomplete: 'new-password' }),
+    'credential'
+  );
+  assert.equal(
+    Core.snapshotExclusionReason({ type: 'text', autocomplete: 'cc-number' }),
+    'payment'
+  );
+  assert.equal(
+    Core.snapshotExclusionReason({ tag: 'select', type: 'select-one', autocomplete: 'cc-exp-month' }),
+    'payment'
+  );
+  assert.equal(
+    Core.snapshotExclusionReason({ type: 'text', labelText: 'Card number' }),
+    'payment'
+  );
+  assert.equal(
+    Core.snapshotExclusionReason({ type: 'text', autocomplete: 'one-time-code' }),
+    'one-time'
+  );
+  assert.equal(Core.snapshotExclusionReason({ type: 'text', name: 'promo_code' }), 'one-time');
+  assert.equal(Core.snapshotExclusionReason({ type: 'hidden', name: 'csrf' }), 'unsupported');
+
+  // Ordinary long-form fields stay capturable, including ones login fill skips.
+  assert.equal(Core.snapshotExclusionReason({ type: 'tel', name: 'phone' }), null);
+  assert.equal(Core.snapshotExclusionReason({ type: 'text', name: 'zip' }), null);
+  assert.equal(Core.snapshotExclusionReason({ type: 'text', labelText: 'Company' }), null);
+  assert.equal(Core.snapshotExclusionReason({ type: 'text', name: 'first_name' }), null);
+  assert.equal(
+    Core.snapshotExclusionReason({ tag: 'select', type: 'select-one', name: 'country' }),
+    null
+  );
+});
+
+test('builds snapshot fields, skipping sensitive fields and unchecked radios', () => {
+  const { fields, skippedCount } = Core.buildSnapshotFields([
+    { tag: 'input', type: 'text', name: 'company', labelText: 'Company', value: 'HikeStrong QA' },
+    { tag: 'input', type: 'email', name: 'email', value: 'real@example.com' },
+    { tag: 'input', type: 'password', name: 'password', value: 'hunter2' },
+    { tag: 'input', type: 'radio', name: 'plan', value: 'starter', checked: false },
+    { tag: 'input', type: 'radio', name: 'plan', value: 'pro', checked: true },
+    { tag: 'input', type: 'checkbox', name: 'newsletter', value: 'on', checked: true },
+    { tag: 'select', type: 'select-one', name: 'country', value: 'US', options: [
+      { value: '', label: 'Choose' },
+      { value: 'US', label: 'United States' },
+    ] },
+    { tag: 'textarea', type: 'textarea', name: 'bio', value: 'Notes' },
+    { tag: 'input', type: 'text', name: 'city', labelText: 'City', value: '' },
+    { tag: 'input', type: 'text', value: 'no identifier at all' },
+  ]);
+
+  assert.equal(skippedCount, 2, 'email and password are counted as sensitive skips');
+  assert.deepEqual(
+    fields.map((field) => [field.id, field.kind, field.excluded]),
+    [
+      ['f1', 'text', false],
+      ['f2', 'radio', false],
+      ['f3', 'checkbox', false],
+      ['f4', 'select', false],
+      ['f5', 'textarea', false],
+      ['f6', 'text', true],
+      ['f7', 'text', true],
+    ]
+  );
+  assert.equal(fields[1].matcher.radioValue, 'pro');
+  assert.equal(fields[2].checked, true);
+  assert.equal(fields[3].options.length, 2);
+});
+
+const snapshotPageFields = [
+  { tag: 'input', type: 'text', id: 'company-field', name: 'company', labelText: 'Company' },
+  { tag: 'input', type: 'tel', name: 'phone', labelText: 'Phone' },
+  { tag: 'input', type: 'email', name: 'email' },
+  { tag: 'input', type: 'radio', name: 'plan', value: 'starter' },
+  { tag: 'input', type: 'radio', name: 'plan', value: 'pro' },
+  { tag: 'select', type: 'select-one', name: 'country' },
+];
+
+test('plans a refill by stable identity, never touching sensitive page fields', () => {
+  const { fields } = Core.buildSnapshotFields([
+    { tag: 'input', type: 'text', id: 'company-field', name: 'company', labelText: 'Company', value: 'HikeStrong QA' },
+    { tag: 'input', type: 'tel', name: 'phone', labelText: 'Phone', value: '555-0100' },
+    { tag: 'input', type: 'radio', name: 'plan', value: 'pro', checked: true },
+    { tag: 'select', type: 'select-one', name: 'country', value: 'US' },
+    { tag: 'input', type: 'text', name: 'missing_on_page', labelText: 'Old field', value: 'gone' },
+  ]);
+
+  const { steps, missing } = Core.buildRefillPlan(fields, snapshotPageFields);
+  assert.deepEqual(
+    steps.map((step) => [step.index, step.value]),
+    [
+      [0, 'HikeStrong QA'],
+      [1, '555-0100'],
+      [4, 'pro'],
+      [5, 'US'],
+    ]
+  );
+  assert.equal(steps[2].kind, 'radio', 'the pro radio, not the starter radio, is selected');
+  assert.deepEqual(missing, [fields[4].id]);
+});
+
+test('refill skips excluded fields and refuses tampered credential targets', () => {
+  const { fields } = Core.buildSnapshotFields([
+    { tag: 'input', type: 'text', name: 'company', value: 'HikeStrong QA' },
+    { tag: 'input', type: 'tel', name: 'phone', value: '555-0100' },
+  ]);
+  fields[1].excluded = true;
+  // Simulate hand-edited storage pointing a snapshot field at an email input.
+  const tampered = {
+    id: 'f9',
+    kind: 'text',
+    label: 'Sneaky',
+    value: 'attacker@example.com',
+    excluded: false,
+    matcher: {
+      tag: 'input', type: 'email', kind: 'text', domId: '', name: 'email',
+      placeholder: '', autocomplete: '', label: '', radioValue: '',
+    },
+  };
+
+  const { steps, missing } = Core.buildRefillPlan([...fields, tampered], snapshotPageFields);
+  assert.deepEqual(
+    steps.map((step) => step.value),
+    ['HikeStrong QA'],
+    'excluded phone and credential-targeting fields are never filled'
+  );
+  assert.deepEqual(missing, ['f9']);
+});
+
+test('re-scan merge keeps edits, adopts values for empty fields, and appends new ones', () => {
+  const { fields } = Core.buildSnapshotFields([
+    { tag: 'input', type: 'text', name: 'company', value: 'Original Co' },
+    { tag: 'input', type: 'text', name: 'city', value: '' },
+    { tag: 'input', type: 'radio', name: 'plan', value: 'starter', checked: true },
+  ]);
+  fields[0].value = 'Hand-edited Co';
+
+  const { fields: merged, addedCount, updatedCount } = Core.mergeSnapshotFields(fields, [
+    { tag: 'input', type: 'text', name: 'company', value: 'Page Co' },
+    { tag: 'input', type: 'text', name: 'city', value: 'Boulder' },
+    { tag: 'input', type: 'radio', name: 'plan', value: 'pro', checked: true },
+    { tag: 'input', type: 'text', name: 'zip', value: '80301' },
+  ]);
+
+  assert.equal(addedCount, 1);
+  assert.equal(updatedCount, 2, 'the empty city and the changed radio selection are updated');
+  assert.equal(merged[0].value, 'Hand-edited Co', 'hand edits are never overwritten');
+  assert.equal(merged[1].value, 'Boulder');
+  assert.equal(merged[1].excluded, false, 'a field that gained a value joins the refill');
+  assert.equal(merged[2].matcher.radioValue, 'pro', 'radio groups follow the page selection');
+  assert.equal(merged[3].name, undefined);
+  assert.deepEqual(
+    merged.map((field) => field.id),
+    ['f1', 'f2', 'f3', 'f4'],
+    'new fields continue the id sequence'
+  );
+});
+
+test('describes refill results for the toast', () => {
+  assert.equal(Core.describeRefillResult(5, 5), 'Refilled 5 fields');
+  assert.equal(Core.describeRefillResult(1, 1), 'Refilled 1 field');
+  assert.equal(
+    Core.describeRefillResult(10, 12),
+    'Refilled 10 of 12 fields — 2 not found on this page'
+  );
+  assert.equal(Core.describeRefillResult(0, 4), 'No matching fields found on this page');
+  assert.equal(Core.describeRefillResult(0, 0), 'This snapshot has no included fields to refill');
+});
+
+test('derives a readable default snapshot name from the page path', () => {
+  assert.equal(Core.deriveSnapshotName('/settings/profile'), 'Profile form');
+  assert.equal(Core.deriveSnapshotName('/demo/runtime-profile.html'), 'Runtime profile form');
+  assert.equal(Core.deriveSnapshotName('/'), 'Form snapshot');
+  assert.equal(Core.deriveSnapshotName(''), 'Form snapshot');
 });

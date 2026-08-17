@@ -55,18 +55,48 @@ function showRestrictedPageBadge(tabId) {
   }, RESTRICTED_BADGE_DURATION_MS);
 }
 
+async function snapshotEveryFrame(tabId) {
+  const results = await chrome.scripting.executeScript({
+    target: { tabId, allFrames: true },
+    func: () =>
+      globalThis.__testUsersSnapshotHook ? globalThis.__testUsersSnapshotHook() : null,
+  });
+
+  return results.flatMap((result) => (Array.isArray(result?.result) ? result.result : []));
+}
+
+async function refillEveryFrame(tabId, fields) {
+  const results = await chrome.scripting.executeScript({
+    target: { tabId, allFrames: true },
+    func: (snapshotFields) =>
+      globalThis.__testUsersRefillHook ? globalThis.__testUsersRefillHook(snapshotFields) : null,
+    args: [fields],
+  });
+
+  return results.flatMap((result) => (Array.isArray(result?.result) ? result.result : []));
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message?.type !== 'TEST_USERS_FILL_ALL_FRAMES') return false;
+  const handlers = {
+    TEST_USERS_FILL_ALL_FRAMES: (tabId) =>
+      fillEveryFrame(tabId, message.user).then((purposes) => ({ purposes })),
+    TEST_USERS_SNAPSHOT_ALL_FRAMES: (tabId) =>
+      snapshotEveryFrame(tabId).then((fields) => ({ fields })),
+    TEST_USERS_REFILL_ALL_FRAMES: (tabId) =>
+      refillEveryFrame(tabId, message.fields).then((fieldIds) => ({ fieldIds })),
+  };
+  const handler = handlers[message?.type];
+  if (!handler) return false;
 
   try {
     const tabId = sender.tab?.id;
-    if (typeof tabId !== 'number') throw new Error('Fill request without a tab');
+    if (typeof tabId !== 'number') throw new Error('Frame request without a tab');
 
-    fillEveryFrame(tabId, message.user)
-      .then((purposes) => sendResponse({ purposes }))
-      .catch(() => sendResponse({ purposes: null }));
+    handler(tabId)
+      .then(sendResponse)
+      .catch(() => sendResponse(null));
   } catch {
-    sendResponse({ purposes: null });
+    sendResponse(null);
     return false;
   }
 

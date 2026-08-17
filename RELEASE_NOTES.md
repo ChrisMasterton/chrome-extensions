@@ -1,5 +1,14 @@
 # Release Notes
 
+## 2026-08-17 — Test Users (0.3.0)
+### Added
+- Form snapshots: on pages with longer forms, **Snapshot page** captures every editable field and its current value — text inputs, selects, checkboxes, radios, and textareas, including open shadow DOM and same-origin iframes — so the whole form can be refilled in one click on the next debugging run.
+- Email, username, password, payment (`cc-*`, card number/CVC/expiry), and one-time-code/captcha/promo fields are never captured or refilled; the snapshot editor reports how many sensitive fields were skipped. The same rules are re-checked against the live page at refill time, so a stale or hand-edited snapshot still cannot write into a credential field.
+- The snapshot editor lists every captured field with an include/exclude toggle and an editable value (selects render their captured options), rows can be removed, and **Re-scan** merges the page again — adding fields the first capture missed, filling in values for empty ones, and following the page's current radio selection while keeping hand-edited values.
+- Refill matches fields by stable identity (id, name, label, placeholder, `autocomplete`) rather than DOM position, and the toast reports the outcome, for example `Refilled 10 of 12 fields — 2 not found on this page`.
+- Snapshots are listed on the users screen scoped to the current site (snapshots for the current path sort first), participate in search, and are counted in and deleted with their site under **Settings → Saved sites**.
+- The local demo gained a profile page (`demo/profile.html`) with a long form for trying the snapshot flow, and the e2e smoke lane now covers capture, exclusion, value editing, and refill in a real Chrome.
+
 ## 2026-08-13 — Test Users (0.2.0)
 ### Added
 - Autofill now fills name fields — full name, first/last name, and username — alongside email and every password field. Fields are matched by labels, placeholders, `autocomplete` attributes, and name/id hints, and inputs inside open shadow DOM are included.

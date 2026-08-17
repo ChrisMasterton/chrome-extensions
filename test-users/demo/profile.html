@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Profile — HikeStrong</title>
+    <link rel="stylesheet" href="demo.css">
+  </head>
+  <body>
+    <main class="demo-page">
+      <section class="login-card profile-card" aria-labelledby="profile-title">
+        <div class="login-heading">
+          <span>HIKESTRONG</span>
+          <h1 id="profile-title">Profile settings</h1>
+          <p>The kind of longer form you only want to type once.</p>
+        </div>
+        <form>
+          <div class="form-row">
+            <label>
+              <span>First name</span>
+              <input type="text" name="first_name" autocomplete="given-name">
+            </label>
+            <label>
+              <span>Last name</span>
+              <input type="text" name="last_name" autocomplete="family-name">
+            </label>
+          </div>
+          <div class="form-row">
+            <label>
+              <span>Email</span>
+              <input type="email" name="email" autocomplete="email">
+            </label>
+            <label>
+              <span>Password</span>
+              <input type="password" name="password" autocomplete="current-password">
+            </label>
+          </div>
+          <div class="form-row">
+            <label>
+              <span>Company</span>
+              <input type="text" name="company">
+            </label>
+            <label>
+              <span>Phone</span>
+              <input type="tel" name="phone">
+            </label>
+          </div>
+          <label>
+            <span>Street address</span>
+            <input type="text" name="address_line1">
+          </label>
+          <div class="form-row">
+            <label>
+              <span>City</span>
+              <input type="text" name="city">
+            </label>
+            <label>
+              <span>ZIP code</span>
+              <input type="text" name="zip">
+            </label>
+          </div>
+          <label>
+            <span>Country</span>
+            <select name="country">
+              <option value="">Choose a country</option>
+              <option value="US">United States</option>
+              <option value="CA">Canada</option>
+              <option value="DE">Germany</option>
+              <option value="NZ">New Zealand</option>
+            </select>
+          </label>
+          <fieldset class="form-choices">
+            <legend>Plan</legend>
+            <label><input type="radio" name="plan" value="starter"> Starter</label>
+            <label><input type="radio" name="plan" value="pro"> Pro</label>
+            <label><input type="radio" name="plan" value="enterprise"> Enterprise</label>
+          </fieldset>
+          <label class="form-check">
+            <input type="checkbox" name="newsletter">
+            <span>Send me the trail newsletter</span>
+          </label>
+          <label>
+            <span>Bio</span>
+            <textarea name="bio" rows="3"></textarea>
+          </label>
+          <div class="form-row">
+            <label>
+              <span>Card number</span>
+              <input type="text" name="card_number" autocomplete="cc-number" inputmode="numeric">
+            </label>
+            <label>
+              <span>Promo code</span>
+              <input type="text" name="promo_code">
+            </label>
+          </div>
+          <button type="submit">Save profile</button>
+        </form>
+      </section>
+    </main>
+    <script src="../core.js"></script>
+    <script src="../content.js"></script>
+  </body>
+</html>

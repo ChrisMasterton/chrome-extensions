@@ -138,6 +138,81 @@ body {
   text-decoration: none;
 }
 
+.profile-card {
+  width: min(620px, 92vw);
+  transform: none;
+}
+
+.form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 17px;
+}
+
+.login-card select,
+.login-card textarea {
+  padding: 0 14px;
+  border: 1px solid #d4d9e4;
+  border-radius: 8px;
+  outline: 0;
+  background: #ffffff;
+  color: #1c2139;
+  font: inherit;
+}
+
+.login-card select {
+  height: 52px;
+}
+
+.login-card textarea {
+  padding: 12px 14px;
+  resize: vertical;
+}
+
+.login-card select:focus,
+.login-card textarea:focus {
+  border-color: #7786df;
+  box-shadow: 0 0 0 3px rgba(48, 73, 216, 0.1);
+}
+
+.form-choices {
+  display: flex;
+  margin: 0;
+  padding: 14px;
+  gap: 18px;
+  border: 1px solid #d4d9e4;
+  border-radius: 8px;
+  color: #2d344b;
+  font-size: 13px;
+}
+
+.form-choices legend {
+  padding: 0 4px;
+  font-weight: 650;
+}
+
+.form-choices label,
+.form-check {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 7px;
+  font-weight: 500;
+}
+
+.form-check {
+  color: #2d344b;
+  font-size: 13px;
+}
+
+.form-choices input,
+.form-check input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: #3049d8;
+}
+
 @media (max-width: 900px) {
   .demo-page {
     padding: 660px 24px 64px;

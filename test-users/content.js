@@ -11,10 +11,17 @@
     return;
   }
 
-  // Every frame exposes the fill hook so the background can reach same-origin
-  // subframes, but only the top frame owns the overlay, storage, and messaging.
+  // Every frame exposes the fill, snapshot, and refill hooks so the background
+  // can reach same-origin subframes, but only the top frame owns the overlay,
+  // storage, and messaging.
   if (!globalThis.__testUsersFillHook) {
     globalThis.__testUsersFillHook = (user) => applyFillPlan(user);
+  }
+  if (!globalThis.__testUsersSnapshotHook) {
+    globalThis.__testUsersSnapshotHook = () => captureSnapshotRawFields();
+  }
+  if (!globalThis.__testUsersRefillHook) {
+    globalThis.__testUsersRefillHook = (fields) => applyRefillPlanInFrame(fields);
   }
 
   if (window !== window.top) return;
@@ -48,6 +55,8 @@
     editingId: null,
     pendingDeleteUserId: null,
     pendingDeleteSiteKey: null,
+    snapshotDraft: null,
+    pendingDeleteSnapshotId: null,
     toast: null,
   };
 
@@ -136,6 +145,7 @@
           updatedAt: now,
         },
       ],
+      snapshots: [],
       siteProfiles: {},
     };
   }
@@ -185,6 +195,27 @@
     });
   }
 
+  function getVisibleSnapshots() {
+    const query = appState.query.trim().toLowerCase();
+    const currentPath = window.location.pathname;
+    return storedState.snapshots
+      .filter((snapshot) => {
+        if (appState.activeTab === 'site' && snapshot.siteKey !== currentIdentity.siteKey) {
+          return false;
+        }
+
+        if (!query) return true;
+        return [snapshot.name, snapshot.path, snapshot.siteLabel]
+          .join(' ')
+          .toLowerCase()
+          .includes(query);
+      })
+      .sort(
+        (left, right) =>
+          Number(right.path === currentPath) - Number(left.path === currentPath)
+      );
+  }
+
   function identityFromSavedProfile(origin, profile) {
     try {
       const url = new URL(origin);
@@ -214,6 +245,28 @@
         originLabel,
         environment: user.environment || 'web',
         loginCount: (existing?.loginCount || 0) + 1,
+        snapshotCount: existing?.snapshotCount || 0,
+      });
+    });
+
+    storedState.snapshots.forEach((snapshot) => {
+      if (!snapshot.siteKey) return;
+      const existing = sites.get(snapshot.siteKey);
+      let originLabel = snapshot.origin;
+      try {
+        originLabel = new URL(snapshot.origin).host;
+      } catch {
+        // Preserve the stored origin when older data is not a valid URL.
+      }
+
+      sites.set(snapshot.siteKey, {
+        siteKey: snapshot.siteKey,
+        projectName: existing?.projectName || snapshot.siteLabel || 'Untitled site',
+        origin: existing?.origin || snapshot.origin,
+        originLabel: existing?.originLabel || originLabel,
+        environment: existing?.environment || snapshot.environment || 'web',
+        loginCount: existing?.loginCount || 0,
+        snapshotCount: (existing?.snapshotCount || 0) + 1,
       });
     });
 
@@ -231,6 +284,7 @@
         originLabel: identity.originLabel,
         environment: identity.environment,
         loginCount: existing?.loginCount || 0,
+        snapshotCount: existing?.snapshotCount || 0,
       });
     });
 
@@ -270,6 +324,7 @@
         ${renderHeader()}
         ${appState.screen === 'users' ? renderUsersScreen() : ''}
         ${appState.screen === 'editor' ? renderEditorScreen() : ''}
+        ${appState.screen === 'snapshot' ? renderSnapshotEditorScreen() : ''}
         ${appState.screen === 'settings' ? renderSettingsScreen() : ''}
         ${renderFooter()}
       </section>
@@ -350,7 +405,56 @@
       </div>
       <main class="tu-content">
         <div class="tu-user-list">${userCards}</div>
+        ${renderSnapshotSection()}
       </main>
+    `;
+  }
+
+  function renderSnapshotSection() {
+    const snapshots = getVisibleSnapshots();
+    const cards = snapshots.length
+      ? `<div class="tu-snapshot-list">${snapshots.map(renderSnapshotCard).join('')}</div>`
+      : `<p class="tu-snapshots-hint">Snapshot a longer form once, then refill it in one click on the next debugging run. Email, username, and password fields are never captured.</p>`;
+
+    return `
+      <section class="tu-snapshots" aria-labelledby="tu-snapshots-heading">
+        <div class="tu-snapshots-heading">
+          <h3 id="tu-snapshots-heading">Form snapshots</h3>
+          <button class="tu-secondary-button tu-snapshot-new" data-action="new-snapshot" title="Capture every editable field on this page">${icon(
+            'camera'
+          )}<span>Snapshot page</span></button>
+        </div>
+        ${cards}
+      </section>
+    `;
+  }
+
+  function renderSnapshotCard(snapshot) {
+    const fields = Array.isArray(snapshot.fields) ? snapshot.fields : [];
+    const includedCount = fields.filter((field) => !field.excluded).length;
+    const details = [
+      snapshot.path || '/',
+      `${includedCount} ${includedCount === 1 ? 'field' : 'fields'}`,
+    ];
+    if (appState.activeTab === 'all' && snapshot.siteLabel) details.push(snapshot.siteLabel);
+
+    return `
+      <article class="tu-snapshot-card" data-snapshot-id="${escapeAttribute(snapshot.id)}">
+        <div class="tu-snapshot-copy">
+          <strong>${escapeHtml(snapshot.name)}</strong>
+          <span title="${escapeAttribute(details.join(' · '))}">${escapeHtml(
+            details.join(' · ')
+          )}</span>
+        </div>
+        <div class="tu-snapshot-actions">
+          <button class="tu-edit-button" data-action="edit-snapshot" data-snapshot-id="${escapeAttribute(
+            snapshot.id
+          )}" aria-label="Edit ${escapeAttribute(snapshot.name)}">${icon('edit')}</button>
+          <button class="tu-primary-button tu-refill-button" data-action="refill-snapshot" data-snapshot-id="${escapeAttribute(
+            snapshot.id
+          )}">${icon('forms')}<span>Refill</span></button>
+        </div>
+      </article>
     `;
   }
 
@@ -556,6 +660,168 @@
     `;
   }
 
+  function renderSnapshotFieldValue(field) {
+    const idAttribute = `data-field-id="${escapeAttribute(field.id)}"`;
+
+    if (field.kind === 'checkbox') {
+      return `
+        <label class="tu-snapshot-checked">
+          <input type="checkbox" data-snapshot-checked ${idAttribute} ${field.checked ? 'checked' : ''}>
+          <span>${field.checked ? 'Checked' : 'Unchecked'} when refilled</span>
+        </label>
+      `;
+    }
+
+    if (field.kind === 'radio') {
+      return `<span class="tu-snapshot-static">Selected: ${escapeHtml(
+        field.value || 'on'
+      )} · re-scan after changing the choice on the page</span>`;
+    }
+
+    if (field.kind === 'select' && field.multiple) {
+      const values = Array.isArray(field.value) ? field.value : [];
+      return `<span class="tu-snapshot-static">${
+        values.length ? escapeHtml(values.join(', ')) : 'No options selected'
+      }</span>`;
+    }
+
+    if (field.kind === 'select' && Array.isArray(field.options) && field.options.length) {
+      const hasStoredValue = field.options.some((option) => option.value === field.value);
+      const storedOption = hasStoredValue
+        ? ''
+        : `<option value="${escapeAttribute(field.value)}" selected>${escapeHtml(
+            field.value || '(empty)'
+          )}</option>`;
+      return `
+        <select data-snapshot-value ${idAttribute}>
+          ${storedOption}
+          ${field.options
+            .map(
+              (option) =>
+                `<option value="${escapeAttribute(option.value)}" ${
+                  option.value === field.value ? 'selected' : ''
+                }>${escapeHtml(option.label || option.value)}</option>`
+            )
+            .join('')}
+        </select>
+      `;
+    }
+
+    if (field.kind === 'textarea') {
+      return `<textarea data-snapshot-value ${idAttribute} rows="2">${escapeHtml(
+        field.value
+      )}</textarea>`;
+    }
+
+    return `<input data-snapshot-value ${idAttribute} autocomplete="off" value="${escapeAttribute(
+      field.value
+    )}" placeholder="(empty)">`;
+  }
+
+  function renderSnapshotField(field) {
+    return `
+      <div class="tu-snapshot-field ${field.excluded ? 'is-excluded' : ''}" data-field-id="${escapeAttribute(
+        field.id
+      )}">
+        <label class="tu-snapshot-include" title="${
+          field.excluded ? 'Excluded from refill' : 'Included in refill'
+        }">
+          <input type="checkbox" data-snapshot-include data-field-id="${escapeAttribute(
+            field.id
+          )}" ${field.excluded ? '' : 'checked'}>
+          <span class="tu-sr-only">Include ${escapeHtml(field.label)} in refill</span>
+        </label>
+        <div class="tu-snapshot-field-main">
+          <span class="tu-snapshot-field-label" title="${escapeAttribute(field.label)}">${escapeHtml(
+            field.label
+          )}</span>
+          ${renderSnapshotFieldValue(field)}
+        </div>
+        <button type="button" class="tu-edit-button" data-action="remove-snapshot-field" data-field-id="${escapeAttribute(
+          field.id
+        )}" aria-label="Remove ${escapeAttribute(field.label)} from this snapshot">${icon(
+          'trash'
+        )}</button>
+      </div>
+    `;
+  }
+
+  function renderSnapshotEditorScreen() {
+    const draft = appState.snapshotDraft;
+    if (!draft) return '';
+
+    const isExisting = Boolean(draft.id);
+    const includedCount = draft.fields.filter((field) => !field.excluded).length;
+    const summaryParts = [
+      `${draft.fields.length} ${draft.fields.length === 1 ? 'field' : 'fields'} captured`,
+      `${includedCount} included`,
+    ];
+    if (draft.skippedCount) {
+      summaryParts.push(
+        `${draft.skippedCount} sensitive ${draft.skippedCount === 1 ? 'field' : 'fields'} skipped`
+      );
+    }
+
+    return `
+      <main class="tu-content tu-editor">
+        <button class="tu-back-button" data-action="back">${icon('arrow-left')}<span>Back to users</span></button>
+        <div class="tu-section-heading">
+          <div>
+            <h2>${isExisting ? 'Edit snapshot' : 'New snapshot'}</h2>
+            <p>${escapeHtml(summaryParts.join(' · '))}</p>
+          </div>
+          <button class="tu-secondary-button tu-regenerate" data-action="rescan-snapshot" title="Capture the page again: adds new fields, fills in empty values, and keeps your edits">${icon(
+            'refresh'
+          )}<span>Re-scan</span></button>
+        </div>
+        <form class="tu-form" data-form="snapshot">
+          <label class="tu-form-wide">
+            <span>Snapshot name</span>
+            <input name="snapshotName" autocomplete="off" value="${escapeAttribute(
+              draft.name
+            )}" required>
+          </label>
+          <div class="tu-identity-preview tu-form-wide">
+            <span>Captured on</span>
+            <strong>${escapeHtml(currentIdentity.originLabel)}${escapeHtml(draft.path || '/')}</strong>
+          </div>
+          <div class="tu-snapshot-fields tu-form-wide">
+            ${draft.fields.map(renderSnapshotField).join('')}
+          </div>
+          <p class="tu-snapshots-hint tu-form-wide">Unticked fields stay saved but are skipped on refill. Email, username, password, payment, and one-time-code fields are never captured or refilled.</p>
+          ${
+            isExisting && appState.pendingDeleteSnapshotId === draft.id
+              ? `<div class="tu-inline-delete-confirm tu-form-wide">
+                  <div>
+                    <strong>Delete ${escapeHtml(draft.name)}?</strong>
+                    <p>This removes only this saved snapshot. Saved logins are unaffected.</p>
+                  </div>
+                  <div>
+                    <button class="tu-secondary-button" type="button" data-action="cancel-delete-snapshot">Cancel</button>
+                    <button class="tu-danger-button" type="button" data-action="confirm-delete-snapshot" data-snapshot-id="${escapeAttribute(
+                      draft.id
+                    )}">${icon('trash')}<span>Delete snapshot</span></button>
+                  </div>
+                </div>`
+              : ''
+          }
+          <div class="tu-form-actions tu-form-wide">
+            ${
+              isExisting
+                ? `<button class="tu-danger-button" type="button" data-action="delete-snapshot" data-snapshot-id="${escapeAttribute(
+                    draft.id
+                  )}">${icon('trash')}<span>Delete</span></button>`
+                : '<span></span>'
+            }
+            <button class="tu-primary-button" type="submit">${icon(
+              'device-floppy'
+            )}<span>Save snapshot</span></button>
+          </div>
+        </form>
+      </main>
+    `;
+  }
+
   function renderSettingsScreen() {
     return `
       <main class="tu-content tu-settings">
@@ -627,7 +893,10 @@
 
   function renderSavedSite(site) {
     const pending = appState.pendingDeleteSiteKey === site.siteKey;
-    const loginLabel = `${site.loginCount} ${site.loginCount === 1 ? 'login' : 'logins'}`;
+    let loginLabel = `${site.loginCount} ${site.loginCount === 1 ? 'login' : 'logins'}`;
+    if (site.snapshotCount) {
+      loginLabel += ` · ${site.snapshotCount} ${site.snapshotCount === 1 ? 'snapshot' : 'snapshots'}`;
+    }
 
     if (pending) {
       return `
@@ -721,6 +990,36 @@
       element.addEventListener('change', handleSymbolToggle);
     });
 
+    shadow.querySelectorAll('[data-snapshot-include]').forEach((element) => {
+      element.addEventListener('change', () => {
+        const field = findDraftField(element.dataset.fieldId);
+        if (!field) return;
+        field.excluded = !element.checked;
+        render();
+      });
+    });
+
+    shadow.querySelectorAll('[data-snapshot-value]').forEach((element) => {
+      element.addEventListener('input', () => {
+        const field = findDraftField(element.dataset.fieldId);
+        if (field) field.value = element.value;
+      });
+    });
+
+    shadow.querySelectorAll('[data-snapshot-checked]').forEach((element) => {
+      element.addEventListener('change', () => {
+        const field = findDraftField(element.dataset.fieldId);
+        if (!field) return;
+        field.checked = element.checked;
+        render();
+      });
+    });
+
+    shadow.querySelector('[data-form="snapshot"]')?.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      await saveSnapshotFromForm(event.currentTarget);
+    });
+
     shadow.querySelector('[data-form="user"]')?.addEventListener('submit', async (event) => {
       event.preventDefault();
       const user = await saveUserFromForm(event.currentTarget);
@@ -736,6 +1035,8 @@
     const action = event.currentTarget.dataset.action;
     const userId = event.currentTarget.dataset.userId;
     const siteKey = event.currentTarget.dataset.siteKey;
+    const snapshotId = event.currentTarget.dataset.snapshotId;
+    const fieldId = event.currentTarget.dataset.fieldId;
 
     if (action === 'toggle' || action === 'close') {
       appState.open = !appState.open;
@@ -764,6 +1065,8 @@
       appState.editingId = null;
       appState.pendingDeleteUserId = null;
       appState.pendingDeleteSiteKey = null;
+      appState.snapshotDraft = null;
+      appState.pendingDeleteSnapshotId = null;
       render();
       return;
     }
@@ -841,10 +1144,73 @@
       return;
     }
 
+    if (action === 'new-snapshot') {
+      await startNewSnapshot();
+      return;
+    }
+
+    if (action === 'edit-snapshot') {
+      const snapshot = storedState.snapshots.find((candidate) => candidate.id === snapshotId);
+      if (!snapshot) return;
+      appState.snapshotDraft = {
+        id: snapshot.id,
+        name: snapshot.name,
+        path: snapshot.path,
+        skippedCount: 0,
+        fields: (snapshot.fields || []).map((field) => ({ ...field })),
+      };
+      appState.screen = 'snapshot';
+      appState.pendingDeleteSnapshotId = null;
+      render();
+      return;
+    }
+
+    if (action === 'refill-snapshot') {
+      const snapshot = storedState.snapshots.find((candidate) => candidate.id === snapshotId);
+      if (snapshot) await refillSnapshot(snapshot);
+      return;
+    }
+
+    if (action === 'rescan-snapshot') {
+      await rescanSnapshotDraft();
+      return;
+    }
+
+    if (action === 'remove-snapshot-field') {
+      if (!appState.snapshotDraft) return;
+      appState.snapshotDraft.fields = appState.snapshotDraft.fields.filter(
+        (field) => field.id !== fieldId
+      );
+      render();
+      return;
+    }
+
+    if (action === 'delete-snapshot') {
+      appState.pendingDeleteSnapshotId = snapshotId;
+      render();
+      scrollPendingConfirmationIntoView('.tu-inline-delete-confirm');
+      return;
+    }
+
+    if (action === 'cancel-delete-snapshot') {
+      appState.pendingDeleteSnapshotId = null;
+      render();
+      return;
+    }
+
+    if (action === 'confirm-delete-snapshot') {
+      await deleteSnapshot(snapshotId);
+      return;
+    }
+
     if (action === 'reset-page-name') {
       const input = shadow.querySelector('[name="projectName"]');
       if (input) input.value = currentIdentity.pageName;
     }
+  }
+
+  function findDraftField(fieldId) {
+    return appState.snapshotDraft?.fields.find((field) => field.id === fieldId) || null;
   }
 
   function regenerateEditorValues() {
@@ -964,6 +1330,7 @@
     if (!site) return;
 
     const users = storedState.users.filter((user) => user.siteKey !== siteKey);
+    const snapshots = storedState.snapshots.filter((snapshot) => snapshot.siteKey !== siteKey);
     const siteProfiles = Object.fromEntries(
       Object.entries(storedState.siteProfiles).filter(([origin, profile]) => {
         const identity = identityFromSavedProfile(origin, profile);
@@ -971,16 +1338,19 @@
       })
     );
     const removedLoginCount = storedState.users.length - users.length;
+    const removedSnapshotCount = storedState.snapshots.length - snapshots.length;
 
-    await writeStoredState({ users, siteProfiles });
+    await writeStoredState({ users, snapshots, siteProfiles });
     appState.pendingDeleteSiteKey = null;
     resolveCurrentIdentity();
     render();
-    showToast(
-      `Deleted ${site.projectName} and ${removedLoginCount} ${
-        removedLoginCount === 1 ? 'login' : 'logins'
-      }`
-    );
+    let removedLabel = `${removedLoginCount} ${removedLoginCount === 1 ? 'login' : 'logins'}`;
+    if (removedSnapshotCount) {
+      removedLabel += ` and ${removedSnapshotCount} ${
+        removedSnapshotCount === 1 ? 'snapshot' : 'snapshots'
+      }`;
+    }
+    showToast(`Deleted ${site.projectName} and ${removedLabel}`);
   }
 
   async function saveSettingsFromForm(event) {
@@ -1015,6 +1385,112 @@
     appState.screen = 'users';
     render();
     showToast('Site identity saved');
+  }
+
+  async function startNewSnapshot() {
+    const rawFields = await snapshotEveryFrame();
+    const { fields, skippedCount } = Core.buildSnapshotFields(rawFields);
+
+    if (!fields.length) {
+      showToast('No snapshotable form fields found on this page', 'error');
+      return;
+    }
+
+    appState.snapshotDraft = {
+      id: null,
+      name: Core.deriveSnapshotName(window.location.pathname),
+      path: window.location.pathname,
+      skippedCount,
+      fields,
+    };
+    appState.screen = 'snapshot';
+    appState.pendingDeleteSnapshotId = null;
+    render();
+  }
+
+  async function rescanSnapshotDraft() {
+    const draft = appState.snapshotDraft;
+    if (!draft) return;
+
+    // Preserve the unsaved name before re-rendering from the draft.
+    const nameInput = shadow.querySelector('[data-form="snapshot"] [name="snapshotName"]');
+    if (nameInput) draft.name = nameInput.value;
+
+    const rawFields = await snapshotEveryFrame();
+    const { fields, addedCount, updatedCount } = Core.mergeSnapshotFields(draft.fields, rawFields);
+    draft.fields = fields;
+    render();
+
+    if (!addedCount && !updatedCount) {
+      showToast('No new fields or values found');
+      return;
+    }
+    const parts = [];
+    if (addedCount) parts.push(`${addedCount} new ${addedCount === 1 ? 'field' : 'fields'}`);
+    if (updatedCount) parts.push(`${updatedCount} updated`);
+    showToast(`Re-scan added ${parts.join(' · ')}`);
+  }
+
+  async function saveSnapshotFromForm(form) {
+    if (!form.reportValidity()) return;
+    const draft = appState.snapshotDraft;
+    if (!draft) return;
+
+    const existing = storedState.snapshots.find((candidate) => candidate.id === draft.id);
+    const now = new Date().toISOString();
+    const snapshot = {
+      ...existing,
+      id: existing?.id || createId(),
+      name: Core.normalizeWhitespace(form.elements.snapshotName.value) || 'Form snapshot',
+      path: draft.path || existing?.path || window.location.pathname,
+      fields: draft.fields,
+      siteKey: existing?.siteKey || currentIdentity.siteKey,
+      siteLabel: existing?.siteLabel || currentIdentity.projectName,
+      origin: existing?.origin || currentIdentity.origin,
+      environment: existing?.environment || currentIdentity.environment,
+      createdAt: existing?.createdAt || now,
+      updatedAt: now,
+    };
+
+    const snapshots = existing
+      ? storedState.snapshots.map((candidate) =>
+          candidate.id === existing.id ? snapshot : candidate
+        )
+      : [snapshot, ...storedState.snapshots];
+
+    await writeStoredState({ ...storedState, snapshots });
+    appState.screen = 'users';
+    appState.snapshotDraft = null;
+    appState.pendingDeleteSnapshotId = null;
+    render();
+    showToast(existing ? 'Snapshot updated' : 'Snapshot saved');
+  }
+
+  async function deleteSnapshot(snapshotId) {
+    const snapshot = storedState.snapshots.find((candidate) => candidate.id === snapshotId);
+    if (!snapshot) return;
+
+    await writeStoredState({
+      ...storedState,
+      snapshots: storedState.snapshots.filter((candidate) => candidate.id !== snapshotId),
+    });
+    appState.screen = 'users';
+    appState.snapshotDraft = null;
+    appState.pendingDeleteSnapshotId = null;
+    render();
+    showToast('Snapshot deleted');
+  }
+
+  async function refillSnapshot(snapshot) {
+    const fields = Array.isArray(snapshot.fields) ? snapshot.fields : [];
+    const includedCount = fields.filter((field) => !field.excluded).length;
+    const matchedIds = await refillEveryFrame(fields);
+    const filledCount = new Set(matchedIds).size;
+
+    showToast(
+      Core.describeRefillResult(filledCount, includedCount),
+      filledCount ? 'success' : 'error'
+    );
   }
 
   function setInputValue(input, value) {
@@ -1086,6 +1562,133 @@
       labelText: labelTextFor(input),
       formIndex,
     };
+  }
+
+  // Snapshot capture reaches beyond login fills: selects, textareas,
+  // checkboxes, radios, and date/number inputs all hold refillable form state.
+  function collectSnapshotElements() {
+    const elements = [];
+    const visit = (root) => {
+      root.querySelectorAll('input, textarea, select').forEach((element) => {
+        if (element.disabled || element.readOnly) return;
+        if (String(element.type).toLowerCase() === 'hidden') return;
+        if (!isInputVisible(element)) return;
+        elements.push(element);
+      });
+      root.querySelectorAll('*').forEach((element) => {
+        if (element.shadowRoot && element.id !== HOST_ID) visit(element.shadowRoot);
+      });
+    };
+    visit(document);
+    return elements;
+  }
+
+  function describeSnapshotElement(element, forms) {
+    const tag = element.tagName.toLowerCase();
+    const described = {
+      ...describeFillTarget(element, forms),
+      tag,
+      value: element.value ?? '',
+      checked: null,
+      multiple: false,
+    };
+
+    if (tag === 'select') {
+      described.multiple = Boolean(element.multiple);
+      described.value = element.multiple
+        ? [...element.selectedOptions].map((option) => option.value)
+        : element.value;
+      described.options = [...element.options].slice(0, 100).map((option) => ({
+        value: option.value,
+        label: Core.normalizeWhitespace(option.textContent) || option.value,
+      }));
+    } else if (element.type === 'checkbox' || element.type === 'radio') {
+      described.checked = element.checked;
+      // A fieldset legend names the whole choice group ("Plan" for the Pro
+      // radio), which both the editor label and refill matching benefit from.
+      const legend = element.closest('fieldset')?.querySelector('legend');
+      if (legend) {
+        described.labelText = Core.normalizeWhitespace(
+          `${legend.textContent} ${described.labelText || ''}`
+        );
+      }
+    }
+
+    return described;
+  }
+
+  function captureSnapshotRawFields() {
+    const forms = [];
+    return collectSnapshotElements().map((element) => describeSnapshotElement(element, forms));
+  }
+
+  function applyRefillStep(element, step) {
+    if (step.kind === 'checkbox' || step.kind === 'radio') {
+      const desired = step.kind === 'radio' ? true : Boolean(step.checked);
+      // A real click keeps framework-controlled checkboxes and radios in sync.
+      if (element.checked !== desired) element.click();
+      return;
+    }
+
+    if (step.kind === 'select') {
+      if (element.multiple && Array.isArray(step.value)) {
+        const values = new Set(step.value);
+        [...element.options].forEach((option) => {
+          option.selected = values.has(option.value);
+        });
+      } else {
+        const setter = Object.getOwnPropertyDescriptor(
+          HTMLSelectElement.prototype,
+          'value'
+        )?.set;
+        if (setter) setter.call(element, step.value);
+        else element.value = step.value;
+      }
+      element.dispatchEvent(new Event('input', { bubbles: true }));
+      element.dispatchEvent(new Event('change', { bubbles: true }));
+      return;
+    }
+
+    setInputValue(element, String(step.value ?? ''));
+  }
+
+  function applyRefillPlanInFrame(snapshotFields) {
+    const elements = collectSnapshotElements();
+    const forms = [];
+    const described = elements.map((element) => describeSnapshotElement(element, forms));
+    const { steps } = Core.buildRefillPlan(snapshotFields, described);
+
+    steps.forEach((step) => applyRefillStep(elements[step.index], step));
+    return steps.map((step) => step.fieldId);
+  }
+
+  async function snapshotEveryFrame() {
+    if (isExtensionRuntime) {
+      try {
+        const response = await chrome.runtime.sendMessage({
+          type: 'TEST_USERS_SNAPSHOT_ALL_FRAMES',
+        });
+        if (Array.isArray(response?.fields)) return response.fields;
+      } catch {
+        // Fall through to a top-frame-only capture.
+      }
+    }
+    return captureSnapshotRawFields();
+  }
+
+  async function refillEveryFrame(fields) {
+    if (isExtensionRuntime) {
+      try {
+        const response = await chrome.runtime.sendMessage({
+          type: 'TEST_USERS_REFILL_ALL_FRAMES',
+          fields,
+        });
+        if (Array.isArray(response?.fieldIds)) return response.fieldIds;
+      } catch {
+        // Fall through to a top-frame-only refill.
+      }
+    }
+    return applyRefillPlanInFrame(fields);
   }
 
   function applyFillPlan(user) {

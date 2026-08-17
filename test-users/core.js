@@ -318,10 +318,315 @@
     return `${labels.slice(0, -1).join(', ')} & ${labels.at(-1)}`;
   }
 
+  // Snapshot capture skips these input types outright; everything else that
+  // holds user-entered form state (dates, numbers, checkboxes…) is captured.
+  const SNAPSHOT_SKIPPED_INPUT_TYPES = new Set([
+    'button',
+    'file',
+    'hidden',
+    'image',
+    'password',
+    'reset',
+    'search',
+    'submit',
+  ]);
+
+  const SNAPSHOT_CREDENTIAL_AUTOCOMPLETE = new Set([
+    'current-password',
+    'email',
+    'new-password',
+    'nickname',
+    'username',
+  ]);
+
+  const SNAPSHOT_PAYMENT_TEXT_PATTERN =
+    /\b(account ?number|card ?number|cardnumber|ccnum|cvc|cvv|expir\w*|iban|routing ?number|security ?code)\b/;
+
+  const SNAPSHOT_ONE_TIME_TEXT_PATTERN =
+    /\b(2 ?fa|auth ?code|captcha|coupon|mfa|one ?time|otp|promo|verification ?code)\b/;
+
+  // Why a field must never be captured or refilled, or null when it is fair
+  // game. 'unsupported' types are silently dropped; the other reasons count
+  // as sensitive skips so the editor can report them.
+  function snapshotExclusionReason(field) {
+    const tag = String(field.tag || 'input').toLowerCase();
+    const type = normalizeFieldText(field.type) || 'text';
+
+    if (tag === 'input' && SNAPSHOT_SKIPPED_INPUT_TYPES.has(type)) {
+      return type === 'password' ? 'credential' : 'unsupported';
+    }
+
+    for (const token of String(field.autocomplete || '').toLowerCase().split(/\s+/)) {
+      if (SNAPSHOT_CREDENTIAL_AUTOCOMPLETE.has(token)) return 'credential';
+      if (token === 'one-time-code') return 'one-time';
+      if (token.startsWith('cc-')) return 'payment';
+    }
+
+    const haystack = fieldHaystack(field);
+    if (type === 'email' || /\be ?mail\b/.test(haystack)) return 'credential';
+    if (/\buser ?name\b|\bpass ?word\b|\bpass ?phrase\b|\blogin\b|\bhandle\b|\bscreen ?name\b/.test(haystack)) {
+      return 'credential';
+    }
+    if (SNAPSHOT_PAYMENT_TEXT_PATTERN.test(haystack)) return 'payment';
+    if (SNAPSHOT_ONE_TIME_TEXT_PATTERN.test(haystack)) return 'one-time';
+
+    return null;
+  }
+
+  function snapshotFieldKind(field) {
+    const tag = String(field.tag || 'input').toLowerCase();
+    if (tag === 'select') return 'select';
+    if (tag === 'textarea') return 'textarea';
+    const type = normalizeFieldText(field.type) || 'text';
+    if (type === 'checkbox') return 'checkbox';
+    if (type === 'radio') return 'radio';
+    return 'text';
+  }
+
+  function snapshotFieldLabel(field) {
+    return (
+      normalizeWhitespace(field.labelText) ||
+      normalizeWhitespace(field.ariaLabel) ||
+      normalizeWhitespace(field.placeholder) ||
+      normalizeWhitespace(field.name) ||
+      normalizeWhitespace(field.id) ||
+      'Unnamed field'
+    );
+  }
+
+  function buildSnapshotMatcher(field) {
+    const kind = snapshotFieldKind(field);
+    return {
+      tag: String(field.tag || 'input').toLowerCase(),
+      type: normalizeFieldText(field.type) || 'text',
+      kind,
+      domId: String(field.id || ''),
+      name: String(field.name || ''),
+      placeholder: normalizeWhitespace(field.placeholder),
+      autocomplete: String(field.autocomplete || '').toLowerCase().trim(),
+      label: normalizeFieldText(field.labelText),
+      radioValue: kind === 'radio' ? String(field.value ?? '') : '',
+    };
+  }
+
+  // Scores how confidently a live page field is "the same field" the matcher
+  // was captured from. Identity comes from stable attributes, not DOM
+  // position, so snapshots survive re-renders. Below 2 (no real identifier
+  // agreed) the field is treated as not found.
+  function matcherScore(matcher, field) {
+    if (String(field.tag || 'input').toLowerCase() !== matcher.tag) return 0;
+    if (snapshotFieldKind(field) !== matcher.kind) return 0;
+    if (matcher.kind === 'radio' && String(field.value ?? '') !== matcher.radioValue) return 0;
+
+    let score = 0;
+    if (matcher.domId && String(field.id || '') === matcher.domId) score += 8;
+    if (matcher.name && String(field.name || '') === matcher.name) score += 6;
+    if (matcher.label && normalizeFieldText(field.labelText) === matcher.label) score += 4;
+    if (matcher.placeholder && normalizeWhitespace(field.placeholder) === matcher.placeholder) {
+      score += 2;
+    }
+    if (
+      matcher.autocomplete &&
+      String(field.autocomplete || '').toLowerCase().trim() === matcher.autocomplete
+    ) {
+      score += 1;
+    }
+    if (score && (normalizeFieldText(field.type) || 'text') !== matcher.type) score -= 1;
+
+    return score >= 2 ? score : 0;
+  }
+
+  function snapshotFieldHasValue(field) {
+    if (field.kind === 'checkbox' || field.kind === 'radio') return true;
+    if (Array.isArray(field.value)) return field.value.length > 0;
+    return String(field.value ?? '') !== '';
+  }
+
+  function buildSnapshotFields(rawFields) {
+    const fields = [];
+    let skippedCount = 0;
+
+    (Array.isArray(rawFields) ? rawFields : []).forEach((raw) => {
+      if (!raw || typeof raw !== 'object') return;
+      const kind = snapshotFieldKind(raw);
+      // Only the selected option represents a radio group.
+      if (kind === 'radio' && !raw.checked) return;
+
+      const reason = snapshotExclusionReason(raw);
+      if (reason === 'unsupported') return;
+      if (reason) {
+        skippedCount += 1;
+        return;
+      }
+
+      const matcher = buildSnapshotMatcher(raw);
+      const hasIdentifier = Boolean(
+        matcher.domId || matcher.name || matcher.label || matcher.placeholder || matcher.autocomplete
+      );
+      const value =
+        kind === 'select' && raw.multiple
+          ? (Array.isArray(raw.value) ? raw.value : []).map(String)
+          : kind === 'checkbox'
+            ? ''
+            : String(raw.value ?? '');
+      const field = {
+        id: `f${fields.length + 1}`,
+        kind,
+        label: snapshotFieldLabel(raw),
+        value,
+        checked: kind === 'checkbox' || kind === 'radio' ? Boolean(raw.checked) : null,
+        options:
+          kind === 'select' && Array.isArray(raw.options)
+            ? raw.options.slice(0, 100)
+            : null,
+        multiple: kind === 'select' ? Boolean(raw.multiple) : false,
+        matcher,
+      };
+      // Empty and unidentifiable fields are kept visible in the editor but
+      // start excluded; include them after adding a value or re-scanning.
+      field.excluded = !hasIdentifier || !snapshotFieldHasValue(field);
+      fields.push(field);
+    });
+
+    return { fields, skippedCount };
+  }
+
+  function buildRefillPlan(snapshotFields, pageFields) {
+    const used = new Set();
+    const steps = [];
+    const missing = [];
+
+    (Array.isArray(snapshotFields) ? snapshotFields : []).forEach((field) => {
+      if (!field || field.excluded || !field.matcher) return;
+
+      let bestIndex = -1;
+      let bestScore = 0;
+      pageFields.forEach((candidate, index) => {
+        if (used.has(index)) return;
+        // Refill is bound by the same rules as capture, so a stale or edited
+        // snapshot can never write into credential or payment fields.
+        if (snapshotExclusionReason(candidate)) return;
+        const score = matcherScore(field.matcher, candidate);
+        if (score > bestScore) {
+          bestScore = score;
+          bestIndex = index;
+        }
+      });
+
+      if (bestIndex === -1) {
+        missing.push(field.id);
+        return;
+      }
+
+      used.add(bestIndex);
+      steps.push({
+        index: bestIndex,
+        fieldId: field.id,
+        kind: field.kind,
+        value: field.value,
+        checked: field.checked,
+      });
+    });
+
+    return { steps, missing };
+  }
+
+  function pseudoFieldFromMatcher(matcher) {
+    return {
+      tag: matcher.tag,
+      type: matcher.type,
+      id: matcher.domId,
+      name: matcher.name,
+      placeholder: matcher.placeholder,
+      autocomplete: matcher.autocomplete,
+      labelText: matcher.label,
+      value: matcher.radioValue,
+    };
+  }
+
+  // Re-scan merge: hand-entered values win, empty fields adopt the page's
+  // value, radios follow the page's current selection, and fields the first
+  // capture missed are appended.
+  function mergeSnapshotFields(existingFields, rawCapturedFields) {
+    const { fields: captured } = buildSnapshotFields(rawCapturedFields);
+    const merged = (Array.isArray(existingFields) ? existingFields : []).map((field) => ({
+      ...field,
+    }));
+    let nextId =
+      merged.reduce((max, field) => {
+        const numeric = Number(String(field.id).replace(/^f/, ''));
+        return Number.isFinite(numeric) ? Math.max(max, numeric) : max;
+      }, 0) + 1;
+    let addedCount = 0;
+    let updatedCount = 0;
+
+    captured.forEach((capturedField) => {
+      let existing = null;
+      if (capturedField.kind === 'radio' && capturedField.matcher.name) {
+        // A radio group is one logical field: same name, possibly a new selection.
+        existing = merged.find(
+          (field) =>
+            field.kind === 'radio' &&
+            field.matcher?.tag === capturedField.matcher.tag &&
+            field.matcher?.name === capturedField.matcher.name
+        );
+        if (existing && existing.matcher.radioValue !== capturedField.matcher.radioValue) {
+          existing.matcher = capturedField.matcher;
+          existing.value = capturedField.value;
+          existing.label = capturedField.label;
+          updatedCount += 1;
+        }
+      } else {
+        existing = merged.find(
+          (field) =>
+            field.matcher && matcherScore(field.matcher, pseudoFieldFromMatcher(capturedField.matcher))
+        );
+      }
+
+      if (!existing) {
+        merged.push({ ...capturedField, id: `f${nextId}` });
+        nextId += 1;
+        addedCount += 1;
+        return;
+      }
+
+      if (!snapshotFieldHasValue(existing) && snapshotFieldHasValue(capturedField)) {
+        existing.value = capturedField.value;
+        existing.excluded = capturedField.excluded;
+        updatedCount += 1;
+      }
+      if (!existing.options && capturedField.options) existing.options = capturedField.options;
+    });
+
+    return { fields: merged, addedCount, updatedCount };
+  }
+
+  function describeRefillResult(filledCount, totalCount) {
+    if (!totalCount) return 'This snapshot has no included fields to refill';
+    if (!filledCount) return 'No matching fields found on this page';
+    const noun = filledCount === 1 ? 'field' : 'fields';
+    if (filledCount >= totalCount) return `Refilled ${filledCount} ${noun}`;
+    const missingCount = totalCount - filledCount;
+    return `Refilled ${filledCount} of ${totalCount} fields — ${missingCount} not found on this page`;
+  }
+
+  function deriveSnapshotName(pathname) {
+    const lastSegment = String(pathname || '')
+      .split('/')
+      .filter(Boolean)
+      .at(-1) || '';
+    const cleaned = normalizeWhitespace(
+      lastSegment.replace(/\.[a-z0-9]+$/i, '').replace(/[-_]+/g, ' ')
+    );
+    if (!cleaned) return 'Form snapshot';
+    return `${cleaned.charAt(0).toUpperCase()}${cleaned.slice(1)} form`;
+  }
+
   function normalizeStoredState(value) {
     const state = value && typeof value === 'object' ? value : {};
     return {
       users: Array.isArray(state.users) ? state.users : [],
+      snapshots: Array.isArray(state.snapshots) ? state.snapshots : [],
       siteProfiles:
         state.siteProfiles &&
         typeof state.siteProfiles === 'object' &&
@@ -335,9 +640,15 @@
     PASSWORD_SYMBOL_CHOICES,
     buildFillPlan,
     buildGeneratedIdentity,
+    buildRefillPlan,
+    buildSnapshotFields,
     classifyFillField,
     derivePageName,
+    deriveSnapshotName,
     describeFillPlan,
+    describeRefillResult,
+    mergeSnapshotFields,
+    snapshotExclusionReason,
     generateEmail,
     generatePassword,
     sanitizePasswordSymbols,

@@ -20,8 +20,46 @@ localhost:3000 + HikeStrong
 - Delete an individual login from its edit screen, or delete a saved site identity and every login beneath it from **Settings → Saved sites**.
 - Keep all extension state in `chrome.storage.local` on the current Chrome profile.
 - Tint the environment chip amber on staging hosts and red on real websites as a reminder to use generated accounts only.
+- Optionally connect a same-origin local or explicitly configured staging project adapter. The adapter advertises safe role/scenario metadata; **Provision & fill** creates the generated identity with that application-side state, and **Reset** restores it without resending credentials.
 
 > Use generated test accounts only. Chrome extension local storage is device-local but is not a password vault for real credentials.
+
+## Provisioned personas
+
+Projects can opt into executable roles and scenarios without exposing their user database. Under **Site settings**, enter a same-origin adapter URL such as `/__test-users`. Test Users refuses adapter URLs on ordinary web origins, refuses cross-origin URLs, and requires HTTPS on staging. The project endpoint must independently enforce its own nonproduction boundary.
+
+`GET /__test-users` advertises metadata only:
+
+```json
+{
+  "schemaVersion": 1,
+  "label": "HikeStrong fixtures",
+  "roles": [
+    { "id": "member", "label": "Member" },
+    { "id": "org-admin", "label": "Admin" }
+  ],
+  "scenarios": [
+    { "id": "standard", "label": "Standard account" },
+    { "id": "empty-org", "label": "Empty organization" }
+  ],
+  "capabilities": { "provision": true, "reset": true }
+}
+```
+
+Capability responses containing account, user, name, email, username, password, credential, token, secret, or session fields are rejected. The adapter chooses what states are supported; Test Users continues to generate and retain the actual name and credentials locally.
+
+**Provision & fill** sends one explicit `POST` containing the extension-generated identity, selected role/scenario, and a stable idempotency key. A successful adapter response contains no identity or credentials:
+
+```json
+{
+  "status": "ready",
+  "accountRef": "acct_test_123",
+  "stateLabel": "Admin · Empty organization",
+  "expiresAt": "2026-08-24T12:00:00Z"
+}
+```
+
+The opaque `accountRef` is stored with the local test-user card. **Reset** sends that reference, role, and scenario, but no name, email, username, or password. Projects should treat the provisioning request as idempotent and reject any non-test identity server-side.
 
 ## Install
 
@@ -41,7 +79,7 @@ The extension requests `activeTab`, `scripting`, and `storage`. It does not requ
 npm run demo
 ```
 
-Then open [http://127.0.0.1:4173/demo/login.html](http://127.0.0.1:4173/demo/login.html). The demo uses temporary sample users and does not write them to Chrome storage. For the form-snapshot flow, open [http://127.0.0.1:4173/demo/profile.html](http://127.0.0.1:4173/demo/profile.html), fill a few fields, and click **Snapshot page**.
+Then open [http://127.0.0.1:4173/demo/login.html](http://127.0.0.1:4173/demo/login.html). The demo uses temporary sample users and does not write them to Chrome storage. Its safe example adapter is available at `/__test-users`; enter that path under **Site settings → Provisioning adapter** to try provision and reset. For the form-snapshot flow, open [http://127.0.0.1:4173/demo/profile.html](http://127.0.0.1:4173/demo/profile.html), fill a few fields, and click **Snapshot page**.
 
 ## Checks
 

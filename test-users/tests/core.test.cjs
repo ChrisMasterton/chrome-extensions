@@ -48,6 +48,127 @@ test('honors a user-provided page-name override', () => {
   assert.equal(identity.siteKey, 'local:localhost:5173:actual-plan');
 });
 
+test('allows only same-origin local or staging provisioning adapters', () => {
+  assert.equal(
+    Core.normalizeAdapterUrl('/__test-users', 'http://localhost:3000', 'local'),
+    'http://localhost:3000/__test-users'
+  );
+  assert.equal(
+    Core.normalizeAdapterUrl(
+      'https://staging.example.com/qa/users#ignored',
+      'https://staging.example.com',
+      'staging'
+    ),
+    'https://staging.example.com/qa/users'
+  );
+  assert.throws(
+    () => Core.normalizeAdapterUrl('https://evil.example/api', 'http://localhost:3000', 'local'),
+    /must use this site origin/
+  );
+  assert.throws(
+    () => Core.normalizeAdapterUrl('/__test-users', 'https://app.example.com', 'web'),
+    /only on local or staging/
+  );
+  assert.throws(
+    () => Core.normalizeAdapterUrl('/__test-users', 'http://staging.example.com', 'staging'),
+    /must use HTTPS/
+  );
+});
+
+test('normalizes adapter roles and scenarios without accepting credential metadata', () => {
+  assert.deepEqual(
+    Core.normalizeAdapterCapabilities({
+      label: 'HikeStrong fixtures',
+      roles: ['Member', { id: 'org-admin', label: 'Admin', description: 'Owns the org' }],
+      scenarios: [{ id: 'empty-org', label: 'Empty organization' }],
+      capabilities: { provision: true, reset: true },
+    }),
+    {
+      schemaVersion: 1,
+      label: 'HikeStrong fixtures',
+      roles: [
+        { id: 'Member', label: 'Member', description: '' },
+        { id: 'org-admin', label: 'Admin', description: 'Owns the org' },
+      ],
+      scenarios: [{ id: 'empty-org', label: 'Empty organization', description: '' }],
+      canProvision: true,
+      canReset: true,
+    }
+  );
+
+  assert.throws(
+    () =>
+      Core.normalizeAdapterCapabilities({
+        roles: ['Member'],
+        scenarios: [],
+        users: [{ username: 'leaked', password: 'secret' }],
+      }),
+    /must not include users/
+  );
+  assert.throws(
+    () => Core.normalizeAdapterCapabilities({ roles: [], scenarios: [] }),
+    /at least one role/
+  );
+});
+
+test('adapter results keep only an opaque account reference and state', () => {
+  assert.deepEqual(
+    Core.normalizeAdapterResult({
+      status: 'ready',
+      accountRef: 'acct_test_123',
+      stateLabel: 'Admin · Empty organization',
+      expiresAt: '2026-08-24T12:00:00Z',
+    }),
+    {
+      status: 'ready',
+      accountRef: 'acct_test_123',
+      stateLabel: 'Admin · Empty organization',
+      expiresAt: '2026-08-24T12:00:00.000Z',
+    }
+  );
+  assert.throws(
+    () => Core.normalizeAdapterResult({ accountRef: 'acct_test_123', password: 'leaked' }),
+    /must not include password/
+  );
+  assert.throws(
+    () => Core.normalizeAdapterResult({ accountRef: 'acct_test_123', name: 'Leaked User' }),
+    /must not include name/
+  );
+  assert.throws(
+    () => Core.normalizeAdapterResult({ status: 'ready' }),
+    /account reference/
+  );
+});
+
+test('provision requests send extension-owned identity while reset uses only account reference', () => {
+  const user = {
+    id: 'local-user-1',
+    name: 'Admin Tester',
+    role: 'Admin',
+    roleId: 'org-admin',
+    scenarioId: 'empty-org',
+    scenarioLabel: 'Empty organization',
+    email: 'admin@example.test',
+    username: 'admin-test',
+    password: 'Generated!123',
+    provisioning: { accountRef: 'acct_test_123' },
+  };
+  const provision = Core.buildAdapterRequest(user, 'provision');
+  assert.deepEqual(provision.identity, {
+    name: 'Admin Tester',
+    email: 'admin@example.test',
+    username: 'admin-test',
+    password: 'Generated!123',
+  });
+  assert.deepEqual(provision.role, { id: 'org-admin', label: 'Admin' });
+  assert.deepEqual(provision.scenario, { id: 'empty-org', label: 'Empty organization' });
+
+  const reset = Core.buildAdapterRequest(user, 'reset');
+  assert.equal(reset.accountRef, 'acct_test_123');
+  assert.equal('identity' in reset, false);
+  assert.equal(JSON.stringify(reset).includes('Generated!123'), false);
+});
+
 test('generates deterministic test credentials with required password classes', () => {
   let cursor = 0;
   const values = [0.01, 0.2, 0.4, 0.6, 0.8];

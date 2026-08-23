@@ -91,6 +91,38 @@
     };
   }
 
+  function normalizeAdapterUrl(value, origin, environment) {
+    const requested = normalizeWhitespace(value);
+    if (!requested) return '';
+    if (environment !== 'local' && environment !== 'staging') {
+      throw new Error('Provisioning adapters are available only on local or staging sites');
+    }
+
+    let adapterUrl;
+    let siteOrigin;
+    try {
+      siteOrigin = new URL(origin);
+      adapterUrl = new URL(requested, siteOrigin);
+    } catch {
+      throw new Error('Enter a valid provisioning adapter URL');
+    }
+
+    if (!['http:', 'https:'].includes(adapterUrl.protocol)) {
+      throw new Error('Provisioning adapters must use HTTP or HTTPS');
+    }
+    if (environment === 'staging' && adapterUrl.protocol !== 'https:') {
+      throw new Error('Staging provisioning adapters must use HTTPS');
+    }
+    if (adapterUrl.origin !== siteOrigin.origin) {
+      throw new Error('Provisioning adapters must use this site origin');
+    }
+    if (adapterUrl.username || adapterUrl.password) {
+      throw new Error('Provisioning adapter URLs cannot contain credentials');
+    }
+    adapterUrl.hash = '';
+    return adapterUrl.href;
+  }
+
   function randomInt(max, randomValues) {
     if (typeof randomValues === 'function') {
       return Math.floor(randomValues() * max) % max;
@@ -163,6 +195,138 @@
       password: generatePassword(randomValues, sanitizePasswordSymbols(passwordSymbols)),
       notes: '',
     };
+  }
+
+  const ADAPTER_CREDENTIAL_KEY = /^(?:accounts?|credentials?|emails?|names?|passwords?|secrets?|sessions?|tokens?|usernames?|users?)$/i;
+
+  function assertAdapterMetadataIsCredentialFree(value, path = 'adapter response', seen = new WeakSet()) {
+    if (!value || typeof value !== 'object') return;
+    if (seen.has(value)) return;
+    seen.add(value);
+
+    if (Array.isArray(value)) {
+      value.forEach((item, index) =>
+        assertAdapterMetadataIsCredentialFree(item, `${path}[${index}]`, seen)
+      );
+      return;
+    }
+
+    Object.entries(value).forEach(([key, nestedValue]) => {
+      if (ADAPTER_CREDENTIAL_KEY.test(key)) {
+        throw new Error(`${path} must not include ${key}`);
+      }
+      assertAdapterMetadataIsCredentialFree(nestedValue, `${path}.${key}`, seen);
+    });
+  }
+
+  function normalizeAdapterOption(value, index, kind) {
+    const raw = typeof value === 'string' ? { id: value, label: value } : value;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+
+    const label = normalizeWhitespace(raw.label || raw.id).slice(0, 80);
+    if (!label) return null;
+    const id = normalizeWhitespace(raw.id || slugify(label, `${kind}-${index + 1}`)).slice(0, 80);
+    if (!id) return null;
+
+    return {
+      id,
+      label,
+      description: normalizeWhitespace(raw.description).slice(0, 180),
+    };
+  }
+
+  function normalizeAdapterCapabilities(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error('Provisioning adapter returned invalid capabilities');
+    }
+    assertAdapterMetadataIsCredentialFree(value, 'adapter capabilities');
+
+    const roles = (Array.isArray(value.roles) ? value.roles : [])
+      .slice(0, 30)
+      .map((role, index) => normalizeAdapterOption(role, index, 'role'))
+      .filter(Boolean);
+    if (!roles.length) {
+      throw new Error('Provisioning adapter must advertise at least one role');
+    }
+
+    const scenarios = (Array.isArray(value.scenarios) ? value.scenarios : [])
+      .slice(0, 50)
+      .map((scenario, index) => normalizeAdapterOption(scenario, index, 'scenario'))
+      .filter(Boolean);
+    const capabilities = value.capabilities && typeof value.capabilities === 'object'
+      ? value.capabilities
+      : {};
+
+    return {
+      schemaVersion: 1,
+      label: normalizeWhitespace(value.label || 'Project adapter').slice(0, 80),
+      roles,
+      scenarios,
+      canProvision: capabilities.provision !== false,
+      canReset: capabilities.reset === true,
+    };
+  }
+
+  function normalizeAdapterResult(value, fallbackAccountRef = '') {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error('Provisioning adapter returned an invalid result');
+    }
+    assertAdapterMetadataIsCredentialFree(value, 'adapter result');
+
+    const status = normalizeWhitespace(value.status || 'ready').toLowerCase();
+    if (status !== 'ready') {
+      throw new Error('Provisioning adapter did not return a ready account');
+    }
+    const accountRef = normalizeWhitespace(value.accountRef || fallbackAccountRef).slice(0, 180);
+    if (!accountRef) {
+      throw new Error('Provisioning adapter did not return an account reference');
+    }
+
+    let expiresAt = null;
+    if (value.expiresAt) {
+      const parsed = new Date(value.expiresAt);
+      if (!Number.isNaN(parsed.getTime())) expiresAt = parsed.toISOString();
+    }
+
+    return {
+      status: 'ready',
+      accountRef,
+      stateLabel: normalizeWhitespace(value.stateLabel || 'Ready').slice(0, 120),
+      expiresAt,
+    };
+  }
+
+  function buildAdapterRequest(user, operation = 'provision') {
+    const role = {
+      id: normalizeWhitespace(user?.roleId || user?.role),
+      label: normalizeWhitespace(user?.role || user?.roleId),
+    };
+    const scenario = user?.scenarioId
+      ? {
+          id: normalizeWhitespace(user.scenarioId),
+          label: normalizeWhitespace(user.scenarioLabel || user.scenarioId),
+        }
+      : null;
+    const request = {
+      schemaVersion: 1,
+      operation,
+      idempotencyKey: normalizeWhitespace(user?.id),
+      role,
+      scenario,
+    };
+
+    if (operation === 'reset') {
+      request.accountRef = normalizeWhitespace(user?.provisioning?.accountRef);
+      return request;
+    }
+
+    request.identity = {
+      name: normalizeWhitespace(user?.name),
+      email: normalizeWhitespace(user?.email),
+      username: normalizeWhitespace(user?.username),
+      password: String(user?.password || ''),
+    };
+    return request;
   }
 
   const FILL_SKIPPED_INPUT_TYPES = new Set([
@@ -638,6 +802,7 @@
 
   return {
     PASSWORD_SYMBOL_CHOICES,
+    buildAdapterRequest,
     buildFillPlan,
     buildGeneratedIdentity,
     buildRefillPlan,
@@ -655,6 +820,9 @@
     getEnvironment,
     getSiteIdentity,
     isLocalHostname,
+    normalizeAdapterCapabilities,
+    normalizeAdapterResult,
+    normalizeAdapterUrl,
     normalizeStoredState,
     normalizeWhitespace,
     slugify,

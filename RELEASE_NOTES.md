@@ -1,5 +1,15 @@
 # Release Notes
 
+## 2026-08-23 — Test Users (0.4.0)
+### Added
+- Provisioned Personas: a site can opt into a same-origin local/staging adapter that advertises roles and scenarios, provisions the extension-generated identity into real application-side fixture state, and returns only an opaque account reference and status.
+- Provisioned users show ready, stale, or failed state on their cards. **Provision & fill** creates or refreshes the selected role/scenario; **Reset** restores an already-provisioned scenario without resending the identity or password.
+- Adapter URLs are exact-origin only and blocked on ordinary web origins. Capability and result payloads containing user/account lists, names, emails, usernames, passwords, credentials, tokens, secrets, or sessions are rejected.
+- Unit coverage now exercises adapter URL boundaries, metadata/result sanitization, and credential-free reset requests. The real-browser smoke lane covers capability discovery, provision-and-fill, persisted opaque state, and reset.
+
+### Fixed
+- Saving site identity or adapter settings now preserves form snapshots and updates their site identity instead of reconstructing storage without them.
+
 ## 2026-08-17 — Test Users (0.3.0)
 ### Added
 - Form snapshots: on pages with longer forms, **Snapshot page** captures every editable field and its current value — text inputs, selects, checkboxes, radios, and textareas, including open shadow DOM and same-origin iframes — so the whole form can be refilled in one click on the next debugging run.

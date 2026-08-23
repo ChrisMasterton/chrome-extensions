@@ -298,6 +298,48 @@ button {
   gap: 7px;
 }
 
+.tu-adapter-notice {
+  display: flex;
+  margin-bottom: 8px;
+  padding: 6px 8px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid #dfe3ec;
+  border-radius: 8px;
+  background: #f8f9fc;
+  color: #596177;
+  font-size: 10px;
+}
+
+.tu-adapter-notice--ready {
+  border-color: #c8e7d4;
+  background: #f2fbf5;
+  color: #17643b;
+}
+
+.tu-adapter-notice--error {
+  border-color: #f0caca;
+  background: #fffafa;
+  color: #a52a21;
+}
+
+.tu-adapter-notice span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tu-adapter-notice button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: currentColor;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 750;
+}
+
 .tu-user-card {
   display: grid;
   grid-template-columns: 30px minmax(0, 1fr) auto;
@@ -372,6 +414,7 @@ button {
 }
 
 .tu-email,
+.tu-scenario,
 .tu-notes,
 .tu-project-label {
   overflow: hidden;
@@ -383,6 +426,13 @@ button {
   margin-top: 2px;
   color: #4d556c;
   font-size: 11px;
+}
+
+.tu-scenario {
+  margin-top: 2px;
+  color: #263aa9;
+  font-size: 10px;
+  font-weight: 700;
 }
 
 .tu-notes {
@@ -404,6 +454,40 @@ button {
   align-items: flex-end;
   justify-content: space-between;
   gap: 5px;
+}
+
+.tu-card-icon-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.tu-provisioning-status {
+  display: inline-flex;
+  max-width: 100%;
+  margin-top: 4px;
+  padding: 2px 5px;
+  overflow: hidden;
+  border-radius: 5px;
+  font-size: 9px;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tu-provisioning-status--ready {
+  background: #e4f5ec;
+  color: #17643b;
+}
+
+.tu-provisioning-status--stale {
+  background: #fdf3e0;
+  color: #8a5b0c;
+}
+
+.tu-provisioning-status--failed {
+  background: #fdecec;
+  color: #a52a21;
 }
 
 .tu-edit-button,
@@ -457,6 +541,13 @@ button {
 .tu-primary-button:hover {
   border-color: #2237ad;
   background: #263fc6;
+}
+
+.tu-primary-button:disabled,
+.tu-secondary-button:disabled,
+.tu-edit-button:disabled {
+  cursor: wait;
+  opacity: 0.58;
 }
 
 .tu-secondary-button {
@@ -727,6 +818,46 @@ button {
   border-radius: 9px;
   background: #fbfcfe;
   color: #596177;
+}
+
+.tu-adapter-status {
+  display: flex;
+  padding: 9px 10px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 1px solid #dfe3ec;
+  border-radius: 9px;
+  background: #f8f9fc;
+}
+
+.tu-adapter-status > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.tu-adapter-status strong {
+  color: #30374e;
+  font-size: 11px;
+}
+
+.tu-adapter-status span {
+  overflow: hidden;
+  color: #737b90;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tu-adapter-status--ready {
+  border-color: #c8e7d4;
+  background: #f2fbf5;
+}
+
+.tu-adapter-status--error {
+  border-color: #f0caca;
+  background: #fffafa;
 }
 
 .tu-privacy-card strong {

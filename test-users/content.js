@@ -1,6 +1,7 @@
 (function initializeTestUsersOverlay() {
   const HOST_ID = 'test-users-extension-root';
   const STORAGE_KEY = 'testUsersStateV1';
+  const DEFAULT_ROLES = ['Owner', 'Admin', 'Member', 'Viewer', 'Invited', 'Custom'];
   const isExtensionRuntime = Boolean(
     typeof chrome !== 'undefined' && chrome.runtime?.id && chrome.storage?.local
   );
@@ -57,6 +58,12 @@
     pendingDeleteSiteKey: null,
     snapshotDraft: null,
     pendingDeleteSnapshotId: null,
+    adapter: {
+      status: 'disabled',
+      capabilities: null,
+      error: '',
+    },
+    provisioningUserId: null,
     toast: null,
   };
 
@@ -177,6 +184,27 @@
   function getPasswordSymbols() {
     return Core.sanitizePasswordSymbols(
       storedState.siteProfiles[window.location.origin]?.passwordSymbols
+    );
+  }
+
+  function getCurrentSiteProfile() {
+    return storedState.siteProfiles[window.location.origin] || {};
+  }
+
+  function getConfiguredAdapterUrl() {
+    return getCurrentSiteProfile().adapterUrl || '';
+  }
+
+  function adapterIsReady() {
+    return appState.adapter.status === 'ready' && Boolean(appState.adapter.capabilities);
+  }
+
+  function adapterAppliesToUser(user) {
+    return Boolean(
+      adapterIsReady() &&
+        appState.adapter.capabilities.canProvision &&
+        user?.origin === currentIdentity.origin &&
+        user?.siteKey === currentIdentity.siteKey
     );
   }
 
@@ -404,9 +432,27 @@
         </label>
       </div>
       <main class="tu-content">
+        ${renderAdapterNotice()}
         <div class="tu-user-list">${userCards}</div>
         ${renderSnapshotSection()}
       </main>
+    `;
+  }
+
+  function renderAdapterNotice() {
+    if (!getConfiguredAdapterUrl()) return '';
+
+    const status = appState.adapter.status;
+    const message = status === 'ready'
+      ? `${appState.adapter.capabilities.label} ready for provisioned personas`
+      : status === 'loading'
+        ? 'Checking the provisioning adapter…'
+        : appState.adapter.error || 'Provisioning adapter unavailable';
+    return `
+      <div class="tu-adapter-notice tu-adapter-notice--${escapeAttribute(status)}">
+        <span>${escapeHtml(message)}</span>
+        <button type="button" data-action="settings">${status === 'error' ? 'Fix' : 'Settings'}</button>
+      </div>
     `;
   }
 
@@ -458,8 +504,53 @@
     `;
   }
 
+  function getProvisioningStatus(user) {
+    const provisioning = user?.provisioning;
+    if (!provisioning?.status) return 'unprovisioned';
+    if (
+      provisioning.status === 'ready' &&
+      (provisioning.adapterUrl !== getConfiguredAdapterUrl() ||
+        (provisioning.expiresAt && new Date(provisioning.expiresAt).getTime() <= Date.now()))
+    ) {
+      return 'stale';
+    }
+    return provisioning.status;
+  }
+
+  function renderProvisioningBadge(user) {
+    const status = getProvisioningStatus(user);
+    if (status === 'unprovisioned' || !user.provisioning) return '';
+
+    const labelByStatus = {
+      ready: user.provisioning.stateLabel || 'Provisioned',
+      stale: 'Needs reprovisioning',
+      failed: 'Provisioning failed',
+    };
+    const title = status === 'failed'
+      ? user.provisioning.error || 'The last provisioning request failed'
+      : user.provisioning.accountRef || labelByStatus[status];
+    return `<span class="tu-provisioning-status tu-provisioning-status--${escapeAttribute(
+      status
+    )}" title="${escapeAttribute(title)}">${escapeHtml(labelByStatus[status] || status)}</span>`;
+  }
+
   function renderUserCard(user) {
     const showProject = appState.activeTab === 'all';
+    const status = getProvisioningStatus(user);
+    const canProvision = adapterAppliesToUser(user);
+    const isProvisioning = appState.provisioningUserId === user.id;
+    const action = canProvision && status !== 'ready' ? 'provision-user' : 'fill';
+    const actionLabel = isProvisioning
+      ? 'Provisioning…'
+      : action === 'provision-user'
+        ? status === 'stale' ? 'Reprovision & fill' : 'Provision & fill'
+        : 'Fill login';
+    const canReset = Boolean(
+      canProvision &&
+        status === 'ready' &&
+        appState.adapter.capabilities.canReset &&
+        user.provisioning?.accountRef
+    );
     return `
       <article class="tu-user-card" data-user-id="${escapeAttribute(user.id)}">
         <div class="tu-avatar" aria-hidden="true">${escapeHtml(initials(user.name))}</div>
@@ -473,16 +564,31 @@
           <div class="tu-email" title="${escapeAttribute(user.email || user.username)}">${escapeHtml(
             user.email || user.username
           )}</div>
+          ${user.scenarioLabel ? `<div class="tu-scenario">${escapeHtml(user.scenarioLabel)}</div>` : ''}
           <div class="tu-notes">${escapeHtml(user.notes || 'No notes yet')}</div>
+          ${renderProvisioningBadge(user)}
           ${showProject ? `<div class="tu-project-label">${escapeHtml(user.siteLabel)}</div>` : ''}
         </div>
         <div class="tu-card-actions">
-          <button class="tu-edit-button" data-action="edit" data-user-id="${escapeAttribute(
+          <div class="tu-card-icon-actions">
+            <button class="tu-edit-button" data-action="edit" data-user-id="${escapeAttribute(
+              user.id
+            )}" aria-label="Edit ${escapeAttribute(user.name)}">${icon('edit')}</button>
+            ${
+              canReset
+                ? `<button class="tu-edit-button" data-action="reset-user" data-user-id="${escapeAttribute(
+                    user.id
+                  )}" aria-label="Reset ${escapeAttribute(user.name)} scenario and fill login" title="Reset scenario and fill">${icon(
+                    'refresh'
+                  )}</button>`
+                : ''
+            }
+          </div>
+          <button class="tu-primary-button tu-fill-button" data-action="${action}" data-user-id="${escapeAttribute(
             user.id
-          )}" aria-label="Edit ${escapeAttribute(user.name)}">${icon('edit')}</button>
-          <button class="tu-primary-button tu-fill-button" data-action="fill" data-user-id="${escapeAttribute(
-            user.id
-          )}">${icon('login-2')}<span>Fill login</span></button>
+          )}" ${isProvisioning ? 'disabled' : ''}>${icon(
+            action === 'provision-user' ? 'sparkles' : 'login-2'
+          )}<span>${escapeHtml(actionLabel)}</span></button>
         </div>
       </article>
     `;
@@ -529,13 +635,59 @@
     `;
   }
 
+  function getEditorRoleOptions(existingUser) {
+    const options = adapterIsReady()
+      ? appState.adapter.capabilities.roles.map((role) => ({ ...role }))
+      : DEFAULT_ROLES.map((role) => ({ id: role, label: role, description: '' }));
+    if (
+      existingUser?.role &&
+      !options.some(
+        (option) => option.id === existingUser.roleId || option.label === existingUser.role
+      )
+    ) {
+      options.unshift({
+        id: existingUser.roleId || existingUser.role,
+        label: existingUser.role,
+        description: 'Saved role',
+      });
+    }
+    return options;
+  }
+
+  function getEditorScenarioOptions(existingUser) {
+    const options = adapterIsReady()
+      ? appState.adapter.capabilities.scenarios.map((scenario) => ({ ...scenario }))
+      : [];
+    if (
+      existingUser?.scenarioId &&
+      !options.some((option) => option.id === existingUser.scenarioId)
+    ) {
+      options.unshift({
+        id: existingUser.scenarioId,
+        label: existingUser.scenarioLabel || existingUser.scenarioId,
+        description: 'Saved scenario',
+      });
+    }
+    return options;
+  }
+
   function renderEditorScreen() {
     const existingUser = storedState.users.find((user) => user.id === appState.editingId);
+    const roleOptions = getEditorRoleOptions(existingUser);
+    const scenarioOptions = getEditorScenarioOptions(existingUser);
     const passwordSymbols = getPasswordSymbols();
     const generated =
       existingUser ||
-      Core.buildGeneratedIdentity(currentIdentity.projectName, 'Member', undefined, passwordSymbols);
+      Core.buildGeneratedIdentity(
+        currentIdentity.projectName,
+        roleOptions.find((role) => role.label === 'Member')?.label || roleOptions[0]?.label || 'Member',
+        undefined,
+        passwordSymbols
+      );
     const title = existingUser ? 'Edit test user' : 'New test user';
+    const selectedRoleId = existingUser?.roleId ||
+      roleOptions.find((role) => role.label === generated.role)?.id ||
+      roleOptions[0]?.id;
 
     return `
       <main class="tu-content tu-editor">
@@ -559,16 +711,38 @@
           <label>
             <span>Role</span>
             <select name="role">
-              ${['Owner', 'Admin', 'Member', 'Viewer', 'Invited', 'Custom']
+              ${roleOptions
                 .map(
                   (role) =>
-                    `<option value="${role}" ${
-                      generated.role === role ? 'selected' : ''
-                    }>${role}</option>`
+                    `<option value="${escapeAttribute(role.id)}" data-label="${escapeAttribute(
+                      role.label
+                    )}" ${selectedRoleId === role.id ? 'selected' : ''}>${escapeHtml(
+                      role.label
+                    )}</option>`
                 )
                 .join('')}
             </select>
           </label>
+          ${
+            scenarioOptions.length
+              ? `<label class="tu-form-wide">
+                  <span>Scenario</span>
+                  <select name="scenario" required>
+                    <option value="">Choose a scenario</option>
+                    ${scenarioOptions
+                      .map(
+                        (scenario) =>
+                          `<option value="${escapeAttribute(scenario.id)}" data-label="${escapeAttribute(
+                            scenario.label
+                          )}" ${existingUser?.scenarioId === scenario.id ? 'selected' : ''}>${escapeHtml(
+                            scenario.label
+                          )}</option>`
+                      )
+                      .join('')}
+                  </select>
+                </label>`
+              : ''
+          }
           <label class="tu-form-wide">
             <span>Email</span>
             <div class="tu-inline-field">
@@ -652,7 +826,11 @@
               <button class="tu-secondary-button" type="button" data-action="save-only">Save</button>
               <button class="tu-primary-button" type="submit">${icon(
                 'login-2'
-              )}<span>Save &amp; fill</span></button>
+              )}<span>${
+                adapterIsReady() && appState.adapter.capabilities.canProvision
+                  ? 'Save, provision &amp; fill'
+                  : 'Save &amp; fill'
+              }</span></button>
             </div>
           </div>
         </form>
@@ -822,7 +1000,36 @@
     `;
   }
 
+  function renderAdapterConnectionStatus() {
+    const adapterUrl = getConfiguredAdapterUrl();
+    if (!adapterUrl) return '';
+
+    const status = appState.adapter.status;
+    const capabilities = appState.adapter.capabilities;
+    const summary = status === 'ready'
+      ? `${capabilities.label} · ${capabilities.roles.length} ${
+          capabilities.roles.length === 1 ? 'role' : 'roles'
+        } · ${capabilities.scenarios.length} ${
+          capabilities.scenarios.length === 1 ? 'scenario' : 'scenarios'
+        }`
+      : status === 'loading'
+        ? 'Checking the project adapter…'
+        : appState.adapter.error || 'Adapter is not connected';
+
+    return `
+      <div class="tu-adapter-status tu-adapter-status--${escapeAttribute(status)} tu-form-wide">
+        <div>
+          <strong>${status === 'ready' ? 'Provisioning adapter ready' : 'Provisioning adapter'}</strong>
+          <span>${escapeHtml(summary)}</span>
+        </div>
+        <button class="tu-secondary-button" type="button" data-action="refresh-adapter">Check</button>
+      </div>
+    `;
+  }
+
   function renderSettingsScreen() {
+    const adapterUrl = getConfiguredAdapterUrl();
+    const adapterBlocked = currentIdentity.environment === 'web';
     return `
       <main class="tu-content tu-settings">
         <button class="tu-back-button" data-action="back">${icon('arrow-left')}<span>Back to users</span></button>
@@ -846,11 +1053,23 @@
               currentIdentity.projectName
             )}</strong>
           </div>
+          <label class="tu-form-wide">
+            <span>Provisioning adapter</span>
+            <input name="adapterUrl" type="text" inputmode="url" value="${escapeAttribute(adapterUrl)}" placeholder="/__test-users" ${
+              adapterBlocked ? 'disabled' : ''
+            }>
+            <small>${
+              adapterBlocked
+                ? 'Provisioning is blocked on ordinary web origins.'
+                : 'Optional same-origin endpoint for roles and scenarios. It must never return names, usernames, emails, or passwords.'
+            }</small>
+          </label>
+          ${renderAdapterConnectionStatus()}
           <div class="tu-form-actions tu-form-wide">
             <button class="tu-secondary-button" type="button" data-action="reset-page-name">Use detected title</button>
             <button class="tu-primary-button" type="submit">${icon(
               'device-floppy'
-            )}<span>Save identity</span></button>
+            )}<span>Save site</span></button>
           </div>
         </form>
         ${renderSavedSitesSection()}
@@ -1023,7 +1242,7 @@
     shadow.querySelector('[data-form="user"]')?.addEventListener('submit', async (event) => {
       event.preventDefault();
       const user = await saveUserFromForm(event.currentTarget);
-      if (user) await fillCredentials(user);
+      if (user) await activateUser(user);
     });
 
     shadow
@@ -1087,6 +1306,23 @@
     if (action === 'fill') {
       const user = storedState.users.find((candidate) => candidate.id === userId);
       if (user) await fillCredentials(user);
+      return;
+    }
+
+    if (action === 'provision-user') {
+      const user = storedState.users.find((candidate) => candidate.id === userId);
+      if (user) await provisionUser(user, 'provision');
+      return;
+    }
+
+    if (action === 'reset-user') {
+      const user = storedState.users.find((candidate) => candidate.id === userId);
+      if (user) await provisionUser(user, 'reset');
+      return;
+    }
+
+    if (action === 'refresh-adapter') {
+      await loadAdapterCapabilities({ renderLoading: true });
       return;
     }
 
@@ -1216,7 +1452,7 @@
   function regenerateEditorValues() {
     const form = shadow.querySelector('[data-form="user"]');
     if (!form) return;
-    const role = form.elements.role.value;
+    const role = form.elements.role.selectedOptions[0]?.dataset.label || form.elements.role.value;
     const generated = Core.buildGeneratedIdentity(
       currentIdentity.projectName,
       role,
@@ -1280,12 +1516,23 @@
 
     const data = new FormData(form);
     const existing = storedState.users.find((user) => user.id === appState.editingId);
+    const selectedRole = form.elements.role.selectedOptions[0];
+    const roleId = Core.normalizeWhitespace(data.get('role')) || 'Member';
+    const role = Core.normalizeWhitespace(selectedRole?.dataset.label || selectedRole?.textContent || roleId);
+    const scenarioId = Core.normalizeWhitespace(data.get('scenario'));
+    const selectedScenario = form.elements.scenario?.selectedOptions?.[0];
+    const scenarioLabel = scenarioId
+      ? Core.normalizeWhitespace(selectedScenario?.dataset.label || selectedScenario?.textContent || scenarioId)
+      : '';
     const now = new Date().toISOString();
-    const user = {
+    let user = {
       ...existing,
       id: existing?.id || createId(),
       name: Core.normalizeWhitespace(data.get('name')),
-      role: Core.normalizeWhitespace(data.get('role')) || 'Member',
+      role,
+      roleId,
+      scenarioId,
+      scenarioLabel,
       email: Core.normalizeWhitespace(data.get('email')),
       username: Core.normalizeWhitespace(data.get('username')),
       password: String(data.get('password') || ''),
@@ -1297,6 +1544,23 @@
       createdAt: existing?.createdAt || now,
       updatedAt: now,
     };
+
+    const provisioningInputsChanged = Boolean(
+      existing?.provisioning &&
+        ['name', 'email', 'username', 'password', 'roleId', 'scenarioId'].some(
+          (key) => String(existing[key] || '') !== String(user[key] || '')
+        )
+    );
+    if (provisioningInputsChanged) {
+      user = {
+        ...user,
+        provisioning: {
+          ...existing.provisioning,
+          status: 'stale',
+          error: '',
+        },
+      };
+    }
 
     const users = existing
       ? storedState.users.map((candidate) => (candidate.id === existing.id ? user : candidate))
@@ -1356,35 +1620,226 @@
   async function saveSettingsFromForm(event) {
     event.preventDefault();
     const form = event.currentTarget;
+    const adapterInput = form.elements.adapterUrl;
+    let adapterUrl = '';
+    try {
+      adapterUrl = Core.normalizeAdapterUrl(
+        adapterInput?.value || '',
+        currentIdentity.origin,
+        currentIdentity.environment
+      );
+      adapterInput?.setCustomValidity('');
+    } catch (error) {
+      adapterInput?.setCustomValidity(error?.message || 'Invalid provisioning adapter');
+    }
     if (!form.reportValidity()) return;
 
     const previousIdentity = currentIdentity;
     const projectName = Core.normalizeWhitespace(new FormData(form).get('projectName'));
+    const previousAdapterUrl = getConfiguredAdapterUrl();
     const siteProfiles = {
       ...storedState.siteProfiles,
       [previousIdentity.origin]: {
         ...storedState.siteProfiles[previousIdentity.origin],
         projectName,
+        adapterUrl,
         updatedAt: new Date().toISOString(),
       },
     };
     const nextIdentity = Core.getSiteIdentity(window.location, document.title, projectName);
-    const users = storedState.users.map((user) =>
-      user.origin === previousIdentity.origin
+    const users = storedState.users.map((user) => {
+      if (user.origin !== previousIdentity.origin) return user;
+      const provisioning =
+        user.provisioning && previousAdapterUrl !== adapterUrl
+          ? { ...user.provisioning, status: 'stale', error: '' }
+          : user.provisioning;
+      return {
+        ...user,
+        siteKey: nextIdentity.siteKey,
+        siteLabel: nextIdentity.projectName,
+        provisioning,
+        updatedAt: new Date().toISOString(),
+      };
+    });
+    const snapshots = storedState.snapshots.map((snapshot) =>
+      snapshot.origin === previousIdentity.origin
         ? {
-            ...user,
+            ...snapshot,
             siteKey: nextIdentity.siteKey,
             siteLabel: nextIdentity.projectName,
             updatedAt: new Date().toISOString(),
           }
-        : user
+        : snapshot
     );
 
-    await writeStoredState({ users, siteProfiles });
+    await writeStoredState({ ...storedState, users, snapshots, siteProfiles });
     resolveCurrentIdentity();
+    appState.adapter = { status: adapterUrl ? 'loading' : 'disabled', capabilities: null, error: '' };
     appState.screen = 'users';
     render();
-    showToast('Site identity saved');
+    showToast(adapterUrl ? 'Site saved · checking provisioning adapter' : 'Site saved');
+    if (adapterUrl) await loadAdapterCapabilities();
+  }
+
+  async function readAdapterJson(response) {
+    const text = await response.text();
+    if (text.length > 65536) throw new Error('Provisioning adapter response is too large');
+    try {
+      return JSON.parse(text);
+    } catch {
+      throw new Error('Provisioning adapter did not return JSON');
+    }
+  }
+
+  async function loadAdapterCapabilities(options = {}) {
+    const adapterUrl = getConfiguredAdapterUrl();
+    if (!adapterUrl) {
+      appState.adapter = { status: 'disabled', capabilities: null, error: '' };
+      if (options.renderLoading) render();
+      return null;
+    }
+
+    try {
+      const validatedUrl = Core.normalizeAdapterUrl(
+        adapterUrl,
+        currentIdentity.origin,
+        currentIdentity.environment
+      );
+      appState.adapter = { status: 'loading', capabilities: null, error: '' };
+      if (options.renderLoading) render();
+
+      const response = await fetch(validatedUrl, {
+        method: 'GET',
+        credentials: 'same-origin',
+        cache: 'no-store',
+        headers: {
+          accept: 'application/json',
+          'x-test-users-adapter': 'capabilities',
+        },
+      });
+      if (!response.ok) {
+        throw new Error(`Provisioning adapter returned HTTP ${response.status}`);
+      }
+
+      const capabilities = Core.normalizeAdapterCapabilities(await readAdapterJson(response));
+      appState.adapter = { status: 'ready', capabilities, error: '' };
+      render();
+      return capabilities;
+    } catch (error) {
+      appState.adapter = {
+        status: 'error',
+        capabilities: null,
+        error: Core.normalizeWhitespace(error?.message || 'Unable to reach provisioning adapter').slice(
+          0,
+          180
+        ),
+      };
+      render();
+      if (options.renderLoading) showToast(appState.adapter.error, 'error');
+      return null;
+    }
+  }
+
+  async function activateUser(user) {
+    if (adapterAppliesToUser(user) && getProvisioningStatus(user) !== 'ready') {
+      return provisionUser(user, 'provision');
+    }
+    return fillCredentials(user);
+  }
+
+  async function provisionUser(user, operation) {
+    if (!adapterIsReady()) await loadAdapterCapabilities();
+    if (!adapterAppliesToUser(user)) {
+      showToast('Provisioning adapter is not ready for this site', 'error');
+      return false;
+    }
+    if (operation === 'reset' && !appState.adapter.capabilities.canReset) {
+      showToast('This project adapter does not support reset', 'error');
+      return false;
+    }
+    if (operation === 'reset' && !user.provisioning?.accountRef) {
+      showToast('Provision this account before resetting it', 'error');
+      return false;
+    }
+
+    const adapterUrl = getConfiguredAdapterUrl();
+    appState.provisioningUserId = user.id;
+    render();
+
+    try {
+      const validatedUrl = Core.normalizeAdapterUrl(
+        adapterUrl,
+        currentIdentity.origin,
+        currentIdentity.environment
+      );
+      const response = await fetch(validatedUrl, {
+        method: 'POST',
+        credentials: 'same-origin',
+        cache: 'no-store',
+        headers: {
+          accept: 'application/json',
+          'content-type': 'application/json',
+          'x-test-users-adapter': operation,
+        },
+        body: JSON.stringify(Core.buildAdapterRequest(user, operation)),
+      });
+      if (!response.ok) {
+        throw new Error(`Provisioning adapter returned HTTP ${response.status}`);
+      }
+
+      const result = Core.normalizeAdapterResult(
+        await readAdapterJson(response),
+        user.provisioning?.accountRef
+      );
+      const now = new Date().toISOString();
+      const provisioning = {
+        ...result,
+        adapterUrl,
+        roleId: user.roleId || user.role,
+        scenarioId: user.scenarioId || '',
+        provisionedAt: now,
+        error: '',
+      };
+      const updatedUser = { ...user, provisioning, updatedAt: now };
+      const users = storedState.users.map((candidate) =>
+        candidate.id === user.id ? updatedUser : candidate
+      );
+      await writeStoredState({ ...storedState, users });
+      appState.provisioningUserId = null;
+      render();
+
+      const filled = await fillCredentials(updatedUser, { quiet: true });
+      const verb = operation === 'reset' ? 'Reset' : 'Provisioned';
+      showToast(
+        filled
+          ? `${verb} ${result.stateLabel} and filled login`
+          : `${verb} ${result.stateLabel} · open a login page to fill credentials`,
+        'success'
+      );
+      return true;
+    } catch (error) {
+      const message = Core.normalizeWhitespace(
+        error?.message || 'Provisioning request failed'
+      ).slice(0, 180);
+      const failedUser = {
+        ...user,
+        provisioning: {
+          ...user.provisioning,
+          adapterUrl,
+          status: 'failed',
+          error: message,
+        },
+        updatedAt: new Date().toISOString(),
+      };
+      const users = storedState.users.map((candidate) =>
+        candidate.id === user.id ? failedUser : candidate
+      );
+      await writeStoredState({ ...storedState, users });
+      appState.provisioningUserId = null;
+      render();
+      showToast(message, 'error');
+      return false;
+    }
   }
 
   async function startNewSnapshot() {
@@ -1721,16 +2176,18 @@
     }
   }
 
-  async function fillCredentials(user) {
+  async function fillCredentials(user, options = {}) {
     const framePurposes = await fillEveryFrame(user);
     const purposes = framePurposes ?? applyFillPlan(user);
 
     if (!purposes.length) {
-      showToast('No login or sign-up fields found on this page', 'error');
+      if (!options.quiet) showToast('No login or sign-up fields found on this page', 'error');
       return false;
     }
 
-    showToast(`Filled ${Core.describeFillPlan(purposes.map((purpose) => ({ purpose })))}`);
+    if (!options.quiet) {
+      showToast(`Filled ${Core.describeFillPlan(purposes.map((purpose) => ({ purpose })))}`);
+    }
     return true;
   }
 
@@ -1788,6 +2245,7 @@
     storedState = await readStoredState();
     resolveCurrentIdentity();
     render();
+    if (getConfiguredAdapterUrl()) await loadAdapterCapabilities();
 
     if (!isExtensionRuntime) {
       setTimeout(() => {

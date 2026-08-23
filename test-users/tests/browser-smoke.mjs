@@ -54,9 +54,84 @@ function contentType(pathname) {
 
 async function startStaticServer() {
   const port = await getFreePort();
+  const adapterState = {
+    capabilityRequests: 0,
+    provisionRequests: [],
+    resetRequests: [],
+    accountRefsByKey: new Map(),
+  };
   const server = createServer(async (request, response) => {
     try {
       const requestUrl = new URL(request.url || '/', `http://127.0.0.1:${port}`);
+      if (requestUrl.pathname === '/__test-users') {
+        response.setHeader('content-type', 'application/json; charset=utf-8');
+        if (request.method === 'GET') {
+          adapterState.capabilityRequests += 1;
+          response.writeHead(200);
+          response.end(
+            JSON.stringify({
+              schemaVersion: 1,
+              label: 'HikeStrong fixtures',
+              roles: [
+                { id: 'member', label: 'Member' },
+                { id: 'org-admin', label: 'Admin' },
+              ],
+              scenarios: [
+                { id: 'standard', label: 'Standard account' },
+                { id: 'empty-org', label: 'Empty organization' },
+              ],
+              capabilities: { provision: true, reset: true },
+            })
+          );
+          return;
+        }
+
+        if (request.method === 'POST') {
+          let rawBody = '';
+          for await (const chunk of request) {
+            rawBody += chunk;
+            if (rawBody.length > 65536) throw new Error('Adapter request too large');
+          }
+          const payload = JSON.parse(rawBody);
+          const stateLabel = `${payload.role?.label || 'User'} · ${
+            payload.scenario?.label || 'Default state'
+          }`;
+
+          if (payload.operation === 'provision') {
+            if (!payload.identity?.password || !payload.identity?.email) {
+              response.writeHead(400);
+              response.end(JSON.stringify({ error: 'Generated identity required' }));
+              return;
+            }
+            const accountRef =
+              adapterState.accountRefsByKey.get(payload.idempotencyKey) ||
+              `acct_${adapterState.accountRefsByKey.size + 1}`;
+            adapterState.accountRefsByKey.set(payload.idempotencyKey, accountRef);
+            adapterState.provisionRequests.push(payload);
+            response.writeHead(200);
+            response.end(JSON.stringify({ status: 'ready', accountRef, stateLabel }));
+            return;
+          }
+
+          if (payload.operation === 'reset' && payload.accountRef) {
+            adapterState.resetRequests.push(payload);
+            response.writeHead(200);
+            response.end(
+              JSON.stringify({ status: 'ready', accountRef: payload.accountRef, stateLabel })
+            );
+            return;
+          }
+
+          response.writeHead(400);
+          response.end(JSON.stringify({ error: 'Unsupported adapter operation' }));
+          return;
+        }
+
+        response.writeHead(405);
+        response.end(JSON.stringify({ error: 'Method not allowed' }));
+        return;
+      }
+
       const pathname = requestUrl.pathname === '/' ? RUNTIME_PAGE : requestUrl.pathname;
       const requestedPath = resolve(PROJECT_DIR, `.${decodeURIComponent(pathname)}`);
 
@@ -78,6 +153,7 @@ async function startStaticServer() {
   await new Promise((resolveListen) => server.listen(port, '127.0.0.1', resolveListen));
   return {
     port,
+    adapterState,
     close: () => new Promise((resolveClose) => server.close(resolveClose)),
   };
 }
@@ -341,12 +417,74 @@ async function run() {
     assert.equal(identity.environment, 'LOCAL');
     assert.match(identity.environmentClass, /tu-environment--local/);
 
+    log('configuring the same-origin provisioning adapter');
+    await page.evaluate(`${shadowRootExpression}.querySelector('[data-action="settings"]').click()`);
+    await waitForCondition(
+      page,
+      `!!${shadowRootExpression}.querySelector('input[name="adapterUrl"]')`,
+      'adapter site setting'
+    );
+    await page.evaluate(`(() => {
+      const root = ${shadowRootExpression};
+      root.querySelector('input[name="adapterUrl"]').value = '/__test-users';
+      root.querySelector('[data-form="settings"]').requestSubmit();
+    })()`);
+    await waitForCondition(
+      page,
+      `!!${shadowRootExpression}.querySelector('[data-action="new-user"]')`,
+      'settings save'
+    );
+    await page.evaluate(`${shadowRootExpression}.querySelector('[data-action="settings"]').click()`);
+    await waitForCondition(
+      page,
+      `!!${shadowRootExpression}.querySelector('.tu-adapter-status--ready')`,
+      'adapter capability discovery'
+    );
+    const adapterSummary = await page.evaluate(
+      `${shadowRootExpression}.querySelector('.tu-adapter-status').textContent`
+    );
+    assert.match(adapterSummary, /HikeStrong fixtures/);
+    assert.match(adapterSummary, /2 roles/);
+    assert.match(adapterSummary, /2 scenarios/);
+    assert.ok(staticServer.adapterState.capabilityRequests >= 1);
+    await page.evaluate(`${shadowRootExpression}.querySelector('[data-action="back"]').click()`);
+
     await page.evaluate(`${shadowRootExpression}.querySelector('[data-action="new-user"]').click()`);
     await waitForCondition(
       page,
       `!!${shadowRootExpression}.querySelector('input[name="email"]')`,
       'credential editor'
     );
+
+    const adapterOptions = await page.evaluate(`(() => {
+      const root = ${shadowRootExpression};
+      return {
+        roles: [...root.querySelectorAll('select[name="role"] option')].map((option) => ({
+          value: option.value,
+          label: option.textContent,
+        })),
+        scenarios: [...root.querySelectorAll('select[name="scenario"] option')].map((option) => ({
+          value: option.value,
+          label: option.textContent,
+        })),
+      };
+    })()`);
+    assert.deepEqual(adapterOptions.roles, [
+      { value: 'member', label: 'Member' },
+      { value: 'org-admin', label: 'Admin' },
+    ]);
+    assert.ok(
+      adapterOptions.scenarios.some(
+        (scenario) => scenario.value === 'empty-org' && scenario.label === 'Empty organization'
+      )
+    );
+
+    await page.evaluate(`(() => {
+      const root = ${shadowRootExpression};
+      root.querySelector('select[name="role"]').value = 'org-admin';
+      root.querySelector('select[name="scenario"]').value = 'empty-org';
+      root.querySelector('[data-action="regenerate"]').click();
+    })()`);
 
     const generated = await page.evaluate(`(() => {
       const root = ${shadowRootExpression};
@@ -356,9 +494,9 @@ async function run() {
         password: root.querySelector('input[name="password"]').value,
       };
     })()`);
-    assert.match(generated.email, /^hikestrong\.member\.[a-z0-9]{6}@example\.test$/);
+    assert.match(generated.email, /^hikestrong\.admin\.[a-z0-9]{6}@example\.test$/);
     assert.equal(generated.password.length, 16);
-    assert.equal(generated.name, 'Member Tester');
+    assert.equal(generated.name, 'Admin Tester');
 
     await page.evaluate(`(() => {
       const root = ${shadowRootExpression};
@@ -372,6 +510,11 @@ async function run() {
       page,
       `document.querySelector('input[type="email"]').value === ${JSON.stringify(generated.email)}`,
       'email autofill'
+    );
+    await waitForCondition(
+      page,
+      `!!${shadowRootExpression}.querySelector('.tu-provisioning-status--ready')`,
+      'provisioning completion'
     );
     const filledForm = await page.evaluate(`(() => ({
       name: document.querySelector('input[name="name"]').value,
@@ -410,7 +553,35 @@ async function run() {
     assert.equal(stored.users.length, 1);
     assert.equal(stored.users[0].siteLabel, 'HikeStrong');
     assert.equal(stored.users[0].notes, 'Browser smoke scenario');
+    assert.equal(stored.users[0].role, 'Admin');
+    assert.equal(stored.users[0].roleId, 'org-admin');
+    assert.equal(stored.users[0].scenarioId, 'empty-org');
+    assert.equal(stored.users[0].scenarioLabel, 'Empty organization');
+    assert.equal(stored.users[0].provisioning.status, 'ready');
+    assert.equal(stored.users[0].provisioning.accountRef, 'acct_1');
+    assert.equal('password' in stored.users[0].provisioning, false);
     assert.match(stored.users[0].siteKey, /^local:127\.0\.0\.1:\d+:hikestrong$/);
+    assert.equal(staticServer.adapterState.provisionRequests.length, 1);
+    assert.equal(staticServer.adapterState.provisionRequests[0].identity.name, generated.name);
+    assert.equal(staticServer.adapterState.provisionRequests[0].identity.email, generated.email);
+    assert.equal(staticServer.adapterState.provisionRequests[0].identity.password, generated.password);
+    assert.equal(staticServer.adapterState.provisionRequests[0].role.id, 'org-admin');
+    assert.equal(staticServer.adapterState.provisionRequests[0].scenario.id, 'empty-org');
+
+    log('resetting the provisioned scenario without resending credentials');
+    await page.evaluate(`${shadowRootExpression}.querySelector('[data-action="reset-user"]').click()`);
+    await waitForCondition(
+      page,
+      `${shadowRootExpression}.querySelector('.tu-page-toast')?.textContent.includes('Reset Admin · Empty organization')`,
+      'scenario reset'
+    );
+    assert.equal(staticServer.adapterState.resetRequests.length, 1);
+    assert.equal(staticServer.adapterState.resetRequests[0].accountRef, 'acct_1');
+    assert.equal('identity' in staticServer.adapterState.resetRequests[0], false);
+    assert.equal(
+      JSON.stringify(staticServer.adapterState.resetRequests[0]).includes(generated.password),
+      false
+    );
 
     await page.evaluate(`(() => {
       const search = ${shadowRootExpression}.querySelector('[data-input="search"]');
@@ -464,6 +635,7 @@ async function run() {
     await page.evaluate(`(() => {
       const root = ${shadowRootExpression};
       root.querySelector('textarea[name="notes"]').value = 'Whole-site deletion scenario';
+      root.querySelector('select[name="scenario"]').value = 'standard';
       root.querySelector('button[type="submit"]').click();
     })()`);
     await waitForCondition(
@@ -671,8 +843,29 @@ async function run() {
       'stored snapshot must not contain credential, card, or promo values'
     );
 
+    await page.evaluate(
+      `${shadowRootExpression}.querySelector('[data-action="settings"]').click()`
+    );
+    await page.evaluate(
+      `${shadowRootExpression}.querySelector('[data-form="settings"]').requestSubmit()`
+    );
+    await waitForCondition(
+      page,
+      `!!${shadowRootExpression}.querySelector('[data-action="new-user"]')`,
+      'site settings save after snapshot'
+    );
+    const snapshotsAfterSettingsSave = await worker.evaluate(`(async () => {
+      const result = await chrome.storage.local.get('testUsersStateV1');
+      return result.testUsersStateV1.snapshots;
+    })()`);
+    assert.equal(
+      snapshotsAfterSettingsSave.length,
+      1,
+      'saving site settings must preserve form snapshots'
+    );
+
     log(
-      'passed: load, recognize, generate, save, autofill top frame and iframe, escape to close, delete login, delete site, and snapshot capture/exclude/edit/refill'
+      'passed: load, recognize, discover adapter, provision/reset, autofill, delete, and snapshot capture/exclude/edit/refill/preservation'
     );
   } finally {
     await browser?.close();

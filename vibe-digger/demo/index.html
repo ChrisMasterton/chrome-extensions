@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Vibe Digger Demo App</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; background: #f6f5fb; color: #1f2937; }
+    header { background: #312e81; color: #fff; padding: 16px 24px; }
+    header h1 { margin: 0; font-size: 18px; }
+    header p { margin: 4px 0 0; opacity: .8; font-size: 13px; }
+    main { max-width: 760px; margin: 0 auto; padding: 24px; display: grid; gap: 16px; }
+    .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 10px; padding: 16px; }
+    .card h2 { margin: 0 0 8px; font-size: 15px; }
+    button { border: 1px solid #c7d2fe; background: #eef2ff; color: #312e81; border-radius: 7px; padding: 6px 12px; font-size: 13px; cursor: pointer; margin: 2px 6px 2px 0; }
+    button:hover { background: #e0e7ff; }
+    input { border: 1px solid #d1d5db; border-radius: 7px; padding: 6px 10px; font-size: 13px; width: 240px; }
+    ul { margin: 8px 0 0; padding-left: 20px; }
+    .tick { font-variant-numeric: tabular-nums; font-weight: 700; }
+    .muted { color: #6b7280; font-size: 12px; }
+  </style>
+  <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.development.js"></script>
+  <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.development.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+  <script>
+    const { createElement: h, useState, useEffect, useMemo, memo } = React;
+
+    const ITEMS = [
+      'Amber vibes', 'Bassline debugger', 'Cosmic props', 'Dreamy hooks',
+      'Echo state', 'Fiber flow', 'Groove render', 'Hazy effects',
+      'Indigo tree', 'Jitter commit', 'Kinetic memo', 'Lo-fi layout',
+    ];
+
+    function TickBadge({ tick }) {
+      return h('span', { className: 'tick' }, `tick #${tick}`);
+    }
+
+    const MemoizedClock = memo(function MemoizedClock() {
+      return h('span', { className: 'muted' }, ' (this memoized clock should not flash)');
+    });
+
+    function Counter() {
+      const [count, setCount] = useState(0);
+      return h('div', { className: 'card' },
+        h('h2', null, 'Counter'),
+        h('button', { onClick: () => setCount((c) => c + 1) }, `Clicked ${count} times`),
+        h('p', { className: 'muted' }, 'Each click re-renders Counter. Pin it with Inspect to see the count hook.')
+      );
+    }
+
+    function ListRow({ label }) {
+      return h('li', null, label);
+    }
+
+    function FilterableList() {
+      const [query, setQuery] = useState('');
+      const visible = ITEMS.filter((item) => item.toLowerCase().includes(query.toLowerCase()));
+      return h('div', { className: 'card' },
+        h('h2', null, 'Filterable list'),
+        h('input', {
+          placeholder: 'Type to filter…',
+          value: query,
+          onChange: (event) => setQuery(event.target.value),
+        }),
+        h('ul', null, ...visible.map((item) => h(ListRow, { key: item, label: item }))),
+        visible.length === 0 ? h('p', { className: 'muted' }, 'Nothing matches. Empty-state vibes.') : null
+      );
+    }
+
+    function NetworkLifecycle() {
+      const [items, setItems] = useState(null);
+      const [echo, setEcho] = useState(null);
+
+      useEffect(() => {
+        // Load-time request: part of the page's boot lifecycle.
+        fetch('/api/items')
+          .then((r) => r.json())
+          .then((data) => setItems(data.items))
+          .catch(() => setItems([]));
+      }, []);
+
+      const saveVibes = () => {
+        fetch('/api/echo', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ vibe: 'immaculate', intensity: 11, savedAt: Date.now() }),
+        })
+          .then((r) => r.json())
+          .then(setEcho);
+      };
+
+      return h('div', { className: 'card' },
+        h('h2', null, 'Network lifecycle'),
+        h('p', { className: 'muted' }, items === null
+          ? 'Loading items from /api/items…'
+          : `Loaded ${items.length} items from /api/items on mount.`),
+        h('button', { onClick: saveVibes }, 'Save vibes (POST /api/echo)'),
+        h('button', { onClick: () => fetch('/api/slow') }, 'Slow request (1.5s)'),
+        h('button', {
+          onClick: () => fetch('/api/echo', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: 'not json at all' }),
+        }, 'POST malformed body (400)'),
+        echo ? h('p', { className: 'muted' }, `Server echoed back at ${echo.receivedAt}`) : null
+      );
+    }
+
+    function TroubleButtons({ onToggleBadKeys }) {
+      return h('div', { className: 'card' },
+        h('h2', null, 'Dig up some trouble'),
+        h('button', { onClick: onToggleBadKeys }, 'Render a list without keys'),
+        h('button', { onClick: () => fetch('/api/definitely-missing') }, 'Fetch a missing endpoint'),
+        h('button', { onClick: () => setTimeout(() => { throw new Error('Async vibes went sideways'); }, 10) }, 'Throw an async error'),
+        h('button', { onClick: () => Promise.reject(new Error('This promise had no vibes')) }, 'Reject a promise'),
+        h('button', { onClick: () => console.warn('Manual warning: the vibes are questionable') }, 'console.warn'),
+        h('p', { className: 'muted' }, 'Each button feeds the Issues panel a different kind of problem.')
+      );
+    }
+
+    function BadKeyList() {
+      // Intentionally missing keys to trigger the React key warning.
+      return h('div', { className: 'card' },
+        h('h2', null, 'Keyless list (warning bait)'),
+        h('ul', null, ...ITEMS.slice(0, 4).map((item) => h('li', null, item)))
+      );
+    }
+
+    function App() {
+      const [tick, setTick] = useState(0);
+      const [showBadKeys, setShowBadKeys] = useState(false);
+
+      useEffect(() => {
+        const id = setInterval(() => setTick((t) => t + 1), 1000);
+        return () => clearInterval(id);
+      }, []);
+
+      return h(React.Fragment, null,
+        h('header', null,
+          h('h1', null, 'Vibe Digger Demo App'),
+          h('p', null, 'Ticking every second — turn on the Heatmap to watch the unmemoized tree flash. ',
+            h(TickBadge, { tick }), h(MemoizedClock))
+        ),
+        h('main', null,
+          h(Counter),
+          h(NetworkLifecycle),
+          h(FilterableList),
+          h(TroubleButtons, { onToggleBadKeys: () => setShowBadKeys((v) => !v) }),
+          showBadKeys ? h(BadKeyList) : null
+        )
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(h(App));
+  </script>
+</body>
+</html>

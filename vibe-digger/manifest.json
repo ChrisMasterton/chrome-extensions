@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "Vibe Digger",
+  "description": "Dig into React apps while you vibe: component inspector overlay, re-render heatmap, and an error digger with agent-ready copy.",
+  "version": "0.2.0",
+  "permissions": ["activeTab", "scripting", "clipboardWrite"],
+  "content_scripts": [
+    {
+      "matches": [
+        "http://localhost/*",
+        "https://localhost/*",
+        "http://127.0.0.1/*",
+        "https://127.0.0.1/*"
+      ],
+      "js": ["page-agent.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    }
+  ],
+  "action": {
+    "default_title": "Toggle Vibe Digger",
+    "default_icon": {
+      "16": "icon16.png",
+      "48": "icon48.png",
+      "128": "icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
+  "background": {
+    "service_worker": "background.js"
+  }
+}

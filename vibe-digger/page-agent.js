@@ -13,6 +13,7 @@
 
   const MAX_ISSUES = 200;
   const MAX_NETWORK_ENTRIES = 300;
+  const MAX_WS_FRAMES = 60;
   const MAX_FLASHES_PER_COMMIT = 40;
   const MAX_FIBERS_PER_COMMIT = 4000;
   const COMMIT_THROTTLE_MS = 50;
@@ -285,6 +286,131 @@
     return /json|text|xml|urlencoded|graphql/i.test(contentType || '');
   }
 
+  // WebSockets are streams, not request/response pairs, so each socket becomes
+  // ONE network entry whose frame log grows over time: → sent, ← received,
+  // then the close code. Frame posts are throttled so chatty sockets don't
+  // flood the panel.
+  function installWebSocketCapture() {
+    if (typeof window.WebSocket !== 'function') return;
+
+    const OriginalWebSocket = window.WebSocket;
+    const entriesBySocket = new WeakMap();
+    const postScheduled = new WeakSet();
+
+    function redactFrame(data) {
+      if (typeof data === 'string') {
+        let text = data.length > 800 ? `${data.slice(0, 800)}…[${data.length} chars total]` : data;
+        text = text.replace(/bearer\s+[a-z0-9._-]+/gi, '[redacted bearer token]');
+        try {
+          return JSON.stringify(sanitizeValue(JSON.parse(text)));
+        } catch {
+          return text;
+        }
+      }
+      if (typeof Blob === 'function' && data instanceof Blob) return `[blob ${data.size} bytes]`;
+      if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
+        return `[binary ${data.byteLength} bytes]`;
+      }
+      return '[unknown frame]';
+    }
+
+    function schedulePost(entry) {
+      if (postScheduled.has(entry)) return;
+      postScheduled.add(entry);
+      setTimeout(() => {
+        postScheduled.delete(entry);
+        post('network', { entry, total: state.network.length });
+      }, 250);
+    }
+
+    function recordFrame(entry, dir, data) {
+      entry.frameCount = (entry.frameCount || 0) + 1;
+      entry.frames.push({ dir, at: Math.round(performance.now() - entry.sinceLoadMs), data: redactFrame(data) });
+      if (entry.frames.length > MAX_WS_FRAMES) {
+        entry.frames.shift();
+        entry.droppedFrames = (entry.droppedFrames || 0) + 1;
+      }
+      schedulePost(entry);
+    }
+
+    function watchSocket(ws, entry) {
+      const startedAt = performance.now();
+      entriesBySocket.set(ws, entry);
+      ws.addEventListener('open', () => {
+        entry.wsState = 'open';
+        post('network', { entry, total: state.network.length });
+      });
+      ws.addEventListener('message', (event) => recordFrame(entry, 'recv', event.data));
+      ws.addEventListener('error', () => {
+        entry.error = 'socket error';
+      });
+      ws.addEventListener('close', (event) => {
+        entry.wsState = 'closed';
+        entry.closeCode = event.code;
+        entry.closeReason = truncate(event.reason || '', 120);
+        entry.ok = !!event.wasClean && !entry.error;
+        entry.durationMs = Math.round(performance.now() - startedAt);
+        post('network', { entry, total: state.network.length });
+        if (!entry.ok) {
+          addIssue(
+            'network',
+            `WS ${entry.url} closed uncleanly (${event.code}${entry.closeReason ? ` ${entry.closeReason}` : ''})`
+          );
+        }
+      });
+    }
+
+    function ensureEntry(ws) {
+      let entry = entriesBySocket.get(ws);
+      if (!entry) {
+        // Socket created before the agent installed; adopt it on first send.
+        entry = recordRequest({
+          kind: 'ws',
+          method: 'WS',
+          url: truncate(String(ws.url || '[unknown ws URL]'), 500),
+          wsState: ws.readyState === OriginalWebSocket.OPEN ? 'open' : 'connecting',
+          frames: [],
+          frameCount: 0,
+          initiator: '[socket opened before capture started]',
+        });
+        watchSocket(ws, entry);
+      }
+      return entry;
+    }
+
+    window.WebSocket = function WebSocket(url, protocols) {
+      const ws =
+        protocols !== undefined
+          ? new OriginalWebSocket(url, protocols)
+          : new OriginalWebSocket(url);
+      const entry = recordRequest({
+        kind: 'ws',
+        method: 'WS',
+        url: truncate(String(ws.url || url), 500),
+        wsState: 'connecting',
+        frames: [],
+        frameCount: 0,
+        initiator: captureInitiator(),
+      });
+      watchSocket(ws, entry);
+      return ws;
+    };
+    window.WebSocket.prototype = OriginalWebSocket.prototype;
+    for (const key of ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED']) {
+      window.WebSocket[key] = OriginalWebSocket[key];
+    }
+
+    const originalSend = OriginalWebSocket.prototype.send;
+    OriginalWebSocket.prototype.send = function vibeDiggerWsSend(data) {
+      try {
+        recordFrame(ensureEntry(this), 'send', data);
+      } catch {
+        // Capture must never block the socket.
+      }
+      return originalSend.apply(this, arguments);
+    };
+  }
+
   function installNetworkCapture() {
     if (typeof window.fetch === 'function') {
       const originalFetch = window.fetch;
@@ -410,6 +536,8 @@
         return originalSend.apply(this, arguments);
       };
     }
+
+    installWebSocketCapture();
 
     if (typeof navigator.sendBeacon === 'function') {
       const originalBeacon = navigator.sendBeacon.bind(navigator);

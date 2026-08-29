@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Vibe Digger",
   "description": "Dig into React apps while you vibe: component inspector overlay, re-render heatmap, and an error digger with agent-ready copy.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "permissions": ["activeTab", "scripting", "clipboardWrite"],
   "content_scripts": [
     {

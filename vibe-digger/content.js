@@ -449,15 +449,32 @@
 
   function statusClass(entry) {
     if (entry.error || (typeof entry.status === 'number' && entry.status >= 400)) return 'bad';
+    if (entry.kind === 'ws') {
+      if (entry.wsState === 'open') return 'ok';
+      if (entry.wsState === 'closed') return entry.ok ? 'pending' : 'bad';
+      return 'pending';
+    }
     if (entry.status == null && !entry.ok) return 'pending';
     return 'ok';
   }
 
   function statusLabel(entry) {
-    if (entry.error) return 'ERR';
+    if (entry.error && entry.kind !== 'ws') return 'ERR';
+    if (entry.kind === 'ws') {
+      if (entry.wsState === 'closed') return `closed ${entry.closeCode ?? ''}`.trim();
+      return entry.wsState || '…';
+    }
     if (typeof entry.status === 'number') return String(entry.status);
     if (entry.kind === 'beacon') return entry.ok ? 'queued' : 'dropped';
     return '…';
+  }
+
+  function formatFrames(entry, limit = Infinity) {
+    const frames = entry.frames || [];
+    const shown = frames.slice(-limit);
+    return shown
+      .map((f) => `${f.dir === 'send' ? '→' : '←'} +${(f.at / 1000).toFixed(2)}s ${f.data}`)
+      .join('\n');
   }
 
   function renderNetworkView() {
@@ -485,7 +502,11 @@
         <span class="vd-net-method">${escapeHtml(entry.method)}</span>
         <span class="vd-net-path">${escapeHtml(shortPath(entry.url))}</span>
         <span class="vd-net-status ${statusClass(entry)}">${escapeHtml(statusLabel(entry))}</span>
-        <span class="vd-net-ms">${entry.durationMs != null ? `${entry.durationMs}ms` : ''}</span>`;
+        <span class="vd-net-ms">${
+          entry.kind === 'ws'
+            ? `${entry.frameCount || 0}⇅`
+            : entry.durationMs != null ? `${entry.durationMs}ms` : ''
+        }</span>`;
       row.appendChild(head);
 
       const detail = document.createElement('div');
@@ -494,6 +515,18 @@
         ['URL', `${entry.method} ${entry.url}\n+${(entry.sinceLoadMs / 1000).toFixed(2)}s after load (${entry.kind})`],
         ['Request body', entry.requestBody],
         ['Response body', entry.responseBody],
+        [
+          entry.droppedFrames
+            ? `Frames (${entry.droppedFrames} older dropped)`
+            : 'Frames',
+          entry.kind === 'ws' && entry.frames?.length ? formatFrames(entry) : null,
+        ],
+        [
+          'Close',
+          entry.kind === 'ws' && entry.wsState === 'closed'
+            ? `code ${entry.closeCode}${entry.closeReason ? ` — ${entry.closeReason}` : ''}${entry.ok ? ' (clean)' : ' (unclean)'}`
+            : null,
+        ],
         ['Error', entry.error],
         ['Sent from', entry.initiator],
       ];
@@ -705,13 +738,17 @@
       lines.push(`## Network lifecycle (last ${entries.length} of ${model.network.length}, in order)`);
       lines.push('');
       for (const entry of entries) {
-        const status = entry.error
-          ? `FAILED: ${entry.error}`
-          : entry.status != null
-            ? entry.status
-            : entry.kind === 'beacon'
-              ? 'queued'
-              : 'pending';
+        const status = entry.kind === 'ws'
+          ? entry.wsState === 'closed'
+            ? `closed ${entry.closeCode ?? ''}${entry.ok ? ' clean' : ' UNCLEAN'}`
+            : entry.wsState
+          : entry.error
+            ? `FAILED: ${entry.error}`
+            : entry.status != null
+              ? entry.status
+              : entry.kind === 'beacon'
+                ? 'queued'
+                : 'pending';
         const timing = entry.durationMs != null ? `, ${entry.durationMs}ms` : '';
         lines.push(
           `### #${entry.seq} ${entry.method} ${entry.url} → ${status} (+${(entry.sinceLoadMs / 1000).toFixed(2)}s${timing})`
@@ -721,6 +758,15 @@
         }
         if (entry.responseBody) {
           lines.push('Response body:', '```', truncateForBundle(entry.responseBody), '```');
+        }
+        if (entry.kind === 'ws' && entry.frames?.length) {
+          const dropped = (entry.frameCount || 0) - entry.frames.length;
+          lines.push(
+            `Frames (last ${Math.min(entry.frames.length, 20)}${dropped > 0 ? `, ${dropped} earlier not shown` : ''}):`,
+            '```',
+            truncateForBundle(formatFrames(entry, 20), 2500),
+            '```'
+          );
         }
         if (entry.initiator) {
           lines.push('Sent from:', '```', entry.initiator.split('\n').slice(0, 3).join('\n'), '```');

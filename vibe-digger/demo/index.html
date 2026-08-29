@@ -105,6 +105,33 @@
       );
     }
 
+    function WebSocketCard() {
+      const [socket, setSocket] = useState(null);
+      const [log, setLog] = useState([]);
+      const append = (line) => setLog((l) => [...l.slice(-4), line]);
+
+      const connect = () => {
+        const ws = new WebSocket(`ws://${location.host}/ws/echo`);
+        ws.onopen = () => append('socket open');
+        ws.onmessage = (event) => append(`recv: ${event.data.slice(0, 80)}`);
+        ws.onclose = (event) => { append(`closed (${event.code})`); setSocket(null); };
+        setSocket(ws);
+      };
+
+      return h('div', { className: 'card' },
+        h('h2', null, 'WebSocket'),
+        socket === null
+          ? h('button', { onClick: connect }, 'Connect to /ws/echo')
+          : h(React.Fragment, null,
+              h('button', {
+                onClick: () => socket.send(JSON.stringify({ vibe: 'streaming', sentAt: Date.now() })),
+              }, 'Send a vibe frame'),
+              h('button', { onClick: () => socket.close(1000, 'done vibing') }, 'Close (1000)')
+            ),
+        h('p', { className: 'muted' }, log.length ? log.join(' · ') : 'The Net tab records the socket and every frame.')
+      );
+    }
+
     function TroubleButtons({ onToggleBadKeys }) {
       return h('div', { className: 'card' },
         h('h2', null, 'Dig up some trouble'),
@@ -143,6 +170,7 @@
         h('main', null,
           h(Counter),
           h(NetworkLifecycle),
+          h(WebSocketCard),
           h(FilterableList),
           h(TroubleButtons, { onToggleBadKeys: () => setShowBadKeys((v) => !v) }),
           showBadKeys ? h(BadKeyList) : null

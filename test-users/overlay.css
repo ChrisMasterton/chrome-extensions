@@ -100,7 +100,7 @@ button {
   color: #92610e;
 }
 
-.tu-environment--web {
+.tu-environment--production {
   background: #fdecec;
   color: #b42318;
 }
@@ -249,6 +249,81 @@ button {
 
 .tu-tab.is-active::after {
   background: #3049d8;
+}
+
+.tu-env-switch {
+  display: flex;
+  padding: 8px 14px 0;
+  gap: 4px;
+  background: #ffffff;
+}
+
+.tu-env-segment {
+  position: relative;
+  display: flex;
+  flex: 1 1 0;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 5px 4px;
+  border: 1px solid #dfe3ec;
+  border-radius: 8px;
+  background: #f8f9fc;
+  color: #4d5469;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.tu-env-segment:hover {
+  border-color: #c2cae0;
+  background: #f2f4fb;
+}
+
+.tu-env-segment.is-active {
+  border-color: #3049d8;
+  background: #edf0ff;
+  color: #2740c4;
+}
+
+.tu-env-segment--staging.is-active {
+  border-color: #d09a2b;
+  background: #fdf3e0;
+  color: #92610e;
+}
+
+.tu-env-segment--production.is-active {
+  border-color: #d0453a;
+  background: #fdecec;
+  color: #b42318;
+}
+
+.tu-env-count {
+  flex: 0 0 auto;
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: #edf0f4;
+  color: #4d566c;
+  font-size: 10px;
+  font-weight: 750;
+  line-height: 15px;
+}
+
+.tu-env-segment.is-active .tu-env-count {
+  background: rgba(255, 255, 255, 0.75);
+  color: inherit;
+}
+
+.tu-env-dot {
+  position: absolute;
+  top: 4px;
+  right: 5px;
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: currentcolor;
+  opacity: 0.65;
 }
 
 .tu-search-bar {

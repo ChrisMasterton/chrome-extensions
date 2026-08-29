@@ -6,22 +6,6 @@
     module.exports = api;
   }
 })(typeof globalThis !== 'undefined' ? globalThis : this, function createTestUsersCore() {
-  const GENERIC_PAGE_NAMES = new Set([
-    'account',
-    'create account',
-    'dashboard',
-    'home',
-    'log in',
-    'login',
-    'register',
-    'registration',
-    'sign in',
-    'sign up',
-    'signup',
-    'welcome',
-    'welcome back',
-  ]);
-
   function normalizeWhitespace(value) {
     return String(value || '').replace(/\s+/g, ' ').trim();
   }
@@ -36,58 +20,85 @@
     return slug || fallback;
   }
 
-  function derivePageName(title) {
-    const normalized = normalizeWhitespace(title);
-    if (!normalized) return 'Untitled page';
+  const ENVIRONMENTS = ['local', 'staging', 'production'];
 
-    const parts = normalized
-      .split(/\s+(?:\||—|–|·|•|-{1,2})\s+|\s*:\s*/)
-      .map(normalizeWhitespace)
-      .filter(Boolean);
-
-    const meaningfulParts = parts.filter(
-      (part) => !GENERIC_PAGE_NAMES.has(part.toLowerCase())
-    );
-
-    if (meaningfulParts.length === 1) return meaningfulParts[0];
-    if (meaningfulParts.length > 1 && meaningfulParts.length < parts.length) {
-      return meaningfulParts.join(' · ');
-    }
-
-    return normalized;
-  }
+  const ENVIRONMENT_LABELS = {
+    local: 'Local',
+    staging: 'Staging',
+    production: 'Production',
+  };
 
   function isLocalHostname(hostname) {
     const value = String(hostname || '').toLowerCase();
-    return value === 'localhost' || value === '127.0.0.1' || value === '::1';
+    return (
+      value === 'localhost' ||
+      value === '127.0.0.1' ||
+      value === '::1' ||
+      value === '[::1]' ||
+      value === '0.0.0.0' ||
+      value.endsWith('.localhost') ||
+      value.endsWith('.local') ||
+      value.endsWith('.test') ||
+      /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)\d/.test(value)
+    );
   }
+
+  // The environment guess is deliberately dumb: localhost-ish means local, a
+  // staging-ish word in its own hostname segment means staging, everything
+  // else is production. A wrong guess is fixed once per address in settings.
+  const STAGING_HOSTNAME_TOKEN = /(^|[.-])(staging|stage|preview|dev|test|qa|uat|sandbox)([.-]|$)/;
 
   function getEnvironment(hostname) {
     const value = String(hostname || '').toLowerCase();
     if (isLocalHostname(value)) return 'local';
-    if (/staging|stage|preview|dev\.|test\./.test(value)) return 'staging';
-    return 'web';
+    if (STAGING_HOSTNAME_TOKEN.test(value)) return 'staging';
+    return 'production';
   }
 
-  function getSiteIdentity(locationLike, title, projectOverride) {
+  function normalizeEnvironment(value) {
+    return ENVIRONMENTS.includes(value) ? value : '';
+  }
+
+  // A site's stable id comes from the address it was first seen on. Renaming
+  // or linking other addresses to the site never changes the id.
+  function siteIdForHost(host) {
+    return `site:${String(host || '').toLowerCase()}`;
+  }
+
+  function getOriginInfo(locationLike) {
     const protocol = locationLike?.protocol || 'http:';
     const hostname = locationLike?.hostname || 'localhost';
     const port = locationLike?.port || '';
-    const environment = getEnvironment(hostname);
     const origin = locationLike?.origin || `${protocol}//${hostname}${port ? `:${port}` : ''}`;
-    const originLabel = `${hostname}${port ? `:${port}` : ''}`;
-    const pageName = derivePageName(title);
-    const projectName = normalizeWhitespace(projectOverride) || pageName;
-    const siteKey = `${environment}:${originLabel.toLowerCase()}:${slugify(projectName)}`;
+    const host = `${hostname}${port ? `:${port}` : ''}`.toLowerCase();
 
     return {
-      environment,
-      isLocal: environment === 'local',
       origin,
-      originLabel,
-      pageName,
-      projectName,
-      siteKey,
+      host,
+      originLabel: host,
+      detectedEnvironment: getEnvironment(hostname),
+    };
+  }
+
+  // Everything the UI needs to know about "where am I": which site this
+  // address belongs to and which environment applies. The site is keyed by
+  // address alone — never by tab title or page content — so the same address
+  // always resolves to the same site. The environment is the per-address
+  // manual override when one is set, otherwise the detected default.
+  function resolveSiteContext(state, locationLike) {
+    const info = getOriginInfo(locationLike);
+    const originRecord = state?.origins?.[info.origin] || null;
+    const siteId = originRecord?.siteId || siteIdForHost(info.host);
+    const site = state?.sites?.[siteId] || null;
+    const environmentOverride = normalizeEnvironment(originRecord?.environment);
+
+    return {
+      ...info,
+      siteId,
+      siteName: normalizeWhitespace(site?.name) || info.originLabel,
+      siteExists: Boolean(site),
+      environment: environmentOverride || info.detectedEnvironment,
+      environmentIsManual: Boolean(environmentOverride),
     };
   }
 
@@ -786,21 +797,107 @@
     return `${cleaned.charAt(0).toUpperCase()}${cleaned.slice(1)} form`;
   }
 
+  function hostFromOrigin(origin) {
+    try {
+      return new URL(origin).host.toLowerCase();
+    } catch {
+      return String(origin || '')
+        .replace(/^[a-z]+:\/\//i, '')
+        .split('/')[0]
+        .toLowerCase();
+    }
+  }
+
+  function environmentFromOrigin(origin) {
+    return getEnvironment(hostFromOrigin(origin).replace(/:\d+$/, ''));
+  }
+
+  function plainObject(value) {
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  }
+
+  // v1 grouped everything under environment:host:tab-title keys, which
+  // scattered one app across many "sites" as tab titles changed. v2 keys a
+  // site by its address alone: every distinct origin becomes one site, its
+  // fragmented v1 entries merge back together, and each record carries the
+  // environment it belongs to.
+  function migrateV1State(v1) {
+    const state = { version: 2, sites: {}, origins: {}, users: [], snapshots: [] };
+    const profiles = plainObject(v1.siteProfiles);
+
+    const ensureSite = (origin) => {
+      const host = hostFromOrigin(origin);
+      const siteId = siteIdForHost(host);
+      if (!state.sites[siteId]) {
+        state.sites[siteId] = { id: siteId, name: host, createdAt: new Date().toISOString() };
+      }
+      if (origin && !state.origins[origin]) {
+        state.origins[origin] = { siteId, environment: '' };
+      }
+      return siteId;
+    };
+
+    Object.entries(profiles).forEach(([origin, profile]) => {
+      const siteId = ensureSite(origin);
+      const site = state.sites[siteId];
+      const projectName = normalizeWhitespace(profile?.projectName);
+      if (projectName) site.name = projectName;
+      if (profile && 'passwordSymbols' in profile) {
+        site.passwordSymbols = sanitizePasswordSymbols(profile.passwordSymbols);
+      }
+      const adapterUrl = normalizeWhitespace(profile?.adapterUrl);
+      if (adapterUrl) state.origins[origin].adapterUrl = adapterUrl;
+    });
+
+    const migrateEnvironment = (record) =>
+      normalizeEnvironment(record.environment === 'web' ? 'production' : record.environment) ||
+      environmentFromOrigin(record.origin);
+
+    (Array.isArray(v1.users) ? v1.users : []).forEach((user) => {
+      if (!user || typeof user !== 'object') return;
+      const { siteKey, siteLabel, ...rest } = user;
+      state.users.push({
+        ...rest,
+        siteId: ensureSite(user.origin),
+        environment: migrateEnvironment(user),
+      });
+    });
+
+    (Array.isArray(v1.snapshots) ? v1.snapshots : []).forEach((snapshot) => {
+      if (!snapshot || typeof snapshot !== 'object') return;
+      const { siteKey, siteLabel, ...rest } = snapshot;
+      state.snapshots.push({
+        ...rest,
+        siteId: ensureSite(snapshot.origin),
+        environment: migrateEnvironment(snapshot),
+      });
+    });
+
+    return state;
+  }
+
   function normalizeStoredState(value) {
-    const state = value && typeof value === 'object' ? value : {};
+    const state = plainObject(value);
+    if (state.version !== 2) {
+      const hasV1Data =
+        (Array.isArray(state.users) && state.users.length) ||
+        (Array.isArray(state.snapshots) && state.snapshots.length) ||
+        Object.keys(plainObject(state.siteProfiles)).length;
+      if (hasV1Data) return migrateV1State(state);
+    }
+
     return {
+      version: 2,
+      sites: plainObject(state.sites),
+      origins: plainObject(state.origins),
       users: Array.isArray(state.users) ? state.users : [],
       snapshots: Array.isArray(state.snapshots) ? state.snapshots : [],
-      siteProfiles:
-        state.siteProfiles &&
-        typeof state.siteProfiles === 'object' &&
-        !Array.isArray(state.siteProfiles)
-          ? state.siteProfiles
-          : {},
     };
   }
 
   return {
+    ENVIRONMENTS,
+    ENVIRONMENT_LABELS,
     PASSWORD_SYMBOL_CHOICES,
     buildAdapterRequest,
     buildFillPlan,
@@ -808,23 +905,27 @@
     buildRefillPlan,
     buildSnapshotFields,
     classifyFillField,
-    derivePageName,
     deriveSnapshotName,
     describeFillPlan,
     describeRefillResult,
+    environmentFromOrigin,
+    hostFromOrigin,
     mergeSnapshotFields,
     snapshotExclusionReason,
     generateEmail,
     generatePassword,
     sanitizePasswordSymbols,
     getEnvironment,
-    getSiteIdentity,
+    getOriginInfo,
     isLocalHostname,
     normalizeAdapterCapabilities,
     normalizeAdapterResult,
     normalizeAdapterUrl,
+    normalizeEnvironment,
     normalizeStoredState,
     normalizeWhitespace,
+    resolveSiteContext,
+    siteIdForHost,
     slugify,
     splitPersonName,
   };

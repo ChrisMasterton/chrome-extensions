@@ -412,12 +412,24 @@ async function run() {
         environmentClass: root.querySelector('.tu-environment').className,
       };
     })()`);
-    assert.equal(identity.project, 'HikeStrong');
+    assert.match(identity.project, /^127\.0\.0\.1:\d+$/, 'a new site is named after its address');
     assert.match(identity.origin, /^127\.0\.0\.1:\d+$/);
     assert.equal(identity.environment, 'LOCAL');
     assert.match(identity.environmentClass, /tu-environment--local/);
 
-    log('configuring the same-origin provisioning adapter');
+    const environmentSwitch = await page.evaluate(`(() => {
+      const root = ${shadowRootExpression};
+      return {
+        segments: [...root.querySelectorAll('.tu-env-segment')].map((segment) => segment.dataset.env),
+        active: root.querySelector('.tu-env-segment.is-active')?.dataset.env,
+        detected: root.querySelector('.tu-env-dot')?.closest('.tu-env-segment')?.dataset.env,
+      };
+    })()`);
+    assert.deepEqual(environmentSwitch.segments, ['local', 'staging', 'production']);
+    assert.equal(environmentSwitch.active, 'local', 'the detected environment starts selected');
+    assert.equal(environmentSwitch.detected, 'local', 'the detected environment carries the dot');
+
+    log('naming the site and configuring the same-origin provisioning adapter');
     await page.evaluate(`${shadowRootExpression}.querySelector('[data-action="settings"]').click()`);
     await waitForCondition(
       page,
@@ -426,6 +438,7 @@ async function run() {
     );
     await page.evaluate(`(() => {
       const root = ${shadowRootExpression};
+      root.querySelector('input[name="siteName"]').value = 'HikeStrong';
       root.querySelector('input[name="adapterUrl"]').value = '/__test-users';
       root.querySelector('[data-form="settings"]').requestSubmit();
     })()`);
@@ -434,6 +447,10 @@ async function run() {
       `!!${shadowRootExpression}.querySelector('[data-action="new-user"]')`,
       'settings save'
     );
+    const renamedProject = await page.evaluate(
+      `${shadowRootExpression}.querySelector('.tu-site-identity strong').textContent`
+    );
+    assert.equal(renamedProject, 'HikeStrong', 'the header shows the renamed site');
     await page.evaluate(`${shadowRootExpression}.querySelector('[data-action="settings"]').click()`);
     await waitForCondition(
       page,
@@ -550,8 +567,11 @@ async function run() {
       const result = await chrome.storage.local.get('testUsersStateV1');
       return result.testUsersStateV1;
     })()`);
+    assert.equal(stored.version, 2);
     assert.equal(stored.users.length, 1);
-    assert.equal(stored.users[0].siteLabel, 'HikeStrong');
+    assert.match(stored.users[0].siteId, /^site:127\.0\.0\.1:\d+$/);
+    assert.equal(stored.users[0].environment, 'local');
+    assert.equal(stored.sites[stored.users[0].siteId].name, 'HikeStrong');
     assert.equal(stored.users[0].notes, 'Browser smoke scenario');
     assert.equal(stored.users[0].role, 'Admin');
     assert.equal(stored.users[0].roleId, 'org-admin');
@@ -560,7 +580,6 @@ async function run() {
     assert.equal(stored.users[0].provisioning.status, 'ready');
     assert.equal(stored.users[0].provisioning.accountRef, 'acct_1');
     assert.equal('password' in stored.users[0].provisioning, false);
-    assert.match(stored.users[0].siteKey, /^local:127\.0\.0\.1:\d+:hikestrong$/);
     assert.equal(staticServer.adapterState.provisionRequests.length, 1);
     assert.equal(staticServer.adapterState.provisionRequests[0].identity.name, generated.name);
     assert.equal(staticServer.adapterState.provisionRequests[0].identity.email, generated.email);
@@ -656,7 +675,7 @@ async function run() {
       `${shadowRootExpression}.querySelector('.tu-saved-site-copy').textContent`
     );
     assert.match(savedSiteSummary, /HikeStrong/);
-    assert.match(savedSiteSummary, /1 login/);
+    assert.match(savedSiteSummary, /1 local/);
 
     await page.evaluate(
       `${shadowRootExpression}.querySelector('[data-action="delete-site"]').click()`
@@ -665,7 +684,7 @@ async function run() {
       `${shadowRootExpression}.querySelector('.tu-site-delete-copy').textContent`
     );
     assert.match(confirmationText, /Delete HikeStrong/);
-    assert.match(confirmationText, /Other projects are unaffected/);
+    assert.match(confirmationText, /Other sites are unaffected/);
     await page.evaluate(
       `${shadowRootExpression}.querySelector('[data-action="confirm-delete-site"]').click()`
     );
@@ -680,7 +699,8 @@ async function run() {
       return result.testUsersStateV1;
     })()`);
     assert.deepEqual(storedAfterSiteDelete.users, []);
-    assert.deepEqual(storedAfterSiteDelete.siteProfiles, {});
+    assert.deepEqual(storedAfterSiteDelete.sites, {});
+    assert.deepEqual(storedAfterSiteDelete.origins, {});
 
     log('navigating to the profile form page for the snapshot scenario');
     await page.evaluate(`location.assign('/demo/runtime-profile.html')`);

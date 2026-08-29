@@ -1,12 +1,20 @@
 # Test Users
 
-Test Users is a Manifest V3 Chrome extension for generating, organizing, and autofilling disposable local or staging accounts. Accounts are grouped by a site identity composed from the current address and a normalized browser-tab page name.
+Test Users is a Manifest V3 Chrome extension for generating, organizing, and autofilling disposable local or staging accounts.
 
-For example, a tab titled `Login — HikeStrong` at `http://localhost:3000/login` is stored as:
+## How sites and environments work
 
-```text
-localhost:3000 + HikeStrong
-```
+A **site** is keyed by the page's address alone — hostname plus port, such as `localhost:3000` or `app.hikestrong.com`. Nothing about the browser-tab title is ever used, so the site never changes as you navigate around an app. You can rename a site in **Settings** (for example to `HikeStrong`); the name seeds generated emails and labels the panel.
+
+Every credential also belongs to one of three **environments** — Local, Staging, or Production — because the same project usually has different accounts in each. The environment is detected from the hostname:
+
+- **Local** — `localhost`, `127.0.0.1`, `[::1]`, `*.localhost`, `*.local`, `*.test`, and private IP ranges.
+- **Staging** — a hostname segment like `staging`, `stage`, `preview`, `dev`, `test`, `qa`, `uat`, or `sandbox` (on a `.` or `-` boundary, so `backstage.com` is not staging).
+- **Production** — everything else.
+
+Detection only picks the default. The panel has an explicit Local / Staging / Production switch (the dot marks the detected one), and **Settings** can pin an address to a specific environment when detection guesses wrong.
+
+By default each address is its own site. When one project spans several addresses — `localhost:3000`, `staging.hikestrong.com`, and `app.hikestrong.com` — open **Settings** on one of them and use **This address belongs to** to link it to the shared site. Its logins ride along, and every linked address then shows the same site with its own environment's credentials.
 
 ## Current functionality
 
@@ -15,11 +23,10 @@ localhost:3000 + HikeStrong
 - Fill login and sign-up forms: full or first/last name, username, email, and every password field. Fields are matched by labels, placeholders, `autocomplete` attributes, and name/id hints, including inside open shadow DOM and same-origin iframes, and a toast confirms exactly which fields were filled.
 - Snapshot longer forms and refill them in one click on the next debugging run. A snapshot captures every editable field on the page — text inputs, selects, checkboxes, radios, and textareas, including open shadow DOM and same-origin iframes — while email, username, password, payment, and one-time-code fields are never captured or refilled.
 - Review a snapshot before saving: untick fields to exclude them from refill, edit or correct captured values, remove rows, and **Re-scan** the page to pick up fields the first capture missed (hand-edited values are kept). Refill matches fields by stable identity (id, name, label, placeholder, autocomplete) rather than position, and the toast reports how many fields matched.
-- Filter accounts for the current site or search across all sites.
-- Correct the detected page name once when a local app uses a generic tab title.
-- Delete an individual login from its edit screen, or delete a saved site identity and every login beneath it from **Settings → Saved sites**.
+- Filter accounts for the current site and environment, or search across all sites.
+- Delete an individual login from its edit screen, or delete a saved site and every login beneath it from **Settings → Saved sites**.
 - Keep all extension state in `chrome.storage.local` on the current Chrome profile.
-- Tint the environment chip amber on staging hosts and red on real websites as a reminder to use generated accounts only.
+- Tint the environment chip amber on staging and red on production as a reminder to use generated accounts only.
 - Optionally connect a same-origin local or explicitly configured staging project adapter. The adapter advertises safe role/scenario metadata; **Provision & fill** creates the generated identity with that application-side state, and **Reset** restores it without resending credentials.
 
 > Use generated test accounts only. Chrome extension local storage is device-local but is not a password vault for real credentials.

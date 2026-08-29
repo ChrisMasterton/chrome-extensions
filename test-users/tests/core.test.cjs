@@ -3,49 +3,95 @@ const assert = require('node:assert/strict');
 
 const Core = require('../core.js');
 
-test('derives the product name from common auth page titles', () => {
-  assert.equal(Core.derivePageName('Login — HikeStrong'), 'HikeStrong');
-  assert.equal(Core.derivePageName('HikeStrong | Sign in'), 'HikeStrong');
-  assert.equal(Core.derivePageName('Create account - AOI'), 'AOI');
+test('detects the environment from the hostname alone', () => {
+  assert.equal(Core.getEnvironment('localhost'), 'local');
+  assert.equal(Core.getEnvironment('127.0.0.1'), 'local');
+  assert.equal(Core.getEnvironment('[::1]'), 'local');
+  assert.equal(Core.getEnvironment('myapp.localhost'), 'local');
+  assert.equal(Core.getEnvironment('myapp.test'), 'local');
+  assert.equal(Core.getEnvironment('192.168.1.20'), 'local');
+  assert.equal(Core.getEnvironment('172.20.0.5'), 'local');
+
+  assert.equal(Core.getEnvironment('staging.example.com'), 'staging');
+  assert.equal(Core.getEnvironment('app-staging.example.com'), 'staging');
+  assert.equal(Core.getEnvironment('qa.example.com'), 'staging');
+  assert.equal(Core.getEnvironment('preview-42.app.dev.example.com'), 'staging');
+
+  assert.equal(Core.getEnvironment('app.example.com'), 'production');
+  assert.equal(Core.getEnvironment('example.com'), 'production');
+  // Token must sit on a boundary: "backstage" and "contestant" are not staging.
+  assert.equal(Core.getEnvironment('backstage.com'), 'production');
+  assert.equal(Core.getEnvironment('contestant.example.com'), 'production');
 });
 
-test('keeps a useful full page title when no auth wrapper is present', () => {
-  assert.equal(Core.derivePageName('Trail Planner'), 'Trail Planner');
-  assert.equal(Core.derivePageName(''), 'Untitled page');
+test('keys sites by address only, never by page title', () => {
+  const info = Core.getOriginInfo({
+    protocol: 'http:',
+    hostname: 'localhost',
+    port: '3000',
+    origin: 'http://localhost:3000',
+  });
+
+  assert.equal(info.origin, 'http://localhost:3000');
+  assert.equal(info.host, 'localhost:3000');
+  assert.equal(info.originLabel, 'localhost:3000');
+  assert.equal(info.detectedEnvironment, 'local');
+  assert.equal(Core.siteIdForHost(info.host), 'site:localhost:3000');
 });
 
-test('uses localhost, port, and page name in the site identity', () => {
-  const identity = Core.getSiteIdentity(
+test('resolves the site context with a manual environment override winning', () => {
+  const location = {
+    protocol: 'https:',
+    hostname: 'app.example.com',
+    port: '',
+    origin: 'https://app.example.com',
+  };
+
+  const fresh = Core.resolveSiteContext({ version: 2, sites: {}, origins: {}, users: [], snapshots: [] }, location);
+  assert.equal(fresh.siteId, 'site:app.example.com');
+  assert.equal(fresh.siteExists, false);
+  assert.equal(fresh.environment, 'production');
+  assert.equal(fresh.environmentIsManual, false);
+
+  const overridden = Core.resolveSiteContext(
     {
-      protocol: 'http:',
-      hostname: 'localhost',
-      port: '3000',
-      origin: 'http://localhost:3000',
+      version: 2,
+      sites: { 'site:app.example.com': { id: 'site:app.example.com', name: 'HikeStrong' } },
+      origins: { 'https://app.example.com': { siteId: 'site:app.example.com', environment: 'staging' } },
+      users: [],
+      snapshots: [],
     },
-    'Login — HikeStrong'
+    location
+  );
+  assert.equal(overridden.siteName, 'HikeStrong');
+  assert.equal(overridden.siteExists, true);
+  assert.equal(overridden.environment, 'staging');
+  assert.equal(overridden.environmentIsManual, true);
+  assert.equal(overridden.detectedEnvironment, 'production');
+});
+
+test('an origin linked to a shared site resolves to that site', () => {
+  const context = Core.resolveSiteContext(
+    {
+      version: 2,
+      sites: { 'site:localhost:3000': { id: 'site:localhost:3000', name: 'HikeStrong' } },
+      origins: {
+        'https://staging.hikestrong.com': { siteId: 'site:localhost:3000', environment: '' },
+      },
+      users: [],
+      snapshots: [],
+    },
+    {
+      protocol: 'https:',
+      hostname: 'staging.hikestrong.com',
+      port: '',
+      origin: 'https://staging.hikestrong.com',
+    }
   );
 
-  assert.equal(identity.environment, 'local');
-  assert.equal(identity.originLabel, 'localhost:3000');
-  assert.equal(identity.projectName, 'HikeStrong');
-  assert.equal(identity.siteKey, 'local:localhost:3000:hikestrong');
-});
-
-test('honors a user-provided page-name override', () => {
-  const identity = Core.getSiteIdentity(
-    {
-      protocol: 'http:',
-      hostname: 'localhost',
-      port: '5173',
-      origin: 'http://localhost:5173',
-    },
-    'Login',
-    'Actual Plan'
-  );
-
-  assert.equal(identity.pageName, 'Login');
-  assert.equal(identity.projectName, 'Actual Plan');
-  assert.equal(identity.siteKey, 'local:localhost:5173:actual-plan');
+  assert.equal(context.siteId, 'site:localhost:3000');
+  assert.equal(context.siteName, 'HikeStrong');
+  assert.equal(context.environment, 'staging');
 });
 
 test('allows only same-origin local or staging provisioning adapters', () => {
@@ -66,7 +112,7 @@ test('allows only same-origin local or staging provisioning adapters', () => {
     /must use this site origin/
   );
   assert.throws(
-    () => Core.normalizeAdapterUrl('/__test-users', 'https://app.example.com', 'web'),
+    () => Core.normalizeAdapterUrl('/__test-users', 'https://app.example.com', 'production'),
     /only on local or staging/
   );
   assert.throws(
@@ -394,18 +440,118 @@ test('describes a fill plan for the confirmation toast', () => {
 
 test('normalizes malformed stored state safely', () => {
   assert.deepEqual(Core.normalizeStoredState(null), {
+    version: 2,
+    sites: {},
+    origins: {},
     users: [],
     snapshots: [],
-    siteProfiles: {},
   });
+  assert.deepEqual(Core.normalizeStoredState({ users: 'bad', snapshots: 'bad', sites: [] }), {
+    version: 2,
+    sites: {},
+    origins: {},
+    users: [],
+    snapshots: [],
+  });
+});
+
+test('migrates v1 state, merging tab-title-fragmented sites back into one', () => {
+  const migrated = Core.normalizeStoredState({
+    users: [
+      {
+        id: 'u1',
+        name: 'Admin',
+        siteKey: 'local:localhost:3000:hikestrong',
+        siteLabel: 'HikeStrong',
+        origin: 'http://localhost:3000',
+        environment: 'local',
+      },
+      {
+        id: 'u2',
+        name: 'Member',
+        siteKey: 'local:localhost:3000:login-hikestrong',
+        siteLabel: 'Login HikeStrong',
+        origin: 'http://localhost:3000',
+        environment: 'local',
+      },
+      {
+        id: 'u3',
+        name: 'Prod checker',
+        siteKey: 'web:app.example.com:example',
+        siteLabel: 'Example',
+        origin: 'https://app.example.com',
+        environment: 'web',
+      },
+    ],
+    snapshots: [
+      {
+        id: 's1',
+        name: 'Profile form',
+        siteKey: 'local:localhost:3000:hikestrong',
+        siteLabel: 'HikeStrong',
+        origin: 'http://localhost:3000',
+        environment: 'local',
+        fields: [],
+      },
+    ],
+    siteProfiles: {
+      'http://localhost:3000': {
+        projectName: 'HikeStrong',
+        passwordSymbols: '#!',
+        adapterUrl: 'http://localhost:3000/__test-users',
+      },
+    },
+  });
+
+  assert.equal(migrated.version, 2);
+
+  // The two title-fragmented localhost entries collapse into one site.
+  const localSite = migrated.sites['site:localhost:3000'];
+  assert.equal(localSite.name, 'HikeStrong');
+  assert.equal(localSite.passwordSymbols, '!#');
   assert.deepEqual(
-    Core.normalizeStoredState({ users: 'bad', snapshots: 'bad', siteProfiles: [] }),
+    migrated.origins['http://localhost:3000'],
     {
-      users: [],
-      snapshots: [],
-      siteProfiles: {},
+      siteId: 'site:localhost:3000',
+      environment: '',
+      adapterUrl: 'http://localhost:3000/__test-users',
     }
   );
+
+  const localUsers = migrated.users.filter((user) => user.siteId === 'site:localhost:3000');
+  assert.deepEqual(localUsers.map((user) => user.id), ['u1', 'u2']);
+  assert.ok(localUsers.every((user) => user.environment === 'local'));
+  assert.ok(migrated.users.every((user) => !('siteKey' in user) && !('siteLabel' in user)));
+
+  // The old "web" environment becomes "production".
+  const prodUser = migrated.users.find((user) => user.id === 'u3');
+  assert.equal(prodUser.siteId, 'site:app.example.com');
+  assert.equal(prodUser.environment, 'production');
+  assert.equal(migrated.sites['site:app.example.com'].name, 'app.example.com');
+
+  assert.equal(migrated.snapshots[0].siteId, 'site:localhost:3000');
+  assert.equal(migrated.snapshots[0].environment, 'local');
+});
+
+test('leaves v2 state untouched and fills a missing environment from the origin', () => {
+  const v2 = {
+    version: 2,
+    sites: { 'site:localhost:3000': { id: 'site:localhost:3000', name: 'HikeStrong' } },
+    origins: { 'http://localhost:3000': { siteId: 'site:localhost:3000', environment: '' } },
+    users: [{ id: 'u1', siteId: 'site:localhost:3000', environment: 'local' }],
+    snapshots: [],
+  };
+  assert.deepEqual(Core.normalizeStoredState(v2), v2);
+
+  // A v1 record with no stored environment gets one detected from its origin.
+  const migrated = Core.normalizeStoredState({
+    users: [
+      { id: 'u1', siteKey: 'x', origin: 'https://staging.example.com' },
+      { id: 'u2', siteKey: 'y', origin: 'https://app.example.com' },
+    ],
+  });
+  assert.equal(migrated.users[0].environment, 'staging');
+  assert.equal(migrated.users[1].environment, 'production');
 });
 
 test('never snapshots credential, payment, or one-time-code fields', () => {

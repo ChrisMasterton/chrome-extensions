@@ -52,6 +52,7 @@
     open: true,
     screen: 'users',
     activeTab: 'site',
+    activeEnvironment: 'local',
     query: '',
     editingId: null,
     pendingDeleteUserId: null,
@@ -98,62 +99,59 @@
   function createDemoState() {
     if (isExtensionRuntime) return null;
 
-    const demoLocation = {
-      protocol: window.location.protocol,
-      hostname: window.location.hostname,
-      port: window.location.port,
-      origin: window.location.origin,
-    };
-    const identity = Core.getSiteIdentity(demoLocation, document.title);
+    const info = Core.getOriginInfo(window.location);
+    const siteId = Core.siteIdForHost(info.host);
+    const environment = info.detectedEnvironment;
     const now = new Date().toISOString();
+    const demoUser = (id, name, role, email, password, notes) => ({
+      id,
+      name,
+      role,
+      email,
+      password,
+      notes,
+      siteId,
+      environment,
+      origin: info.origin,
+      createdAt: now,
+      updatedAt: now,
+    });
 
     return {
+      version: 2,
+      sites: {
+        [siteId]: { id: siteId, name: 'HikeStrong demo', createdAt: now },
+      },
+      origins: {
+        [info.origin]: { siteId, environment: '' },
+      },
       users: [
-        {
-          id: 'demo-admin',
-          name: 'Alex Admin',
-          role: 'Admin',
-          email: 'alex.admin+local@example.test',
-          password: 'AdminTest!4827',
-          notes: 'Billing, team settings',
-          siteKey: identity.siteKey,
-          siteLabel: identity.projectName,
-          origin: identity.origin,
-          environment: identity.environment,
-          createdAt: now,
-          updatedAt: now,
-        },
-        {
-          id: 'demo-member',
-          name: 'Maya Member',
-          role: 'Member',
-          email: 'maya.member+local@example.test',
-          password: 'MemberTest!5938',
-          notes: 'Standard paid workspace',
-          siteKey: identity.siteKey,
-          siteLabel: identity.projectName,
-          origin: identity.origin,
-          environment: identity.environment,
-          createdAt: now,
-          updatedAt: now,
-        },
-        {
-          id: 'demo-invited',
-          name: 'Pending Invite',
-          role: 'Invited',
-          email: 'pending.invite+local@example.test',
-          password: 'InviteTest!6049',
-          notes: 'Onboarding scenario',
-          siteKey: identity.siteKey,
-          siteLabel: identity.projectName,
-          origin: identity.origin,
-          environment: identity.environment,
-          createdAt: now,
-          updatedAt: now,
-        },
+        demoUser(
+          'demo-admin',
+          'Alex Admin',
+          'Admin',
+          'alex.admin+local@example.test',
+          'AdminTest!4827',
+          'Billing, team settings'
+        ),
+        demoUser(
+          'demo-member',
+          'Maya Member',
+          'Member',
+          'maya.member+local@example.test',
+          'MemberTest!5938',
+          'Standard paid workspace'
+        ),
+        demoUser(
+          'demo-invited',
+          'Pending Invite',
+          'Invited',
+          'pending.invite+local@example.test',
+          'InviteTest!6049',
+          'Onboarding scenario'
+        ),
       ],
       snapshots: [],
-      siteProfiles: {},
     };
   }
 
@@ -176,23 +174,53 @@
   }
 
   function resolveCurrentIdentity() {
-    const origin = window.location.origin;
-    const override = storedState.siteProfiles[origin]?.projectName;
-    currentIdentity = Core.getSiteIdentity(window.location, document.title, override);
+    currentIdentity = Core.resolveSiteContext(storedState, window.location);
+  }
+
+  // Writes the site and origin records for the current address the first
+  // time anything is saved here, so data always lands under a stable id.
+  function withCurrentSiteRegistered(state) {
+    const next = {
+      ...state,
+      sites: { ...state.sites },
+      origins: { ...state.origins },
+    };
+    if (!next.sites[currentIdentity.siteId]) {
+      next.sites[currentIdentity.siteId] = {
+        id: currentIdentity.siteId,
+        name: currentIdentity.siteName,
+        createdAt: new Date().toISOString(),
+      };
+    }
+    if (!next.origins[currentIdentity.origin]) {
+      next.origins[currentIdentity.origin] = {
+        siteId: currentIdentity.siteId,
+        environment: '',
+      };
+    }
+    return next;
+  }
+
+  function siteNameFor(siteId, fallback = 'Unknown site') {
+    return storedState.sites[siteId]?.name || fallback;
+  }
+
+  function environmentLabel(environment) {
+    return Core.ENVIRONMENT_LABELS[environment] || environment;
   }
 
   function getPasswordSymbols() {
     return Core.sanitizePasswordSymbols(
-      storedState.siteProfiles[window.location.origin]?.passwordSymbols
+      storedState.sites[currentIdentity.siteId]?.passwordSymbols
     );
   }
 
-  function getCurrentSiteProfile() {
-    return storedState.siteProfiles[window.location.origin] || {};
+  function getCurrentOriginRecord() {
+    return storedState.origins[currentIdentity.origin] || {};
   }
 
   function getConfiguredAdapterUrl() {
-    return getCurrentSiteProfile().adapterUrl || '';
+    return getCurrentOriginRecord().adapterUrl || '';
   }
 
   function adapterIsReady() {
@@ -203,23 +231,30 @@
     return Boolean(
       adapterIsReady() &&
         appState.adapter.capabilities.canProvision &&
-        user?.origin === currentIdentity.origin &&
-        user?.siteKey === currentIdentity.siteKey
+        user?.origin === currentIdentity.origin
     );
+  }
+
+  function userMatchesQuery(user, query) {
+    return [user.name, user.email, user.username, user.role, user.notes, siteNameFor(user.siteId, '')]
+      .join(' ')
+      .toLowerCase()
+      .includes(query);
+  }
+
+  function getSiteUsers() {
+    return storedState.users.filter((user) => user.siteId === currentIdentity.siteId);
   }
 
   function getVisibleUsers() {
     const query = appState.query.trim().toLowerCase();
     return storedState.users.filter((user) => {
-      if (appState.activeTab === 'site' && user.siteKey !== currentIdentity.siteKey) {
-        return false;
+      if (appState.activeTab === 'site') {
+        if (user.siteId !== currentIdentity.siteId) return false;
+        if (user.environment !== appState.activeEnvironment) return false;
       }
 
-      if (!query) return true;
-      return [user.name, user.email, user.username, user.role, user.notes, user.siteLabel]
-        .join(' ')
-        .toLowerCase()
-        .includes(query);
+      return !query || userMatchesQuery(user, query);
     });
   }
 
@@ -228,12 +263,12 @@
     const currentPath = window.location.pathname;
     return storedState.snapshots
       .filter((snapshot) => {
-        if (appState.activeTab === 'site' && snapshot.siteKey !== currentIdentity.siteKey) {
+        if (appState.activeTab === 'site' && snapshot.siteId !== currentIdentity.siteId) {
           return false;
         }
 
         if (!query) return true;
-        return [snapshot.name, snapshot.path, snapshot.siteLabel]
+        return [snapshot.name, snapshot.path, siteNameFor(snapshot.siteId, '')]
           .join(' ')
           .toLowerCase()
           .includes(query);
@@ -244,83 +279,54 @@
       );
   }
 
-  function identityFromSavedProfile(origin, profile) {
-    try {
-      const url = new URL(origin);
-      return Core.getSiteIdentity(url, profile?.projectName, profile?.projectName);
-    } catch {
-      return null;
-    }
-  }
-
   function getSavedSites() {
     const sites = new Map();
+    const ensureEntry = (siteId, fallbackName) => {
+      if (!sites.has(siteId)) {
+        sites.set(siteId, {
+          siteId,
+          name: siteNameFor(siteId, fallbackName),
+          hosts: new Set(),
+          loginCount: 0,
+          snapshotCount: 0,
+          environmentCounts: { local: 0, staging: 0, production: 0 },
+        });
+      }
+      return sites.get(siteId);
+    };
 
+    Object.values(storedState.sites).forEach((site) => {
+      if (site?.id) ensureEntry(site.id, site.name);
+    });
+    Object.entries(storedState.origins).forEach(([origin, record]) => {
+      if (!record?.siteId) return;
+      ensureEntry(record.siteId, Core.hostFromOrigin(origin)).hosts.add(
+        Core.hostFromOrigin(origin)
+      );
+    });
     storedState.users.forEach((user) => {
-      if (!user.siteKey) return;
-      const existing = sites.get(user.siteKey);
-      let originLabel = user.origin;
-      try {
-        originLabel = new URL(user.origin).host;
-      } catch {
-        // Preserve the stored origin when older data is not a valid URL.
+      if (!user.siteId) return;
+      const entry = ensureEntry(user.siteId, Core.hostFromOrigin(user.origin));
+      entry.loginCount += 1;
+      if (entry.environmentCounts[user.environment] !== undefined) {
+        entry.environmentCounts[user.environment] += 1;
       }
-
-      sites.set(user.siteKey, {
-        siteKey: user.siteKey,
-        projectName: user.siteLabel || 'Untitled site',
-        origin: user.origin,
-        originLabel,
-        environment: user.environment || 'web',
-        loginCount: (existing?.loginCount || 0) + 1,
-        snapshotCount: existing?.snapshotCount || 0,
-      });
+      if (user.origin) entry.hosts.add(Core.hostFromOrigin(user.origin));
     });
-
     storedState.snapshots.forEach((snapshot) => {
-      if (!snapshot.siteKey) return;
-      const existing = sites.get(snapshot.siteKey);
-      let originLabel = snapshot.origin;
-      try {
-        originLabel = new URL(snapshot.origin).host;
-      } catch {
-        // Preserve the stored origin when older data is not a valid URL.
-      }
+      if (!snapshot.siteId) return;
+      const entry = ensureEntry(snapshot.siteId, Core.hostFromOrigin(snapshot.origin));
+      entry.snapshotCount += 1;
+      if (snapshot.origin) entry.hosts.add(Core.hostFromOrigin(snapshot.origin));
+    });
 
-      sites.set(snapshot.siteKey, {
-        siteKey: snapshot.siteKey,
-        projectName: existing?.projectName || snapshot.siteLabel || 'Untitled site',
-        origin: existing?.origin || snapshot.origin,
-        originLabel: existing?.originLabel || originLabel,
-        environment: existing?.environment || snapshot.environment || 'web',
-        loginCount: existing?.loginCount || 0,
-        snapshotCount: (existing?.snapshotCount || 0) + 1,
+    return [...sites.values()]
+      .map((entry) => ({ ...entry, hosts: [...entry.hosts].sort() }))
+      .sort((left, right) => {
+        if (left.siteId === currentIdentity.siteId) return -1;
+        if (right.siteId === currentIdentity.siteId) return 1;
+        return left.name.localeCompare(right.name);
       });
-    });
-
-    Object.entries(storedState.siteProfiles).forEach(([origin, profile]) => {
-      // Profiles holding only preferences (e.g. password symbols) are not
-      // named site identities and should not appear as saved sites.
-      if (!profile?.projectName) return;
-      const identity = identityFromSavedProfile(origin, profile);
-      if (!identity) return;
-      const existing = sites.get(identity.siteKey);
-      sites.set(identity.siteKey, {
-        siteKey: identity.siteKey,
-        projectName: identity.projectName,
-        origin: identity.origin,
-        originLabel: identity.originLabel,
-        environment: identity.environment,
-        loginCount: existing?.loginCount || 0,
-        snapshotCount: existing?.snapshotCount || 0,
-      });
-    });
-
-    return [...sites.values()].sort((left, right) => {
-      if (left.siteKey === currentIdentity.siteKey) return -1;
-      if (right.siteKey === currentIdentity.siteKey) return 1;
-      return left.projectName.localeCompare(right.projectName);
-    });
   }
 
   function roleClass(role) {
@@ -363,15 +369,18 @@
 
   const ENVIRONMENT_TITLES = {
     local: 'Local development site',
-    staging: 'Looks like a staging site — use generated test accounts only',
-    web: 'Real website — use generated test accounts only',
+    staging: 'Staging site — use generated test accounts only',
+    production: 'Production site — use generated test accounts only',
   };
 
-  function renderHeader() {
-    const environmentLabel = currentIdentity.isLocal
-      ? 'LOCAL'
-      : currentIdentity.environment.toUpperCase();
+  function environmentChipTitle() {
+    const base = ENVIRONMENT_TITLES[currentIdentity.environment] || '';
+    return currentIdentity.environmentIsManual
+      ? `${base} (set manually in settings)`
+      : `${base} (detected from the address)`;
+  }
 
+  function renderHeader() {
     return `
       <header class="tu-header">
         <div class="tu-heading-row">
@@ -380,18 +389,18 @@
             ${icon('x')}
           </button>
         </div>
-        <button class="tu-site-identity" data-action="settings" title="Edit how this site is identified">
+        <button class="tu-site-identity" data-action="settings" title="Site & environment settings">
           <span class="tu-site-badge" aria-hidden="true">${escapeHtml(
-            initials(currentIdentity.projectName)
+            initials(currentIdentity.siteName)
           )}</span>
           <span class="tu-site-identity-copy">
             <span class="tu-site-identity-name">
-              <strong>${escapeHtml(currentIdentity.projectName)}</strong>
+              <strong>${escapeHtml(currentIdentity.siteName)}</strong>
               <span class="tu-environment tu-environment--${escapeAttribute(
                 currentIdentity.environment
-              )}" title="${escapeAttribute(
-                ENVIRONMENT_TITLES[currentIdentity.environment] || ''
-              )}">${escapeHtml(environmentLabel)}</span>
+              )}" title="${escapeAttribute(environmentChipTitle())}">${escapeHtml(
+                currentIdentity.environment.toUpperCase()
+              )}</span>
             </span>
             <span class="tu-site-origin">${escapeHtml(currentIdentity.originLabel)}</span>
           </span>
@@ -401,11 +410,40 @@
     `;
   }
 
+  function renderEnvironmentSwitch() {
+    if (appState.activeTab !== 'site') return '';
+
+    const siteUsers = getSiteUsers();
+    const segments = Core.ENVIRONMENTS.map((environment) => {
+      const count = siteUsers.filter((user) => user.environment === environment).length;
+      const isActive = appState.activeEnvironment === environment;
+      const isDetected = currentIdentity.environment === environment;
+      const title = isDetected
+        ? `${environmentLabel(environment)} — matches this address`
+        : environmentLabel(environment);
+      return `
+        <button class="tu-env-segment ${isActive ? 'is-active' : ''} tu-env-segment--${escapeAttribute(
+          environment
+        )}" data-env="${escapeAttribute(environment)}" role="tab" aria-selected="${isActive}" title="${escapeAttribute(
+          title
+        )}">
+          <span>${escapeHtml(environmentLabel(environment))}</span>
+          <span class="tu-env-count">${count}</span>
+          ${isDetected ? '<span class="tu-env-dot" aria-label="Detected environment for this address"></span>' : ''}
+        </button>
+      `;
+    }).join('');
+
+    return `
+      <div class="tu-env-switch" role="tablist" aria-label="Environment">
+        ${segments}
+      </div>
+    `;
+  }
+
   function renderUsersScreen() {
     const users = getVisibleUsers();
-    const siteCount = storedState.users.filter(
-      (user) => user.siteKey === currentIdentity.siteKey
-    ).length;
+    const siteCount = getSiteUsers().length;
     const allCount = storedState.users.length;
     const userCards = users.length
       ? users.map(renderUserCard).join('')
@@ -414,9 +452,9 @@
     return `
       <div class="tu-tabs" role="tablist" aria-label="User scope">
         <button class="tu-tab ${appState.activeTab === 'site' ? 'is-active' : ''}" data-tab="site" role="tab" aria-selected="${appState.activeTab === 'site'}" title="Test users saved for ${escapeAttribute(
-          currentIdentity.projectName
+          currentIdentity.siteName
         )}">
-          <span class="tu-tab-label">${escapeHtml(currentIdentity.projectName)}</span>
+          <span class="tu-tab-label">${escapeHtml(currentIdentity.siteName)}</span>
           <span class="tu-tab-count">${siteCount}</span>
         </button>
         <button class="tu-tab ${appState.activeTab === 'all' ? 'is-active' : ''}" data-tab="all" role="tab" aria-selected="${appState.activeTab === 'all'}">
@@ -424,6 +462,7 @@
           <span class="tu-tab-count">${allCount}</span>
         </button>
       </div>
+      ${renderEnvironmentSwitch()}
       <div class="tu-search-bar">
         <label class="tu-search">
           ${icon('search')}
@@ -482,7 +521,7 @@
       snapshot.path || '/',
       `${includedCount} ${includedCount === 1 ? 'field' : 'fields'}`,
     ];
-    if (appState.activeTab === 'all' && snapshot.siteLabel) details.push(snapshot.siteLabel);
+    if (appState.activeTab === 'all') details.push(siteNameFor(snapshot.siteId, ''));
 
     return `
       <article class="tu-snapshot-card" data-snapshot-id="${escapeAttribute(snapshot.id)}">
@@ -567,7 +606,13 @@
           ${user.scenarioLabel ? `<div class="tu-scenario">${escapeHtml(user.scenarioLabel)}</div>` : ''}
           <div class="tu-notes">${escapeHtml(user.notes || 'No notes yet')}</div>
           ${renderProvisioningBadge(user)}
-          ${showProject ? `<div class="tu-project-label">${escapeHtml(user.siteLabel)}</div>` : ''}
+          ${
+            showProject
+              ? `<div class="tu-project-label">${escapeHtml(
+                  siteNameFor(user.siteId, Core.hostFromOrigin(user.origin))
+                )} · ${escapeHtml(environmentLabel(user.environment))}</div>`
+              : ''
+          }
         </div>
         <div class="tu-card-actions">
           <div class="tu-card-icon-actions">
@@ -608,15 +653,32 @@
 
     const totalUsers = storedState.users.length;
     const onSiteTab = appState.activeTab === 'site';
+    const siteUsers = getSiteUsers();
+    const otherEnvironmentCounts = Core.ENVIRONMENTS.filter(
+      (environment) => environment !== appState.activeEnvironment
+    )
+      .map((environment) => ({
+        environment,
+        count: siteUsers.filter((user) => user.environment === environment).length,
+      }))
+      .filter((entry) => entry.count);
+
     const heading = onSiteTab
-      ? `No test users for ${escapeHtml(currentIdentity.projectName)} yet`
+      ? `No ${escapeHtml(environmentLabel(appState.activeEnvironment).toLowerCase())} test users for ${escapeHtml(
+          currentIdentity.siteName
+        )} yet`
       : 'No test users yet';
-    const body =
-      onSiteTab && totalUsers
-        ? `Your ${totalUsers} saved ${
-            totalUsers === 1 ? 'login belongs' : 'logins belong'
-          } to other sites. Create one here, or browse everything you have saved.`
-        : 'Generate credentials and fill the current login or sign-up form in one step.';
+    let body = 'Generate credentials and fill the current login or sign-up form in one step.';
+    if (onSiteTab && otherEnvironmentCounts.length) {
+      const summary = otherEnvironmentCounts
+        .map((entry) => `${entry.count} ${environmentLabel(entry.environment).toLowerCase()}`)
+        .join(' · ');
+      body = `This site has ${summary} — switch environment above, or create one here.`;
+    } else if (onSiteTab && totalUsers) {
+      body = `Your ${totalUsers} saved ${
+        totalUsers === 1 ? 'login belongs' : 'logins belong'
+      } to other sites. Create one here, or browse everything you have saved.`;
+    }
 
     return `
       <div class="tu-empty-state">
@@ -679,7 +741,7 @@
     const generated =
       existingUser ||
       Core.buildGeneratedIdentity(
-        currentIdentity.projectName,
+        currentIdentity.siteName,
         roleOptions.find((role) => role.label === 'Member')?.label || roleOptions[0]?.label || 'Member',
         undefined,
         passwordSymbols
@@ -688,6 +750,8 @@
     const selectedRoleId = existingUser?.roleId ||
       roleOptions.find((role) => role.label === generated.role)?.id ||
       roleOptions[0]?.id;
+    const selectedEnvironment =
+      Core.normalizeEnvironment(existingUser?.environment) || appState.activeEnvironment;
 
     return `
       <main class="tu-content tu-editor">
@@ -695,8 +759,8 @@
         <div class="tu-section-heading">
           <div>
             <h2>${title}</h2>
-            <p>${escapeHtml(currentIdentity.projectName)} · ${escapeHtml(
-              currentIdentity.environment
+            <p>${escapeHtml(currentIdentity.siteName)} · ${escapeHtml(
+              environmentLabel(selectedEnvironment)
             )}</p>
           </div>
           <button class="tu-secondary-button tu-regenerate" data-action="regenerate" title="Replace name, email, and password with fresh values">${icon(
@@ -707,6 +771,17 @@
           <label>
             <span>Name</span>
             <input name="name" autocomplete="off" value="${escapeAttribute(generated.name)}" required>
+          </label>
+          <label>
+            <span>Environment</span>
+            <select name="environment">
+              ${Core.ENVIRONMENTS.map(
+                (environment) =>
+                  `<option value="${escapeAttribute(environment)}" ${
+                    selectedEnvironment === environment ? 'selected' : ''
+                  }>${escapeHtml(environmentLabel(environment))}</option>`
+              ).join('')}
+            </select>
           </label>
           <label>
             <span>Role</span>
@@ -1029,30 +1104,60 @@
 
   function renderSettingsScreen() {
     const adapterUrl = getConfiguredAdapterUrl();
-    const adapterBlocked = currentIdentity.environment === 'web';
+    const adapterBlocked = currentIdentity.environment === 'production';
+    const originRecord = getCurrentOriginRecord();
+    const environmentOverride = Core.normalizeEnvironment(originRecord.environment);
+    const otherSites = getSavedSites().filter((site) => site.siteId !== currentIdentity.siteId);
+
     return `
       <main class="tu-content tu-settings">
         <button class="tu-back-button" data-action="back">${icon('arrow-left')}<span>Back to users</span></button>
         <div class="tu-section-heading">
           <div>
-            <h2>Site identity</h2>
-            <p>Test accounts are grouped by address and page name.</p>
+            <h2>This address</h2>
+            <p>${escapeHtml(currentIdentity.originLabel)} — accounts are grouped by address and environment.</p>
           </div>
         </div>
         <form class="tu-form" data-form="settings">
           <label class="tu-form-wide">
-            <span>Page name</span>
-            <input name="projectName" value="${escapeAttribute(
-              currentIdentity.projectName
-            )}" required>
-            <small>Detected from the browser tab title. You can correct it once for this address.</small>
+            <span>Site name</span>
+            <input name="siteName" value="${escapeAttribute(currentIdentity.siteName)}" required>
+            <small>A display name for this site — it never affects how accounts are matched.</small>
           </label>
-          <div class="tu-identity-preview tu-form-wide">
-            <span>Stored site identifier</span>
-            <strong>${escapeHtml(currentIdentity.originLabel)} + ${escapeHtml(
-              currentIdentity.projectName
-            )}</strong>
-          </div>
+          <label class="tu-form-wide">
+            <span>Environment for this address</span>
+            <select name="environment">
+              <option value="" ${environmentOverride ? '' : 'selected'}>Auto — detected as ${escapeHtml(
+                environmentLabel(currentIdentity.detectedEnvironment)
+              )}</option>
+              ${Core.ENVIRONMENTS.map(
+                (environment) =>
+                  `<option value="${escapeAttribute(environment)}" ${
+                    environmentOverride === environment ? 'selected' : ''
+                  }>${escapeHtml(environmentLabel(environment))}</option>`
+              ).join('')}
+            </select>
+            <small>Auto means: localhost is local, a staging-looking address is staging, everything else is production.</small>
+          </label>
+          ${
+            otherSites.length
+              ? `<label class="tu-form-wide">
+                  <span>This address belongs to</span>
+                  <select name="linkedSiteId">
+                    <option value="" selected>${escapeHtml(currentIdentity.siteName)} (this site)</option>
+                    ${otherSites
+                      .map(
+                        (site) =>
+                          `<option value="${escapeAttribute(site.siteId)}">${escapeHtml(
+                            site.name
+                          )}${site.hosts.length ? ` — ${escapeHtml(site.hosts.join(', '))}` : ''}</option>`
+                      )
+                      .join('')}
+                  </select>
+                  <small>Pick another site to link this address to it — e.g. link localhost and staging to the same project. Logins saved on this address move with it.</small>
+                </label>`
+              : ''
+          }
           <label class="tu-form-wide">
             <span>Provisioning adapter</span>
             <input name="adapterUrl" type="text" inputmode="url" value="${escapeAttribute(adapterUrl)}" placeholder="/__test-users" ${
@@ -1060,16 +1165,16 @@
             }>
             <small>${
               adapterBlocked
-                ? 'Provisioning is blocked on ordinary web origins.'
+                ? 'Provisioning is blocked on production addresses.'
                 : 'Optional same-origin endpoint for roles and scenarios. It must never return names, usernames, emails, or passwords.'
             }</small>
           </label>
           ${renderAdapterConnectionStatus()}
           <div class="tu-form-actions tu-form-wide">
-            <button class="tu-secondary-button" type="button" data-action="reset-page-name">Use detected title</button>
+            <span></span>
             <button class="tu-primary-button" type="submit">${icon(
               'device-floppy'
-            )}<span>Save site</span></button>
+            )}<span>Save</span></button>
           </div>
         </form>
         ${renderSavedSitesSection()}
@@ -1101,7 +1206,7 @@
       <section class="tu-manage-sites" aria-labelledby="tu-saved-sites-heading">
         <div class="tu-manage-sites-heading">
           <h3 id="tu-saved-sites-heading">Saved sites</h3>
-          <p>Remove an identity and every test login stored beneath it.</p>
+          <p>Remove a site and every test login stored beneath it.</p>
         </div>
         <div class="tu-saved-site-list">
           ${savedSites.map(renderSavedSite).join('')}
@@ -1110,26 +1215,45 @@
     `;
   }
 
-  function renderSavedSite(site) {
-    const pending = appState.pendingDeleteSiteKey === site.siteKey;
-    let loginLabel = `${site.loginCount} ${site.loginCount === 1 ? 'login' : 'logins'}`;
+  function describeSavedSiteCounts(site) {
+    const environmentParts = Core.ENVIRONMENTS.filter(
+      (environment) => site.environmentCounts[environment]
+    ).map(
+      (environment) =>
+        `${site.environmentCounts[environment]} ${environmentLabel(environment).toLowerCase()}`
+    );
+    let label = environmentParts.length
+      ? environmentParts.join(' · ')
+      : `${site.loginCount} ${site.loginCount === 1 ? 'login' : 'logins'}`;
     if (site.snapshotCount) {
-      loginLabel += ` · ${site.snapshotCount} ${site.snapshotCount === 1 ? 'snapshot' : 'snapshots'}`;
+      label += ` · ${site.snapshotCount} ${site.snapshotCount === 1 ? 'snapshot' : 'snapshots'}`;
     }
+    return label;
+  }
+
+  function renderSavedSite(site) {
+    const pending = appState.pendingDeleteSiteKey === site.siteId;
+    const countLabel = describeSavedSiteCounts(site);
+    const hostLabel = site.hosts.join(', ') || 'No addresses linked yet';
 
     if (pending) {
+      const loginLabel = `${site.loginCount} ${site.loginCount === 1 ? 'login' : 'logins'}`;
       return `
         <article class="tu-saved-site tu-saved-site--confirming" data-site-key="${escapeAttribute(
-          site.siteKey
+          site.siteId
         )}">
           <div class="tu-site-delete-copy">
-            <strong>Delete ${escapeHtml(site.projectName)}?</strong>
-            <p>This removes the site identity and ${escapeHtml(loginLabel)}. Other projects are unaffected.</p>
+            <strong>Delete ${escapeHtml(site.name)}?</strong>
+            <p>This removes the site and ${escapeHtml(loginLabel)}${
+              site.snapshotCount
+                ? ` and ${site.snapshotCount} ${site.snapshotCount === 1 ? 'snapshot' : 'snapshots'}`
+                : ''
+            }. Other sites are unaffected.</p>
           </div>
           <div class="tu-site-confirm-actions">
             <button class="tu-secondary-button" type="button" data-action="cancel-delete-site">Cancel</button>
             <button class="tu-danger-button" type="button" data-action="confirm-delete-site" data-site-key="${escapeAttribute(
-              site.siteKey
+              site.siteId
             )}">${icon('trash')}<span>Delete site</span></button>
           </div>
         </article>
@@ -1137,14 +1261,14 @@
     }
 
     return `
-      <article class="tu-saved-site" data-site-key="${escapeAttribute(site.siteKey)}">
+      <article class="tu-saved-site" data-site-key="${escapeAttribute(site.siteId)}">
         <div class="tu-saved-site-copy">
-          <strong>${escapeHtml(site.projectName)}</strong>
-          <span>${escapeHtml(site.originLabel)} · ${escapeHtml(loginLabel)}</span>
+          <strong>${escapeHtml(site.name)}</strong>
+          <span>${escapeHtml(hostLabel)} · ${escapeHtml(countLabel)}</span>
         </div>
         <button class="tu-site-delete-button" type="button" data-action="delete-site" data-site-key="${escapeAttribute(
-          site.siteKey
-        )}" aria-label="Delete ${escapeAttribute(site.projectName)} site">${icon(
+          site.siteId
+        )}" aria-label="Delete ${escapeAttribute(site.name)} site">${icon(
           'trash'
         )}<span>Delete site</span></button>
       </article>
@@ -1192,6 +1316,13 @@
     shadow.querySelectorAll('[data-tab]').forEach((element) => {
       element.addEventListener('click', () => {
         appState.activeTab = element.dataset.tab;
+        render();
+      });
+    });
+
+    shadow.querySelectorAll('[data-env]').forEach((element) => {
+      element.addEventListener('click', () => {
+        appState.activeEnvironment = element.dataset.env;
         render();
       });
     });
@@ -1438,11 +1569,6 @@
       await deleteSnapshot(snapshotId);
       return;
     }
-
-    if (action === 'reset-page-name') {
-      const input = shadow.querySelector('[name="projectName"]');
-      if (input) input.value = currentIdentity.pageName;
-    }
   }
 
   function findDraftField(fieldId) {
@@ -1454,7 +1580,7 @@
     if (!form) return;
     const role = form.elements.role.selectedOptions[0]?.dataset.label || form.elements.role.value;
     const generated = Core.buildGeneratedIdentity(
-      currentIdentity.projectName,
+      currentIdentity.siteName,
       role,
       undefined,
       getPasswordSymbols()
@@ -1473,16 +1599,13 @@
       .filter((input) => input.checked)
       .map((input) => input.dataset.symbol)
       .join('');
-    const origin = window.location.origin;
-    const siteProfiles = {
-      ...storedState.siteProfiles,
-      [origin]: {
-        ...storedState.siteProfiles[origin],
-        passwordSymbols: symbols,
-        updatedAt: new Date().toISOString(),
-      },
+    const next = withCurrentSiteRegistered(storedState);
+    next.sites[currentIdentity.siteId] = {
+      ...next.sites[currentIdentity.siteId],
+      passwordSymbols: symbols,
+      updatedAt: new Date().toISOString(),
     };
-    await writeStoredState({ ...storedState, siteProfiles });
+    await writeStoredState(next);
 
     const passwordInput = shadow.querySelector('[data-form="user"] [name="password"]');
     if (passwordInput) passwordInput.value = Core.generatePassword(undefined, symbols);
@@ -1525,6 +1648,8 @@
       ? Core.normalizeWhitespace(selectedScenario?.dataset.label || selectedScenario?.textContent || scenarioId)
       : '';
     const now = new Date().toISOString();
+    const environment =
+      Core.normalizeEnvironment(data.get('environment')) || appState.activeEnvironment;
     let user = {
       ...existing,
       id: existing?.id || createId(),
@@ -1537,10 +1662,9 @@
       username: Core.normalizeWhitespace(data.get('username')),
       password: String(data.get('password') || ''),
       notes: Core.normalizeWhitespace(data.get('notes')),
-      siteKey: currentIdentity.siteKey,
-      siteLabel: currentIdentity.projectName,
-      origin: currentIdentity.origin,
-      environment: currentIdentity.environment,
+      siteId: existing?.siteId || currentIdentity.siteId,
+      environment,
+      origin: existing?.origin || currentIdentity.origin,
       createdAt: existing?.createdAt || now,
       updatedAt: now,
     };
@@ -1566,9 +1690,13 @@
       ? storedState.users.map((candidate) => (candidate.id === existing.id ? user : candidate))
       : [user, ...storedState.users];
 
-    await writeStoredState({ ...storedState, users });
+    await writeStoredState({ ...withCurrentSiteRegistered(storedState), users });
     appState.screen = 'users';
     appState.editingId = null;
+    // Land on the environment the user was just saved to, so it is visible.
+    if (user.siteId === currentIdentity.siteId) {
+      appState.activeEnvironment = user.environment;
+    }
     render();
     showToast(existing ? 'Test user updated' : 'Test user saved');
     return user;
@@ -1589,22 +1717,22 @@
     showToast('Test user deleted');
   }
 
-  async function deleteSite(siteKey) {
-    const site = getSavedSites().find((candidate) => candidate.siteKey === siteKey);
+  async function deleteSite(siteId) {
+    const site = getSavedSites().find((candidate) => candidate.siteId === siteId);
     if (!site) return;
 
-    const users = storedState.users.filter((user) => user.siteKey !== siteKey);
-    const snapshots = storedState.snapshots.filter((snapshot) => snapshot.siteKey !== siteKey);
-    const siteProfiles = Object.fromEntries(
-      Object.entries(storedState.siteProfiles).filter(([origin, profile]) => {
-        const identity = identityFromSavedProfile(origin, profile);
-        return identity?.siteKey !== siteKey;
-      })
+    const users = storedState.users.filter((user) => user.siteId !== siteId);
+    const snapshots = storedState.snapshots.filter((snapshot) => snapshot.siteId !== siteId);
+    const sites = Object.fromEntries(
+      Object.entries(storedState.sites).filter(([id]) => id !== siteId)
+    );
+    const origins = Object.fromEntries(
+      Object.entries(storedState.origins).filter(([, record]) => record?.siteId !== siteId)
     );
     const removedLoginCount = storedState.users.length - users.length;
     const removedSnapshotCount = storedState.snapshots.length - snapshots.length;
 
-    await writeStoredState({ users, snapshots, siteProfiles });
+    await writeStoredState({ version: 2, sites, origins, users, snapshots });
     appState.pendingDeleteSiteKey = null;
     resolveCurrentIdentity();
     render();
@@ -1614,70 +1742,87 @@
         removedSnapshotCount === 1 ? 'snapshot' : 'snapshots'
       }`;
     }
-    showToast(`Deleted ${site.projectName} and ${removedLabel}`);
+    showToast(`Deleted ${site.name} and ${removedLabel}`);
   }
 
   async function saveSettingsFromForm(event) {
     event.preventDefault();
     const form = event.currentTarget;
+    const data = new FormData(form);
+    const environmentOverride = Core.normalizeEnvironment(data.get('environment'));
+    const effectiveEnvironment = environmentOverride || currentIdentity.detectedEnvironment;
+
     const adapterInput = form.elements.adapterUrl;
     let adapterUrl = '';
     try {
-      adapterUrl = Core.normalizeAdapterUrl(
-        adapterInput?.value || '',
-        currentIdentity.origin,
-        currentIdentity.environment
-      );
+      adapterUrl = adapterInput?.disabled
+        ? getConfiguredAdapterUrl()
+        : Core.normalizeAdapterUrl(
+            adapterInput?.value || '',
+            currentIdentity.origin,
+            effectiveEnvironment
+          );
       adapterInput?.setCustomValidity('');
     } catch (error) {
       adapterInput?.setCustomValidity(error?.message || 'Invalid provisioning adapter');
     }
     if (!form.reportValidity()) return;
 
-    const previousIdentity = currentIdentity;
-    const projectName = Core.normalizeWhitespace(new FormData(form).get('projectName'));
+    const origin = currentIdentity.origin;
+    const previousSiteId = currentIdentity.siteId;
     const previousAdapterUrl = getConfiguredAdapterUrl();
-    const siteProfiles = {
-      ...storedState.siteProfiles,
-      [previousIdentity.origin]: {
-        ...storedState.siteProfiles[previousIdentity.origin],
-        projectName,
-        adapterUrl,
-        updatedAt: new Date().toISOString(),
-      },
+    const linkedSiteId = Core.normalizeWhitespace(data.get('linkedSiteId'));
+    const siteName = Core.normalizeWhitespace(data.get('siteName'));
+    const now = new Date().toISOString();
+
+    const next = withCurrentSiteRegistered(storedState);
+    const targetSiteId = linkedSiteId && next.sites[linkedSiteId] ? linkedSiteId : previousSiteId;
+
+    next.origins[origin] = {
+      ...next.origins[origin],
+      siteId: targetSiteId,
+      environment: environmentOverride,
+      adapterUrl,
+      updatedAt: now,
     };
-    const nextIdentity = Core.getSiteIdentity(window.location, document.title, projectName);
-    const users = storedState.users.map((user) => {
-      if (user.origin !== previousIdentity.origin) return user;
+    if (siteName) {
+      next.sites[targetSiteId] = { ...next.sites[targetSiteId], name: siteName, updatedAt: now };
+    }
+
+    // Logins and snapshots created on this address follow it to its site, and
+    // an adapter change means previously provisioned accounts need redoing.
+    next.users = next.users.map((user) => {
+      if (user.origin !== origin) return user;
       const provisioning =
         user.provisioning && previousAdapterUrl !== adapterUrl
           ? { ...user.provisioning, status: 'stale', error: '' }
           : user.provisioning;
-      return {
-        ...user,
-        siteKey: nextIdentity.siteKey,
-        siteLabel: nextIdentity.projectName,
-        provisioning,
-        updatedAt: new Date().toISOString(),
-      };
+      if (user.siteId === targetSiteId && provisioning === user.provisioning) return user;
+      return { ...user, siteId: targetSiteId, provisioning, updatedAt: now };
     });
-    const snapshots = storedState.snapshots.map((snapshot) =>
-      snapshot.origin === previousIdentity.origin
-        ? {
-            ...snapshot,
-            siteKey: nextIdentity.siteKey,
-            siteLabel: nextIdentity.projectName,
-            updatedAt: new Date().toISOString(),
-          }
+    next.snapshots = next.snapshots.map((snapshot) =>
+      snapshot.origin === origin && snapshot.siteId !== targetSiteId
+        ? { ...snapshot, siteId: targetSiteId, updatedAt: now }
         : snapshot
     );
 
-    await writeStoredState({ ...storedState, users, snapshots, siteProfiles });
+    // A site left with nothing pointing at it disappears rather than
+    // lingering as an empty row under Saved sites.
+    if (targetSiteId !== previousSiteId) {
+      const previousSiteInUse =
+        Object.values(next.origins).some((record) => record?.siteId === previousSiteId) ||
+        next.users.some((user) => user.siteId === previousSiteId) ||
+        next.snapshots.some((snapshot) => snapshot.siteId === previousSiteId);
+      if (!previousSiteInUse) delete next.sites[previousSiteId];
+    }
+
+    await writeStoredState(next);
     resolveCurrentIdentity();
+    appState.activeEnvironment = currentIdentity.environment;
     appState.adapter = { status: adapterUrl ? 'loading' : 'disabled', capabilities: null, error: '' };
     appState.screen = 'users';
     render();
-    showToast(adapterUrl ? 'Site saved · checking provisioning adapter' : 'Site saved');
+    showToast(adapterUrl ? 'Saved · checking provisioning adapter' : 'Saved');
     if (adapterUrl) await loadAdapterCapabilities();
   }
 
@@ -1899,8 +2044,7 @@
       name: Core.normalizeWhitespace(form.elements.snapshotName.value) || 'Form snapshot',
       path: draft.path || existing?.path || window.location.pathname,
       fields: draft.fields,
-      siteKey: existing?.siteKey || currentIdentity.siteKey,
-      siteLabel: existing?.siteLabel || currentIdentity.projectName,
+      siteId: existing?.siteId || currentIdentity.siteId,
       origin: existing?.origin || currentIdentity.origin,
       environment: existing?.environment || currentIdentity.environment,
       createdAt: existing?.createdAt || now,
@@ -1913,7 +2057,7 @@
         )
       : [snapshot, ...storedState.snapshots];
 
-    await writeStoredState({ ...storedState, snapshots });
+    await writeStoredState({ ...withCurrentSiteRegistered(storedState), snapshots });
     appState.screen = 'users';
     appState.snapshotDraft = null;
     appState.pendingDeleteSnapshotId = null;
@@ -2244,6 +2388,7 @@
   (async () => {
     storedState = await readStoredState();
     resolveCurrentIdentity();
+    appState.activeEnvironment = currentIdentity.environment;
     render();
     if (getConfiguredAdapterUrl()) await loadAdapterCapabilities();
 

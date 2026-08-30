@@ -11,6 +11,11 @@
   const CONTROL_SOURCE = 'vibe-digger-control';
   const MAX_VISIBLE_FLASHES = 80;
   const PANEL_VIEWPORT_MARGIN = 8;
+  const COPY_ICON = `
+    <svg viewBox="0 0 16 16" aria-hidden="true">
+      <rect x="5.5" y="5.5" width="7" height="7" rx="1"></rect>
+      <path d="M3.5 10.5h-1v-7a1 1 0 0 1 1-1h7v1"></path>
+    </svg>`;
 
   const ui = {
     host: null,
@@ -93,6 +98,15 @@
     .vd-btn.active { background: #7c3aed; border-color: #8b5cf6; color: #fff; }
     .vd-btn.ghost { border-color: transparent; background: transparent; color: #a5a0c8; }
     .vd-btn.ghost:hover { color: #fff; background: #262149; }
+    .vd-view-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+    .vd-icon-btn {
+      appearance: none; flex: none; display: inline-flex; align-items: center; justify-content: center;
+      width: 22px; height: 22px; padding: 3px; border: 1px solid transparent;
+      border-radius: 6px; background: transparent; color: #8d87b8; cursor: pointer;
+    }
+    .vd-icon-btn:hover { color: #fff; border-color: #4c4585; background: #262149; }
+    .vd-icon-btn.copied { color: #34d399; }
+    .vd-icon-btn svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.4; }
     .vd-badge {
       display: inline-block; min-width: 16px; padding: 0 4px; margin-left: 4px;
       background: #dc2626; color: #fff; border-radius: 8px; font-size: 10px;
@@ -199,6 +213,27 @@
     el.innerHTML = label;
     el.addEventListener('click', onClick);
     return el;
+  }
+
+  function copyIconButton(textFactory, label) {
+    const control = button(
+      COPY_ICON,
+      async (event) => {
+        event.stopPropagation();
+        const text = typeof textFactory === 'function' ? textFactory() : textFactory;
+        if (!text || !(await writeClipboardText(text))) return;
+        control.classList.add('copied');
+        control.textContent = '✓';
+        setTimeout(() => {
+          control.classList.remove('copied');
+          control.innerHTML = COPY_ICON;
+        }, 1200);
+      },
+      'vd-icon-btn'
+    );
+    control.title = label;
+    control.setAttribute('aria-label', label);
+    return control;
   }
 
   let panelDrag = null;
@@ -477,7 +512,10 @@
       model.pinned = null;
       renderBody();
     }, 'vd-btn ghost');
-    ui.body.appendChild(back);
+    const actions = document.createElement('div');
+    actions.className = 'vd-view-actions';
+    actions.append(back, copyIconButton(() => buildInspectViewCopy(), 'Copy Inspect view'));
+    ui.body.appendChild(actions);
 
     if (!pinned.react) {
       const note = document.createElement('div');
@@ -543,9 +581,11 @@
       return;
     }
 
+    const actions = document.createElement('div');
+    actions.className = 'vd-view-actions';
     const clear = button('Clear all', () => sendControl('clear-issues'), 'vd-btn ghost');
-    clear.style.marginBottom = '6px';
-    ui.body.appendChild(clear);
+    actions.append(clear, copyIconButton(() => buildIssuesViewCopy(), 'Copy Issues view'));
+    ui.body.appendChild(actions);
 
     const issues = model.issues.slice().reverse();
     for (const issue of issues) {
@@ -557,13 +597,17 @@
         <span class="vd-kind ${escapeHtml(issue.kind)}">${escapeHtml(issue.kind)}</span>
         <span class="vd-issue-msg">${escapeHtml(issue.message)}</span>
         <span class="vd-issue-count">×${issue.count}</span>`;
+      head.appendChild(copyIconButton(() => buildIssueCopy(issue), 'Copy this issue'));
       row.appendChild(head);
       if (issue.detail && issue.detail !== issue.message) {
         const detail = document.createElement('div');
         detail.className = 'vd-issue-detail';
         detail.textContent = issue.detail;
         row.appendChild(detail);
-        row.addEventListener('click', () => row.classList.toggle('expanded'));
+        row.addEventListener('click', (event) => {
+          if (event.target.closest('button')) return;
+          row.classList.toggle('expanded');
+        });
       }
       ui.body.appendChild(row);
     }
@@ -632,9 +676,11 @@
       return;
     }
 
+    const actions = document.createElement('div');
+    actions.className = 'vd-view-actions';
     const clear = button('Clear all', () => sendControl('clear-network'), 'vd-btn ghost');
-    clear.style.marginBottom = '6px';
-    ui.body.appendChild(clear);
+    actions.append(clear, copyIconButton(() => buildNetworkViewCopy(), 'Copy Net view'));
+    ui.body.appendChild(actions);
 
     // Chronological: the order IS the story.
     for (const entry of model.network) {
@@ -655,6 +701,7 @@
             ? `${entry.frameCount || 0}⇅`
             : entry.durationMs != null ? `${entry.durationMs}ms` : ''
         }</span>`;
+      head.appendChild(copyIconButton(() => buildNetworkEntryCopy(entry), 'Copy this network entry'));
       row.appendChild(head);
 
       const detail = document.createElement('div');
@@ -690,7 +737,7 @@
       }
       row.appendChild(detail);
       row.addEventListener('click', (event) => {
-        if (event.target.closest('.vd-net-pre')) return; // allow text selection
+        if (event.target.closest('button, .vd-net-pre')) return; // copy or select text
         const expanded = row.classList.toggle('expanded');
         if (expanded) model.expandedNetworkIds.add(entry.id);
         else model.expandedNetworkIds.delete(entry.id);
@@ -839,6 +886,110 @@
     return value.length <= max ? value : `${value.slice(0, max)}\n…[truncated]`;
   }
 
+  function captureHeading(title) {
+    return [
+      `# ${title}`,
+      '',
+      `- URL: ${location.href}`,
+      `- Title: ${document.title}`,
+      `- Captured: ${new Date().toISOString()}`,
+      '',
+    ];
+  }
+
+  function buildInspectViewCopy() {
+    const lines = captureHeading('Vibe Digger Inspect capture');
+    const pinned = model.pinned;
+    if (!pinned) return [...lines, 'No element is pinned.'].join('\n');
+    if (!pinned.react) {
+      return [
+        ...lines,
+        '## Pinned element',
+        '',
+        `- DOM: \`${pinned.dom?.summary || '?'}\``,
+        '- React fiber: not found',
+      ].join('\n');
+    }
+
+    const details = pinned.details || {};
+    lines.push(`## ${details.name || 'Component'}`);
+    if (pinned.chain?.length) lines.push(`- Owner chain: ${pinned.chain.map((item) => item.name).join(' ← ')}`);
+    if (pinned.dom?.summary) lines.push(`- DOM: \`${pinned.dom.summary}\``);
+    if (details.source) lines.push(`- Source: ${details.source}`);
+    if (details.renderCount) lines.push(`- Render count: ×${details.renderCount}`);
+    if (details.props != null) lines.push('', '### Props', '```json', formatValue(details.props), '```');
+    if (details.hooks != null) {
+      lines.push('', '### Hooks');
+      for (const hook of details.hooks) {
+        lines.push(`- #${hook.index} ${hook.type}: \`${formatValue(hook.value).replace(/\n\s*/g, ' ')}\``);
+      }
+    }
+    if (details.classState != null) {
+      lines.push('', '### State', '```json', formatValue(details.classState), '```');
+    }
+    return lines.join('\n');
+  }
+
+  function buildIssueCopy(issue) {
+    const lines = [
+      `## [${issue.kind}] ${issue.message}`,
+      '',
+      `- Count: ×${issue.count}`,
+    ];
+    if (issue.firstAt) lines.push(`- First seen: ${new Date(issue.firstAt).toISOString()}`);
+    if (issue.lastAt) lines.push(`- Last seen: ${new Date(issue.lastAt).toISOString()}`);
+    if (issue.detail && issue.detail !== issue.message) {
+      lines.push('', '```', issue.detail, '```');
+    }
+    return lines.join('\n');
+  }
+
+  function buildIssuesViewCopy() {
+    const lines = captureHeading(`Vibe Digger Issues (${model.issues.length})`);
+    if (!model.issues.length) return [...lines, 'No issues captured.'].join('\n');
+    for (const issue of model.issues) lines.push(buildIssueCopy(issue), '');
+    return lines.join('\n').trimEnd();
+  }
+
+  function networkCopyStatus(entry) {
+    if (entry.kind === 'ws') {
+      if (entry.wsState === 'closed') {
+        return `closed ${entry.closeCode ?? ''}${entry.ok ? ' clean' : ' UNCLEAN'}`.trim();
+      }
+      return entry.wsState || 'pending';
+    }
+    if (entry.error) return `FAILED: ${entry.error}`;
+    if (entry.status != null) return String(entry.status);
+    if (entry.kind === 'beacon') return entry.ok ? 'queued' : 'dropped';
+    return 'pending';
+  }
+
+  function buildNetworkEntryCopy(entry) {
+    const lines = [
+      `## #${entry.seq} ${entry.method} ${entry.url}`,
+      '',
+      `- Status: ${networkCopyStatus(entry)}`,
+      `- Started: +${(entry.sinceLoadMs / 1000).toFixed(2)}s after load`,
+      `- Payload: ↑${formatByteSize(entry.requestSizeBytes)} ↓${formatByteSize(entry.responseSizeBytes)}`,
+    ];
+    if (entry.durationMs != null) lines.push(`- Duration: ${entry.durationMs}ms`);
+    if (entry.requestBody) lines.push('', '### Request body', '```', entry.requestBody, '```');
+    if (entry.responseBody) lines.push('', '### Response body', '```', entry.responseBody, '```');
+    if (entry.kind === 'ws' && entry.frames?.length) {
+      lines.push('', '### Frames', '```', formatFrames(entry), '```');
+    }
+    if (entry.error) lines.push('', '### Error', '```', entry.error, '```');
+    if (entry.initiator) lines.push('', '### Sent from', '```', entry.initiator, '```');
+    return lines.join('\n');
+  }
+
+  function buildNetworkViewCopy() {
+    const lines = captureHeading(`Vibe Digger Net (${model.network.length})`);
+    if (!model.network.length) return [...lines, 'No network entries captured.'].join('\n');
+    for (const entry of model.network) lines.push(buildNetworkEntryCopy(entry), '');
+    return lines.join('\n').trimEnd();
+  }
+
   function buildBundle() {
     const lines = [];
     lines.push('# Vibe Digger capture');
@@ -942,20 +1093,25 @@
     return lines.join('\n');
   }
 
-  async function copyBundle() {
-    const text = buildBundle();
+  async function writeClipboardText(text) {
     try {
       await navigator.clipboard.writeText(text);
+      return true;
     } catch {
       const textarea = document.createElement('textarea');
       textarea.value = text;
       textarea.style.position = 'fixed';
       textarea.style.opacity = '0';
-      document.body.appendChild(textarea);
+      (document.body || document.documentElement).appendChild(textarea);
       textarea.select();
-      document.execCommand('copy');
+      const copied = document.execCommand('copy');
       textarea.remove();
+      return copied;
     }
+  }
+
+  async function copyBundle() {
+    await writeClipboardText(buildBundle());
   }
 
   // ---------------------------------------------------------------------------

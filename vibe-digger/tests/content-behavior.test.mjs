@@ -77,3 +77,23 @@ test('Net rows show measured request and response payload sizes', async () => {
   assert.match(content, /↑\$\{formatByteSize\(entry\.requestSizeBytes\)\}/);
   assert.match(content, /↓\$\{formatByteSize\(entry\.responseSizeBytes\)\}/);
 });
+
+test('Inspect, Issues, and Net views expose scoped clipboard icons', async () => {
+  const content = await loadContentScript();
+
+  assert.match(content, /function copyIconButton\(textFactory, label\)/);
+  assert.match(content, /function buildInspectViewCopy\(\)/);
+  assert.match(content, /function buildIssueCopy\(issue\)/);
+  assert.match(content, /function buildIssuesViewCopy\(\)/);
+  assert.match(content, /function buildNetworkEntryCopy\(entry\)/);
+  assert.match(content, /function buildNetworkViewCopy\(\)/);
+  for (const label of [
+    'Copy Inspect view',
+    'Copy this issue',
+    'Copy Issues view',
+    'Copy this network entry',
+    'Copy Net view',
+  ]) {
+    assert.ok(content.includes(`'${label}'`), `missing clipboard control: ${label}`);
+  }
+});

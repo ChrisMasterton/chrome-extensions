@@ -9,6 +9,7 @@ Vibe Digger is a Chrome extension for debugging React apps while you vibe-code. 
 - **Net** — records the page's whole network lifecycle in order: every `fetch`, XHR, `sendBeacon`, and **WebSocket** with its request body, response body (JSON/text, bounded, secret-redacted), payload sizes, status, duration, and the **initiator stack** — the code path that fired it. WebSockets appear as one live entry per socket with its sent/received frames (timestamped, redacted, bounded), close code, and clean/unclean verdict. Step through the story yourself, or copy it for an agent: request/response evidence can't be faked by UI that merely looks right. On localhost, capture starts at `document_start`, so boot-time requests are included.
 - **Issues** — digs up console errors, React warnings (missing keys, act warnings, etc.), console warnings, uncaught errors, unhandled promise rejections, and failed `fetch`/XHR requests. Duplicates are deduped with counts; obvious secrets are redacted.
 - **Copy** — puts a markdown capture on the clipboard: page info, the pinned component with props/hooks, top render counts, the ordered network lifecycle with bodies, and the issue list. Paste it straight into a coding agent instead of describing the bug in prose.
+- **Scoped copy icons** — copy one API/Net entry, one issue, or the complete Inspect, Net, or Issues view as focused agent-ready Markdown without including unrelated capture data.
 
 ## Installation
 

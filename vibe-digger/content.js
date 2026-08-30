@@ -10,15 +10,18 @@
   const AGENT_SOURCE = 'vibe-digger-agent';
   const CONTROL_SOURCE = 'vibe-digger-control';
   const MAX_VISIBLE_FLASHES = 80;
+  const PANEL_VIEWPORT_MARGIN = 8;
 
   const ui = {
     host: null,
     shadow: null,
     panel: null,
+    header: null,
     body: null,
     tooltip: null,
     hoverBox: null,
     flashLayer: null,
+    minimizedButton: null,
     issuesButton: null,
     inspectButton: null,
     heatmapButton: null,
@@ -26,6 +29,8 @@
 
   const model = {
     open: false,
+    minimized: false,
+    panelPosition: null,
     view: 'home', // 'home' | 'issues' | 'network'
     inspectMode: false,
     heatmapOn: false,
@@ -33,6 +38,7 @@
     pinned: null,
     issues: [],
     network: [],
+    expandedNetworkIds: new Set(),
     copyPending: false,
     lastHover: null,
   };
@@ -49,17 +55,31 @@
     :host { all: initial; }
     * { box-sizing: border-box; }
     .vd-panel {
-      position: fixed; right: 16px; bottom: 16px; width: 360px;
+      position: fixed; right: 16px; bottom: 16px; width: min(360px, calc(100vw - 32px));
       max-height: min(64vh, 560px); display: flex; flex-direction: column;
       background: #16142a; color: #e8e6f5; border: 1px solid #3d3866;
       border-radius: 12px; box-shadow: 0 12px 32px rgba(0,0,0,.45);
       font: 12px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       z-index: 2147483647; overflow: hidden;
     }
+    .vd-minimized {
+      appearance: none; position: fixed; left: 16px; bottom: 16px;
+      display: none; align-items: center; gap: 7px; z-index: 2147483647;
+      border: 1px solid #4c4585; border-radius: 999px; padding: 7px 11px;
+      background: #201c3d; color: #e8e6f5; box-shadow: 0 8px 22px rgba(0,0,0,.4);
+      font: 700 11px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      cursor: pointer;
+    }
+    .vd-minimized.visible { display: inline-flex; }
+    .vd-minimized:hover { background: #302a5c; border-color: #8b5cf6; }
+    .vd-minimized-dot { width: 7px; height: 7px; border-radius: 50%; background: #a78bfa; }
     .vd-header {
       display: flex; align-items: center; gap: 8px; padding: 8px 10px;
-      background: #201c3d; border-bottom: 1px solid #3d3866; cursor: default;
+      background: #201c3d; border-bottom: 1px solid #3d3866; cursor: grab;
+      user-select: none; touch-action: none;
     }
+    .vd-header.dragging { cursor: grabbing; }
+    .vd-header .vd-btn { flex: none; padding: 2px 7px; font-size: 13px; line-height: 1.2; }
     .vd-title { font-weight: 700; font-size: 12px; letter-spacing: .02em; }
     .vd-dot { width: 8px; height: 8px; border-radius: 50%; background: #6b7280; flex: none; }
     .vd-dot.on { background: #34d399; }
@@ -110,6 +130,7 @@
     .vd-net-status.ok { color: #34d399; }
     .vd-net-status.bad { color: #f87171; }
     .vd-net-status.pending { color: #a5a0c8; }
+    .vd-net-size { flex: none; color: #8d87b8; font-size: 10px; white-space: nowrap; }
     .vd-net-ms { flex: none; color: #6b6598; font-size: 10px; }
     .vd-net-detail { display: none; margin-top: 5px; }
     .vd-net.expanded .vd-net-detail { display: block; }
@@ -173,22 +194,90 @@
 
   function button(label, onClick, className = 'vd-btn') {
     const el = document.createElement('button');
+    el.type = 'button';
     el.className = className;
     el.innerHTML = label;
     el.addEventListener('click', onClick);
     return el;
   }
 
+  let panelDrag = null;
+
+  function clamp(value, minimum, maximum) {
+    return Math.min(Math.max(value, minimum), maximum);
+  }
+
+  function constrainPanelToViewport() {
+    if (!ui.panel || !model.panelPosition || model.minimized) return;
+    const rect = ui.panel.getBoundingClientRect();
+    const maxLeft = Math.max(PANEL_VIEWPORT_MARGIN, innerWidth - rect.width - PANEL_VIEWPORT_MARGIN);
+    const maxTop = Math.max(PANEL_VIEWPORT_MARGIN, innerHeight - rect.height - PANEL_VIEWPORT_MARGIN);
+    model.panelPosition = {
+      left: clamp(model.panelPosition.left, PANEL_VIEWPORT_MARGIN, maxLeft),
+      top: clamp(model.panelPosition.top, PANEL_VIEWPORT_MARGIN, maxTop),
+    };
+    Object.assign(ui.panel.style, {
+      left: `${model.panelPosition.left}px`,
+      top: `${model.panelPosition.top}px`,
+      right: 'auto',
+      bottom: 'auto',
+    });
+  }
+
+  function startPanelDrag(event) {
+    if (event.target.closest('button')) return;
+    if (!ui.panel || model.minimized || event.button !== 0) return;
+    const rect = ui.panel.getBoundingClientRect();
+    panelDrag = {
+      pointerId: event.pointerId,
+      offsetX: event.clientX - rect.left,
+      offsetY: event.clientY - rect.top,
+    };
+    model.panelPosition = { left: rect.left, top: rect.top };
+    ui.header?.classList.add('dragging');
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    event.preventDefault();
+    window.addEventListener('pointermove', movePanelDrag, true);
+    window.addEventListener('pointerup', stopPanelDrag, true);
+    window.addEventListener('pointercancel', stopPanelDrag, true);
+  }
+
+  function movePanelDrag(event) {
+    if (!panelDrag || event.pointerId !== panelDrag.pointerId) return;
+    model.panelPosition = {
+      left: event.clientX - panelDrag.offsetX,
+      top: event.clientY - panelDrag.offsetY,
+    };
+    constrainPanelToViewport();
+    event.preventDefault();
+  }
+
+  function stopPanelDrag(event) {
+    if (!panelDrag || (event && event.pointerId !== panelDrag.pointerId)) return;
+    ui.header?.classList.remove('dragging');
+    panelDrag = null;
+    window.removeEventListener('pointermove', movePanelDrag, true);
+    window.removeEventListener('pointerup', stopPanelDrag, true);
+    window.removeEventListener('pointercancel', stopPanelDrag, true);
+  }
+
   function openPanel() {
     ensureShell();
-    if (ui.panel) return;
+    if (ui.panel) {
+      restorePanel();
+      return;
+    }
     model.open = true;
+    model.minimized = false;
 
     ui.panel = document.createElement('div');
     ui.panel.className = 'vd-panel';
 
     const header = document.createElement('div');
     header.className = 'vd-header';
+    header.title = 'Drag to move Vibe Digger';
+    header.addEventListener('pointerdown', startPanelDrag);
+    ui.header = header;
     const dot = document.createElement('span');
     dot.className = 'vd-dot';
     const title = document.createElement('span');
@@ -197,7 +286,13 @@
     const statusText = document.createElement('span');
     statusText.className = 'vd-status-text';
     statusText.textContent = 'digging…';
-    header.append(dot, title, statusText);
+    const minimizeButton = button('−', () => minimizePanel(), 'vd-btn ghost');
+    minimizeButton.title = 'Minimize to bottom left';
+    minimizeButton.setAttribute('aria-label', 'Minimize Vibe Digger to bottom left');
+    const closeButton = button('✕', () => closePanel(), 'vd-btn ghost');
+    closeButton.title = 'Close Vibe Digger';
+    closeButton.setAttribute('aria-label', 'Close Vibe Digger');
+    header.append(dot, title, statusText, minimizeButton, closeButton);
     ui.statusDot = dot;
     ui.statusText = statusText;
 
@@ -224,21 +319,27 @@
         copyButton.textContent = 'Copy';
       }, 1500);
     });
-    const closeButton = button('✕', () => closePanel(), 'vd-btn ghost');
     toolbar.append(
       ui.inspectButton,
       ui.heatmapButton,
       ui.networkButton,
       ui.issuesButton,
-      copyButton,
-      closeButton
+      copyButton
     );
 
     ui.body = document.createElement('div');
     ui.body.className = 'vd-body';
 
     ui.panel.append(header, toolbar, ui.body);
-    ui.shadow.appendChild(ui.panel);
+    ui.minimizedButton = button(
+      '<span class="vd-minimized-dot"></span>Vibe Digger',
+      () => restorePanel(),
+      'vd-minimized'
+    );
+    ui.minimizedButton.title = 'Restore Vibe Digger';
+    ui.minimizedButton.setAttribute('aria-label', 'Restore Vibe Digger');
+    ui.shadow.append(ui.panel, ui.minimizedButton);
+    if (model.panelPosition) requestAnimationFrame(constrainPanelToViewport);
 
     renderBody();
     sendControl('hello');
@@ -246,13 +347,34 @@
     sendControl('get-network');
   }
 
+  function minimizePanel() {
+    if (!ui.panel || model.minimized) return;
+    setInspectMode(false);
+    model.minimized = true;
+    ui.panel.style.display = 'none';
+    ui.minimizedButton?.classList.add('visible');
+  }
+
+  function restorePanel() {
+    if (!ui.panel || !model.minimized) return;
+    model.minimized = false;
+    ui.panel.style.display = '';
+    ui.minimizedButton?.classList.remove('visible');
+    if (model.panelPosition) requestAnimationFrame(constrainPanelToViewport);
+  }
+
   function closePanel() {
+    stopPanelDrag();
     setInspectMode(false);
     setHeatmap(false);
     model.open = false;
+    model.minimized = false;
     model.view = 'home';
     ui.panel?.remove();
+    ui.minimizedButton?.remove();
     ui.panel = null;
+    ui.header = null;
+    ui.minimizedButton = null;
     ui.tooltip.style.display = 'none';
     ui.hoverBox.style.display = 'none';
   }
@@ -295,6 +417,16 @@
 
   function renderBody() {
     if (!ui.body) return;
+    if (model.panelPosition) requestAnimationFrame(constrainPanelToViewport);
+    const existingNetworkRows =
+      model.view === 'network' ? ui.body.querySelectorAll('.vd-net') : [];
+    const networkScrollState = existingNetworkRows.length
+      ? {
+          top: ui.body.scrollTop,
+          stickToBottom:
+            ui.body.scrollHeight - ui.body.clientHeight - ui.body.scrollTop < 16,
+        }
+      : null;
     ui.body.textContent = '';
 
     if (model.view === 'issues') {
@@ -303,7 +435,7 @@
     }
 
     if (model.view === 'network') {
-      renderNetworkView();
+      renderNetworkView(networkScrollState);
       return;
     }
 
@@ -469,6 +601,20 @@
     return '…';
   }
 
+  function formatByteSize(bytes) {
+    if (!Number.isFinite(bytes) || bytes < 0) return '?';
+    if (bytes < 1024) return `${bytes} B`;
+    const units = ['KB', 'MB', 'GB'];
+    let value = bytes / 1024;
+    let unitIndex = 0;
+    while (value >= 1024 && unitIndex < units.length - 1) {
+      value /= 1024;
+      unitIndex += 1;
+    }
+    const digits = value >= 10 ? 0 : 1;
+    return `${value.toFixed(digits).replace(/\.0$/, '')} ${units[unitIndex]}`;
+  }
+
   function formatFrames(entry, limit = Infinity) {
     const frames = entry.frames || [];
     const shown = frames.slice(-limit);
@@ -477,7 +623,7 @@
       .join('\n');
   }
 
-  function renderNetworkView() {
+  function renderNetworkView(scrollState = null) {
     if (model.network.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'vd-empty';
@@ -494,6 +640,7 @@
     for (const entry of model.network) {
       const row = document.createElement('div');
       row.className = 'vd-net';
+      if (model.expandedNetworkIds.has(entry.id)) row.classList.add('expanded');
       row.dataset.id = entry.id;
       const head = document.createElement('div');
       head.className = 'vd-net-head';
@@ -502,6 +649,7 @@
         <span class="vd-net-method">${escapeHtml(entry.method)}</span>
         <span class="vd-net-path">${escapeHtml(shortPath(entry.url))}</span>
         <span class="vd-net-status ${statusClass(entry)}">${escapeHtml(statusLabel(entry))}</span>
+        <span class="vd-net-size" title="Request / response payload bytes">↑${formatByteSize(entry.requestSizeBytes)} ↓${formatByteSize(entry.responseSizeBytes)}</span>
         <span class="vd-net-ms">${
           entry.kind === 'ws'
             ? `${entry.frameCount || 0}⇅`
@@ -543,11 +691,14 @@
       row.appendChild(detail);
       row.addEventListener('click', (event) => {
         if (event.target.closest('.vd-net-pre')) return; // allow text selection
-        row.classList.toggle('expanded');
+        const expanded = row.classList.toggle('expanded');
+        if (expanded) model.expandedNetworkIds.add(entry.id);
+        else model.expandedNetworkIds.delete(entry.id);
       });
       ui.body.appendChild(row);
     }
-    ui.body.scrollTop = ui.body.scrollHeight;
+    ui.body.scrollTop =
+      !scrollState || scrollState.stickToBottom ? ui.body.scrollHeight : scrollState.top;
   }
 
   // ---------------------------------------------------------------------------
@@ -750,8 +901,9 @@
                 ? 'queued'
                 : 'pending';
         const timing = entry.durationMs != null ? `, ${entry.durationMs}ms` : '';
+        const sizes = `, ↑${formatByteSize(entry.requestSizeBytes)} ↓${formatByteSize(entry.responseSizeBytes)}`;
         lines.push(
-          `### #${entry.seq} ${entry.method} ${entry.url} → ${status} (+${(entry.sinceLoadMs / 1000).toFixed(2)}s${timing})`
+          `### #${entry.seq} ${entry.method} ${entry.url} → ${status} (+${(entry.sinceLoadMs / 1000).toFixed(2)}s${timing}${sizes})`
         );
         if (entry.requestBody) {
           lines.push('Request body:', '```', truncateForBundle(entry.requestBody), '```');
@@ -838,13 +990,22 @@
         const index = model.network.findIndex((e) => e.id === entry.id);
         if (index >= 0) model.network[index] = entry;
         else model.network.push(entry);
-        if (model.network.length > 300) model.network.shift();
+        if (model.network.length > 300) {
+          const removed = model.network.shift();
+          if (removed) model.expandedNetworkIds.delete(removed.id);
+        }
         updateStatusHeader();
         if (model.view === 'network') renderBody();
         break;
       }
       case 'network-list':
         model.network = data.details.entries || [];
+        {
+          const currentIds = new Set(model.network.map((entry) => entry.id));
+          for (const id of model.expandedNetworkIds) {
+            if (!currentIds.has(id)) model.expandedNetworkIds.delete(id);
+          }
+        }
         updateStatusHeader();
         if (model.view === 'network') renderBody();
         break;
@@ -888,5 +1049,6 @@
   });
 
   window.__vibeDiggerOpenPanel = openPanel;
+  window.addEventListener('resize', constrainPanelToViewport);
   openPanel();
 })();

@@ -233,6 +233,31 @@
     }
   }
 
+  function utf8ByteLength(value) {
+    const text = String(value ?? '');
+    if (typeof TextEncoder === 'function') return new TextEncoder().encode(text).byteLength;
+    if (typeof Blob === 'function') return new Blob([text]).size;
+    return text.length;
+  }
+
+  // Payload bytes only: request/response headers and transport framing are not
+  // available consistently from page JavaScript.
+  function bodyByteLength(body) {
+    if (body == null) return 0;
+    if (typeof body === 'string') return utf8ByteLength(body);
+    if (body instanceof URLSearchParams) return utf8ByteLength(body.toString());
+    if (typeof Blob === 'function' && body instanceof Blob) return body.size;
+    if (body instanceof ArrayBuffer || ArrayBuffer.isView(body)) return body.byteLength;
+    return null;
+  }
+
+  function contentLengthBytes(headers) {
+    const raw = headers?.get?.('content-length');
+    if (raw == null || raw === '') return null;
+    const bytes = Number(raw);
+    return Number.isFinite(bytes) && bytes >= 0 ? bytes : null;
+  }
+
   function describeRequestBody(body) {
     if (body == null) return null;
     if (typeof body === 'string') return redactBodyText(body);
@@ -266,6 +291,8 @@
     entry.sinceLoadMs = Math.round(performance.now());
     entry.status = null;
     entry.durationMs = null;
+    if (!Object.hasOwn(entry, 'requestSizeBytes')) entry.requestSizeBytes = 0;
+    if (!Object.hasOwn(entry, 'responseSizeBytes')) entry.responseSizeBytes = null;
     state.network.push(entry);
     if (state.network.length > MAX_NETWORK_ENTRIES) state.network.shift();
     post('network', { entry, total: state.network.length });
@@ -324,8 +351,16 @@
     }
 
     function recordFrame(entry, dir, data) {
+      const frameSize = bodyByteLength(data) ?? 0;
       entry.frameCount = (entry.frameCount || 0) + 1;
-      entry.frames.push({ dir, at: Math.round(performance.now() - entry.sinceLoadMs), data: redactFrame(data) });
+      if (dir === 'send') entry.requestSizeBytes += frameSize;
+      else entry.responseSizeBytes += frameSize;
+      entry.frames.push({
+        dir,
+        at: Math.round(performance.now() - entry.sinceLoadMs),
+        sizeBytes: frameSize,
+        data: redactFrame(data),
+      });
       if (entry.frames.length > MAX_WS_FRAMES) {
         entry.frames.shift();
         entry.droppedFrames = (entry.droppedFrames || 0) + 1;
@@ -371,6 +406,8 @@
           wsState: ws.readyState === OriginalWebSocket.OPEN ? 'open' : 'connecting',
           frames: [],
           frameCount: 0,
+          requestSizeBytes: 0,
+          responseSizeBytes: 0,
           initiator: '[socket opened before capture started]',
         });
         watchSocket(ws, entry);
@@ -390,6 +427,8 @@
         wsState: 'connecting',
         frames: [],
         frameCount: 0,
+        requestSizeBytes: 0,
+        responseSizeBytes: 0,
         initiator: captureInitiator(),
       });
       watchSocket(ws, entry);
@@ -427,20 +466,35 @@
           url = '[unknown fetch URL]';
         }
 
+        const isRequestInput = typeof Request === 'function' && input instanceof Request;
+        const requestBody = init?.body;
         const entry = recordRequest({
           kind: 'fetch',
           method: String(method).toUpperCase(),
           url: truncate(url, 500),
-          requestBody: describeRequestBody(init?.body),
+          requestBody: describeRequestBody(requestBody),
+          requestSizeBytes:
+            requestBody != null
+              ? bodyByteLength(requestBody)
+              : isRequestInput && input.body
+                ? null
+                : 0,
           initiator: captureInitiator(),
         });
 
         // A Request object carries its body as a stream; read a clone so the
         // page's copy stays consumable.
-        if (entry.requestBody == null && typeof Request === 'function' && input instanceof Request) {
+        if (entry.requestBody == null && isRequestInput) {
           try {
             input.clone().text().then((text) => {
-              if (text) entry.requestBody = redactBodyText(text);
+              if (text) {
+                entry.requestBody = redactBodyText(text);
+                post('network', { entry, total: state.network.length });
+              }
+            }).catch(() => {});
+            input.clone().arrayBuffer().then((buffer) => {
+              entry.requestSizeBytes = buffer.byteLength;
+              post('network', { entry, total: state.network.length });
             }).catch(() => {});
           } catch {
             // Body already used or unreadable; leave it null.
@@ -454,12 +508,17 @@
               status: response?.status ?? null,
               ok: response?.ok ?? null,
               durationMs: Math.round(performance.now() - startedAt),
+              responseSizeBytes: contentLengthBytes(response?.headers),
             };
             const contentType = response?.headers?.get?.('content-type');
             if (response && isTextLike(contentType)) {
               try {
                 response.clone().text().then((text) => {
-                  settleRequest(entry, { ...patch, responseBody: redactBodyText(text) });
+                  settleRequest(entry, {
+                    ...patch,
+                    responseBody: redactBodyText(text),
+                    responseSizeBytes: utf8ByteLength(text),
+                  });
                 }).catch(() => settleRequest(entry, patch));
               } catch {
                 settleRequest(entry, patch);
@@ -503,6 +562,7 @@
             method: info.method,
             url: info.url,
             requestBody: describeRequestBody(body),
+            requestSizeBytes: bodyByteLength(body),
             initiator: captureInitiator(),
           });
           const startedAt = performance.now();
@@ -510,14 +570,24 @@
             'loadend',
             () => {
               let responseBody = null;
+              let responseSizeBytes = null;
               try {
                 const contentType = this.getResponseHeader('content-type');
+                const contentLength = this.getResponseHeader('content-length');
+                responseSizeBytes = contentLengthBytes({ get: () => contentLength });
                 if (isTextLike(contentType)) {
                   if (this.responseType === '' || this.responseType === 'text') {
                     responseBody = redactBodyText(this.responseText);
+                    responseSizeBytes = utf8ByteLength(this.responseText);
                   } else if (this.responseType === 'json') {
-                    responseBody = redactBodyText(JSON.stringify(this.response));
+                    const rawJson = JSON.stringify(this.response);
+                    responseBody = redactBodyText(rawJson);
+                    if (responseSizeBytes == null) responseSizeBytes = utf8ByteLength(rawJson);
                   }
+                } else if (this.responseType === 'arraybuffer') {
+                  responseSizeBytes = this.response?.byteLength ?? responseSizeBytes;
+                } else if (this.responseType === 'blob') {
+                  responseSizeBytes = this.response?.size ?? responseSizeBytes;
                 }
               } catch {
                 // Response body unreadable; keep the status line.
@@ -528,6 +598,7 @@
                 error: this.status === 0 ? 'request failed (status 0)' : null,
                 durationMs: Math.round(performance.now() - startedAt),
                 responseBody,
+                responseSizeBytes,
               });
             },
             { once: true }
@@ -547,6 +618,7 @@
           method: 'POST',
           url: truncate(String(url || ''), 500),
           requestBody: describeRequestBody(data),
+          requestSizeBytes: bodyByteLength(data),
           initiator: captureInitiator(),
         });
         const queued = originalBeacon(url, data);

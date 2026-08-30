@@ -1097,7 +1097,6 @@
           <strong>${status === 'ready' ? 'Provisioning adapter ready' : 'Provisioning adapter'}</strong>
           <span>${escapeHtml(summary)}</span>
         </div>
-        <button class="tu-secondary-button" type="button" data-action="refresh-adapter">Check</button>
       </div>
     `;
   }
@@ -1174,7 +1173,7 @@
             <span></span>
             <button class="tu-primary-button" type="submit">${icon(
               'device-floppy'
-            )}<span>Save</span></button>
+            )}<span>Save &amp; check</span></button>
           </div>
         </form>
         ${renderSavedSitesSection()}
@@ -1449,11 +1448,6 @@
     if (action === 'reset-user') {
       const user = storedState.users.find((candidate) => candidate.id === userId);
       if (user) await provisionUser(user, 'reset');
-      return;
-    }
-
-    if (action === 'refresh-adapter') {
-      await loadAdapterCapabilities({ renderLoading: true });
       return;
     }
 

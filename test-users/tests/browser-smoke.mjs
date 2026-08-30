@@ -463,6 +463,19 @@ async function run() {
     assert.match(adapterSummary, /HikeStrong fixtures/);
     assert.match(adapterSummary, /2 roles/);
     assert.match(adapterSummary, /2 scenarios/);
+    const adapterSettingsActions = await page.evaluate(`(() => {
+      const root = ${shadowRootExpression};
+      return {
+        hasMisleadingCheck: Boolean(root.querySelector('[data-action="refresh-adapter"]')),
+        submitLabel: root.querySelector('[data-form="settings"] button[type="submit"]')?.textContent.trim(),
+      };
+    })()`);
+    assert.equal(
+      adapterSettingsActions.hasMisleadingCheck,
+      false,
+      'settings must not check and restore the previously saved adapter URL'
+    );
+    assert.equal(adapterSettingsActions.submitLabel, 'Save & check');
     assert.ok(staticServer.adapterState.capabilityRequests >= 1);
     await page.evaluate(`${shadowRootExpression}.querySelector('[data-action="back"]').click()`);
 

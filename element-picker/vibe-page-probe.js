@@ -8,7 +8,6 @@
   const originals = {};
   const listeners = {};
   let nextId = 1;
-  let lastRafPostAt = 0;
 
   function now() {
     return Math.round(performance.now() * 100) / 100;
@@ -192,50 +191,6 @@
     window.addEventListener('hashchange', listeners.hashchange, true);
   }
 
-  function patchTimers() {
-    originals.setTimeout = window.setTimeout;
-    originals.setInterval = window.setInterval;
-    originals.requestAnimationFrame = window.requestAnimationFrame;
-
-    window.setTimeout = function patchedSetTimeout(callback, delay) {
-      const timerId = `timeout-${nextId++}`;
-      const wrapped = typeof callback === 'function'
-        ? function vibeTimeoutCallback() {
-          post('timer.timeout.fire', { timerId, delay: Number(delay) || 0 });
-          return callback.apply(this, arguments);
-        }
-        : callback;
-      post('timer.timeout.schedule', { timerId, delay: Number(delay) || 0 });
-      return originals.setTimeout.call(this, wrapped, delay);
-    };
-
-    window.setInterval = function patchedSetInterval(callback, delay) {
-      const timerId = `interval-${nextId++}`;
-      const wrapped = typeof callback === 'function'
-        ? function vibeIntervalCallback() {
-          post('timer.interval.fire', { timerId, delay: Number(delay) || 0 });
-          return callback.apply(this, arguments);
-        }
-        : callback;
-      post('timer.interval.schedule', { timerId, delay: Number(delay) || 0 });
-      return originals.setInterval.call(this, wrapped, delay);
-    };
-
-    if (typeof window.requestAnimationFrame === 'function') {
-      window.requestAnimationFrame = function patchedRaf(callback) {
-        const rafId = `raf-${nextId++}`;
-        return originals.requestAnimationFrame.call(this, function vibeRafCallback(timestamp) {
-          const at = now();
-          if (at - lastRafPostAt > 250) {
-            lastRafPostAt = at;
-            post('timer.raf.fire', { rafId, timestamp: Math.round(timestamp * 100) / 100 });
-          }
-          return callback(timestamp);
-        });
-      };
-    }
-  }
-
   function patchStorage() {
     originals.localStorageSetItem = Storage.prototype.setItem;
     originals.localStorageRemoveItem = Storage.prototype.removeItem;
@@ -314,9 +269,6 @@
     if (originals.xhrSend) window.XMLHttpRequest.prototype.send = originals.xhrSend;
     if (originals.pushState) history.pushState = originals.pushState;
     if (originals.replaceState) history.replaceState = originals.replaceState;
-    if (originals.setTimeout) window.setTimeout = originals.setTimeout;
-    if (originals.setInterval) window.setInterval = originals.setInterval;
-    if (originals.requestAnimationFrame) window.requestAnimationFrame = originals.requestAnimationFrame;
     if (originals.localStorageSetItem) Storage.prototype.setItem = originals.localStorageSetItem;
     if (originals.localStorageRemoveItem) Storage.prototype.removeItem = originals.localStorageRemoveItem;
     if (originals.localStorageClear) Storage.prototype.clear = originals.localStorageClear;
@@ -347,7 +299,6 @@
   patchFetch();
   patchXhr();
   patchHistory();
-  patchTimers();
   patchStorage();
   patchConsole();
   installAppApi();

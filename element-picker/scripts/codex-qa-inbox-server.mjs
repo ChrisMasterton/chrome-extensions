@@ -392,8 +392,7 @@ function buildTraceMarkdown(trace, manifest) {
   if (changedSamples.length > 0) {
     lines.push('## Recent Diffs', '');
     changedSamples.forEach((sample) => {
-      const cause = sample.cause?.label || sample.causeEventId || 'unknown cause';
-      lines.push(`### +${sample.timeOffsetMs ?? '?'} ms - ${sample.watchId || 'watch'} (${cause})`);
+      lines.push(`### +${sample.timeOffsetMs ?? '?'} ms - ${sample.watchId || 'watch'}`);
       sample.diffs.slice(0, 12).forEach((diff) => {
         lines.push(`- ${formatTraceDiff(diff)}`);
       });
@@ -405,7 +404,7 @@ function buildTraceMarkdown(trace, manifest) {
   }
 
   if (trace.summaries.length > 0) {
-    lines.push('## Explanations', '');
+    lines.push('## Current Observations', '');
     trace.summaries.forEach((summary) => {
       lines.push(`- ${summary.title || summary.kind || 'Summary'}: ${summary.body || summary.reason || JSON.stringify(summary)}`);
     });

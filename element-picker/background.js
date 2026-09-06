@@ -1,7 +1,6 @@
 // Handle extension icon click
 const pendingToursByTab = new Map();
 const breakOnLoadTabs = new Map();
-const CODEX_TRACE_URL = 'http://127.0.0.1:43117/traces';
 
 async function injectPicker(tabId) {
   try {
@@ -105,9 +104,7 @@ function downloadDataUrl(dataUrl, filename) {
   });
 }
 
-async function postBundleToInbox(inboxUrl, payload) {
-  const targetUrl = inboxUrl || 'http://127.0.0.1:43117/captures';
-
+async function postToInbox(targetUrl, payload) {
   try {
     const response = await fetch(targetUrl, {
       method: 'POST',
@@ -140,45 +137,6 @@ async function postBundleToInbox(inboxUrl, payload) {
     return {
       ok: false,
       error: error?.message || 'Unable to reach Codex QA inbox server',
-    };
-  }
-}
-
-async function postTraceToInbox(traceUrl, payload) {
-  const targetUrl = traceUrl || CODEX_TRACE_URL;
-
-  try {
-    const response = await fetch(targetUrl, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify(payload),
-    });
-
-    let body = null;
-    try {
-      body = await response.json();
-    } catch {
-      body = null;
-    }
-
-    if (!response.ok) {
-      return {
-        ok: false,
-        status: response.status,
-        error: body?.error || `Inbox server returned HTTP ${response.status}`,
-      };
-    }
-
-    return {
-      ok: true,
-      ...body,
-    };
-  } catch (error) {
-    return {
-      ok: false,
-      error: error?.message || 'Unable to reach Codex QA trace inbox server',
     };
   }
 }
@@ -306,7 +264,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'ELEMENT_PICKER_SEND_TO_CODEX') {
-    postBundleToInbox(message.inboxUrl, {
+    postToInbox(message.inboxUrl || 'http://127.0.0.1:43117/captures', {
       source: {
         extension: 'element-picker-qa-bridge',
         version: chrome.runtime.getManifest().version,
@@ -320,7 +278,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'ELEMENT_PICKER_SEND_TRACE_TO_CODEX') {
-    postTraceToInbox(message.traceUrl, {
+    postToInbox(message.traceUrl || 'http://127.0.0.1:43117/traces', {
       source: {
         extension: 'element-picker-qa-bridge',
         feature: 'vibe-debugger',

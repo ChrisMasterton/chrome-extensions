@@ -295,15 +295,10 @@
 }
 
 #__element-picker-trace-panel .element-picker-trace-watch-state,
-#__element-picker-trace-panel .element-picker-trace-diff-body,
-#__element-picker-trace-panel .element-picker-trace-diff-cause {
+#__element-picker-trace-panel .element-picker-trace-diff-body {
   margin-top: 4px;
   color: #cbd5e1;
   overflow-wrap: anywhere;
-}
-
-#__element-picker-trace-panel .element-picker-trace-diff-cause {
-  color: #93c5fd;
 }
 
 #__element-picker-trace-panel .element-picker-trace-footer {

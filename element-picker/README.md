@@ -17,7 +17,7 @@ This release turns the old clipboard-oriented element picker into a two-way QA b
 - Added **Ask Codex** inside tour steps, capturing the highlighted target plus the typed question or observation.
 - Added `tourContext` and `userComment` to generated bundles so the next agent turn knows why the capture exists.
 - Added smarter visual output: highlighted visible-viewport images, padded element crops, saved image files, and image materialization in the inbox server.
-- Added the first **Vibe Debugger** implementation: watch selected UI, record state diffs over time, attribute changes to likely causes, and export traces to Codex.
+- Added **Vibe Debugger**: watch selected UI, record state diffs and events over time, and export traces to Codex.
 - Added `package.json` scripts for `npm run inbox` and `npm run check`.
 - Updated the Manifest V3 metadata, extension name, host permission for the local inbox, and version.
 
@@ -43,7 +43,7 @@ The reverse loop is:
 - `manifest.json`: Manifest V3 extension metadata and local inbox host permission.
 - `background.js`: extension injection, screenshot capture, image downloads, local inbox posting, latest tour loading, and cross-page tour continuation.
 - `picker.js`: page overlay, toolbar, element analysis, locator ranking, screenshots, clipboard export, Send to Codex, guided tour UI, and Vibe Debugger recording.
-- `vibe-page-probe.js`: main-world probe for fetch/XHR, route, timer, storage, console, and optional app-provided trace events.
+- `vibe-page-probe.js`: main-world probe for fetch/XHR, route, storage, console, and optional app-provided trace events.
 - `picker.css`: overlay, toolbar, responsive controls, tour panel, and tour highlight styling.
 - `scripts/codex-qa-inbox-server.mjs`: local capture/tour server used by Codex and the extension.
 - `smoke/vibe-debugger-smoke.html`: dependency-free test page for the Vibe Debugger watch and trace workflow.
@@ -143,7 +143,7 @@ Plain English:
 
 The **Vibe** toggle shows a `●` while recording and a count of active watch targets even when the controls are collapsed, so background activity stays visible.
 
-The generic browser-extension recorder observes user events, DOM mutations, route changes, fetch/XHR, timers, storage writes, console warnings/errors, selected-element React fiber props/state when available, and optional app probe events. It stores diffs instead of repeated identical snapshots.
+The recorder observes user events, DOM mutations, route changes, fetch/XHR, storage writes, console warnings/errors, selected-element React fiber props/state when available, and optional app probe events. It stores diffs instead of repeated identical snapshots. Events and diffs have timestamps for comparison; temporal proximity alone does not establish a cause. Page timers and animation scheduling are left untouched. Delayed UI changes still appear in DOM diffs, and apps can emit explicit events when more context is useful.
 
 Apps can opt in to clearer product-state traces without importing a package:
 

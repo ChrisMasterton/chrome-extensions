@@ -4,7 +4,7 @@ This repo contains browser tools that make it easier to work with coding agents 
 
 ## Test Users
 
-Test Users is a local-first role and scenario switcher for SaaS development. It generates disposable credentials, stores role notes, recognizes local apps using `localhost + page name`, and fills login or registration forms from an in-page overlay. Projects can optionally expose a same-origin nonproduction adapter so those roles and scenarios provision real application-side fixture state without advertising or returning credentials.
+Test Users generates and stores disposable accounts, organizes them by site and environment, and fills login or registration forms from an in-page overlay. Sites are keyed by hostname and port, with explicit links for projects that span several addresses. Projects can optionally expose a same-origin nonproduction adapter to provision real role and scenario state.
 
 Load the unpacked extension from the [`test-users`](test-users) folder. See the [Test Users README](test-users/README.md) for installation and usage.
 

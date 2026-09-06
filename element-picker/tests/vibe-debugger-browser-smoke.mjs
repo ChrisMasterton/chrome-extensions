@@ -517,6 +517,9 @@ async function run() {
     );
 
     log('injecting through extension background worker');
+    await pageClient.evaluate(`(() => {
+      window.smokeOriginalTimers = [setTimeout, setInterval, requestAnimationFrame];
+    })()`);
     const injectionResult = await serviceWorkerClient.evaluate(`(async () => {
       const tabs = await chrome.tabs.query({});
       const tab = tabs.find((candidate) => candidate.url && candidate.url.includes(${jsString(SMOKE_PATH)}))
@@ -534,6 +537,13 @@ async function run() {
     );
 
     log('driving watch, record, page interactions, and trace export');
+    const timerArguments = await pageClient.evaluate(`new Promise((resolve) => {
+      setTimeout((...args) => resolve(args), 0, 'sentinel', 42);
+    })`);
+    assert.deepEqual(timerArguments, ['sentinel', 42], 'opening QA Bridge must preserve timer callback arguments');
+    assert.equal(await pageClient.evaluate(`
+      window.smokeOriginalTimers.every((timer, index) => timer === [setTimeout, setInterval, requestAnimationFrame][index])
+    `), true, 'QA Bridge must leave page scheduling APIs untouched');
     await pageClient.evaluate(`(async () => {
       const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       const buttonByText = (text) => Array.from(document.querySelectorAll('#__element-picker-toolbar button'))
@@ -615,6 +625,9 @@ async function run() {
     assert.ok(trace.samples.some((sample) => sample.diffs?.some((diff) => diff.path === 'dom.text')), 'trace should include a DOM text diff');
     assert.ok(trace.samples.some((sample) => sample.watchId === 'app-smoke.state'), 'trace should include app probe samples');
     assert.ok(trace.summaries.length >= 1, 'trace should include focused summaries');
+    assert.ok(trace.events.every((event) => !event.kind.startsWith('timer.')), 'trace should omit generic timer noise');
+    assert.ok(trace.samples.every((sample) => !('cause' in sample) && !('causeEventId' in sample)),
+      'observed diffs must not assign causality from event timing');
 
     const latestManifestPath = join(inboxRoot, 'traces', 'latest', 'manifest.json');
     const latestMarkdownPath = join(inboxRoot, 'traces', 'latest', 'trace.md');
@@ -624,6 +637,23 @@ async function run() {
     assert.equal(latestManifest.traceId, latestTrace.manifest.traceId);
     assert.match(latestMarkdown, /Vibe Debugger Trace/);
     assert.match(latestMarkdown, /Recent Diffs|Timeline/);
+    assert.doesNotMatch(latestMarkdown, /unknown cause|causeEventId|"confidence"/);
+
+    log('checking selected-element export through the shared inbox sender');
+    await pageClient.evaluate(`(() => {
+      const panel = document.querySelector('#__element-picker-trace-panel');
+      if (!panel.textContent.includes('Current state') || panel.textContent.includes('Cause:')) {
+        throw new Error('Trace panel should show observations without automatic cause labels');
+      }
+      Array.from(document.querySelectorAll('#__element-picker-toolbar button'))
+        .find((button) => button.textContent.trim() === 'Send to Codex').click();
+    })()`);
+    await waitForPageCondition(pageClient,
+      'document.body.textContent.includes("Saved QA capture")', 'selected-element capture saved');
+    const bundle = JSON.parse(await readFile(join(inboxRoot, 'latest', 'bundle.json'), 'utf8'));
+    assert.equal(bundle.elements.length, 1, 'capture should retain the selected element');
+    assert.ok(bundle.traceContext.watchTargetCount >= 1, 'capture should retain observed trace context');
+    assert.equal('activeCause' in bundle.traceContext, false, 'capture must not reintroduce inferred causes');
 
     log(`pass: ${latestTrace.manifest.traceId}`);
     log(`artifacts: ${join(inboxRoot, 'traces', 'latest')}`);

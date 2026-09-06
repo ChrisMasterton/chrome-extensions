@@ -91,10 +91,9 @@ Then open [http://127.0.0.1:4173/demo/login.html](http://127.0.0.1:4173/demo/log
 ## Checks
 
 ```sh
-npm install
 npm run verify
 ```
 
-The interface uses the MIT-licensed Tabler Icons package. The required SVGs are vendored into `icons/` so the unpacked extension works without a build step.
+The interface uses MIT-licensed Tabler Icons vendored into `icons/`. No dependency installation or build step is needed.
 
 `npm run test:e2e` launches an isolated temporary Chrome profile, loads the unpacked extension, and verifies site recognition, credential generation, local persistence, and login autofill. It does not modify your normal Chrome profile.

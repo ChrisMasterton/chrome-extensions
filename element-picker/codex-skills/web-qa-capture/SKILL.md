@@ -50,13 +50,9 @@ Use this workflow when the user says `look at latest trace`, asks why a UI becam
 
 1. Read `~/CodexInbox/web-qa/traces/latest/manifest.json` first.
 2. Read `trace.md` for a compact timeline and explanation summary.
-3. Read `trace.json` when exact paths, values, cause confidence, app probe values, network status, or mutation details matter.
+3. Read `trace.json` when exact paths, values, timestamps, app probe values, network status, or mutation details matter.
 4. Lead with the strongest confirmed before/after diff. Include the watch target, changed path, old value, new value, and time offset.
-5. Then name the likely cause. Separate direct evidence from inferred cause attribution:
-   - `direct`: app probe emitted the value/action.
-   - `strong`: change happened during a known user/network/timer event window.
-   - `inferred`: change was near a mutation/timer/route event, but not directly observed.
-   - `unknown`: no cause evidence.
+5. Compare the event timeline with the diffs, but establish causes from app probes and source code. A nearby event is only a lead. Older traces may contain automatic `cause` and `confidence` labels; those were timing heuristics, not proof of causation.
 6. Use `summaries` for quick hidden/disabled/empty/stale explanations, but verify important claims against `samples`.
 7. If the trace points to a likely source component or route, inspect the real repo before proposing a fix.
 

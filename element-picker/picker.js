@@ -28,14 +28,13 @@
   const TRACE_MAX_NETWORK = 200;
   const TRACE_MAX_CONSOLE = 120;
   const TRACE_MAX_DIFFS_PER_SAMPLE = 32;
-  const TRACE_CAUSE_WINDOW_MS = 1400;
   const TRACE_SAMPLE_DELAY_MS = 60;
   const TRACE_MUTATION_FLUSH_MS = 90;
   const BREAK_ON_LOAD_DELAY_MS = 180;
   const TRACE_ACTION_HELP = {
     watch: 'Watch: choose the selected or hovered UI as a target and keep snapshots of its visible text, DOM state, layout, form state, styles, and React state when available.',
     record: 'Record: start or stop the timeline that captures user actions, DOM changes, route changes, network calls, console output, app probes, and diffs for watched targets.',
-    trace: 'Trace: open the Vibe Debugger panel to review watched targets, recent diffs, likely causes, timeline events, and export status.',
+    trace: 'Trace: open the Vibe Debugger panel to review watched targets, recent diffs, timeline events, and export status.',
     send: 'Send Trace: save trace.json, trace.md, and manifest.json to the local Codex QA inbox so Codex can inspect them with "look at latest trace."',
   };
   const BREAK_ON_LOAD_HELP = 'Break on Load: pause the QA Bridge after route changes or same-origin full page loads so you can pick and watch the new screen.';
@@ -109,7 +108,6 @@
   let traceNetwork = [];
   let traceConsole = [];
   let traceTrimmed = {};
-  let activeTraceCause = null;
   let latestTraceManifest = null;
   let mutationObserver = null;
   let queuedMutations = [];
@@ -221,29 +219,6 @@
       traceTrimmed[fieldName] = (traceTrimmed[fieldName] || 0) + 1;
     }
     list.push(item);
-  }
-
-  function getTraceCause() {
-    if (!activeTraceCause) return null;
-    if (performance.now() > activeTraceCause.expiresAtMs) return null;
-    return {
-      eventId: activeTraceCause.eventId,
-      kind: activeTraceCause.kind,
-      label: activeTraceCause.label,
-      timeOffsetMs: activeTraceCause.timeOffsetMs,
-      confidence: activeTraceCause.confidence || 'inferred',
-    };
-  }
-
-  function setTraceCause(event, confidence = 'strong', windowMs = TRACE_CAUSE_WINDOW_MS) {
-    activeTraceCause = {
-      eventId: event.eventId,
-      kind: event.kind,
-      label: event.label,
-      timeOffsetMs: event.timeOffsetMs,
-      confidence,
-      expiresAtMs: performance.now() + windowMs,
-    };
   }
 
   function toSerializableValue(value, depth = 0, seen = new WeakSet()) {
@@ -2719,18 +2694,10 @@
     target.latestSnapshot = snapshot;
 
     if (isTraceRecording && (!previous || diffs.length > 0)) {
-      const cause = getTraceCause() || {
-        eventId: null,
-        kind: 'app.watch',
-        label: safeName,
-        confidence: 'direct',
-      };
       const sample = {
         sampleId: `sample-${traceSampleCounter++}`,
         watchId,
         timeOffsetMs: getTraceTimeOffsetMs(),
-        causeEventId: cause.eventId || null,
-        cause,
         snapshot,
         diffs: previous ? diffs : [{
           path: 'app.value',
@@ -2738,7 +2705,6 @@
           after: snapshot.app.value,
         }],
         reason: 'app.watch',
-        confidence: 'direct',
       };
       pushBoundedTraceItem(traceSamples, sample, TRACE_MAX_SAMPLES, 'samples');
     }
@@ -2786,16 +2752,8 @@
     traceStartedAtMs = 0;
     traceEndedAt = null;
     traceEndedAtMs = 0;
-    traceEvents = [];
-    traceSamples = [];
-    traceMutations = [];
-    traceNetwork = [];
-    traceConsole = [];
-    traceTrimmed = {};
-    activeTraceCause = null;
+    resetTraceBuffers();
     latestTraceManifest = null;
-    traceEventCounter = 1;
-    traceSampleCounter = 1;
 
     stopMutationRecording();
     if (watchSampleTimer) {
@@ -2824,10 +2782,6 @@
 
     if (details?.target) event.target = details.target;
     pushBoundedTraceItem(traceEvents, event, TRACE_MAX_EVENTS, 'events');
-
-    if (options.cause !== false) {
-      setTraceCause(event, options.confidence || 'strong', options.causeWindowMs || TRACE_CAUSE_WINDOW_MS);
-    }
 
     if (options.sample !== false) {
       scheduleWatchSample(kind, options.sampleDelayMs ?? TRACE_SAMPLE_DELAY_MS);
@@ -2870,13 +2824,10 @@
       return null;
     }
 
-    const cause = getTraceCause();
     const sample = {
       sampleId: `sample-${traceSampleCounter++}`,
       watchId: target.watchId,
       timeOffsetMs: getTraceTimeOffsetMs(),
-      causeEventId: cause?.eventId || null,
-      cause,
       snapshot,
       diffs: previous ? diffs : [{
         path: 'snapshot',
@@ -2884,7 +2835,6 @@
         after: snapshot,
       }],
       reason: options.reason || 'watch.sample',
-      confidence: cause?.confidence || (options.force ? 'direct' : 'inferred'),
     };
 
     target.latestSampleAt = new Date().toISOString();
@@ -3008,7 +2958,7 @@
         relatedWatchIds,
         first: mutations[0],
       },
-      { confidence: 'inferred', causeWindowMs: 500, sampleDelayMs: 40 }
+      { sampleDelayMs: 40 }
     );
   }
 
@@ -3019,7 +2969,6 @@
     traceNetwork = [];
     traceConsole = [];
     traceTrimmed = {};
-    activeTraceCause = null;
     traceEventCounter = 1;
     traceSampleCounter = 1;
   }
@@ -3050,7 +2999,7 @@
     startMutationRecording();
     recordTraceEvent('trace.start', 'Trace recording started', {
       watchTargets: watchTargets.length,
-    }, { always: true, cause: false, sample: false });
+    }, { always: true, sample: false });
     watchTargets.forEach((target) => sampleWatchTarget(target, { force: true, reason: 'trace.start' }));
     tracePanelOpen = true;
     ensureTracePanel();
@@ -3062,7 +3011,7 @@
     if (!isTraceRecording) return;
 
     sampleAllWatchTargets('trace.stop');
-    recordTraceEvent('trace.stop', 'Trace recording stopped', {}, { always: true, cause: false, sample: false });
+    recordTraceEvent('trace.stop', 'Trace recording stopped', {}, { always: true, sample: false });
     isTraceRecording = false;
     traceEndedAt = new Date().toISOString();
     traceEndedAtMs = performance.now();
@@ -3119,7 +3068,6 @@
           watchId: target.watchId,
           title: `${target.label} is stale`,
           body: 'The watched element disconnected from the DOM.',
-          confidence: 'direct',
         });
         continue;
       }
@@ -3135,7 +3083,6 @@
           watchId: target.watchId,
           title: `${target.label} is hidden`,
           body: reason,
-          confidence: hiddenAncestor ? 'strong' : 'direct',
         });
       }
 
@@ -3152,7 +3099,6 @@
           body: snapshot.react?.props?.disabled === true
             ? 'React props include disabled=true.'
             : 'The DOM or form state marks the target disabled.',
-          confidence: snapshot.react?.props?.disabled === true ? 'strong' : 'direct',
         });
       }
 
@@ -3162,7 +3108,6 @@
           watchId: target.watchId,
           title: `${target.label} has no visible text`,
           body: 'The target is visible but its text snapshot is empty.',
-          confidence: 'direct',
         });
       }
     }
@@ -3234,9 +3179,9 @@
     }
 
     if (trace.summaries.length > 0) {
-      lines.push('## Current Explanations', '');
+      lines.push('## Current Observations', '');
       trace.summaries.forEach((summary) => {
-        lines.push(`- ${summary.title}: ${summary.body} (${summary.confidence || 'inferred'})`);
+        lines.push(`- ${summary.title}: ${summary.body}`);
       });
       lines.push('');
     }
@@ -3246,8 +3191,7 @@
       lines.push('## Recent Diffs', '');
       recentDiffs.forEach((sample) => {
         const target = watchTargets.find((item) => item.watchId === sample.watchId);
-        const cause = sample.cause?.label || sample.causeEventId || 'unknown cause';
-        lines.push(`### +${sample.timeOffsetMs} ms - ${target?.label || sample.watchId} (${cause})`);
+        lines.push(`### +${sample.timeOffsetMs} ms - ${target?.label || sample.watchId}`);
         sample.diffs.slice(0, 10).forEach((diff) => {
           lines.push(`- ${formatTraceDiff(diff)}`);
         });
@@ -3345,7 +3289,6 @@
     };
 
     recordTraceEvent(`user.${event.type}`, `${event.type} ${target.text || target.role || target.tag}`, details, {
-      confidence: 'strong',
       sampleDelayMs: event.type === 'input' ? 120 : TRACE_SAMPLE_DELAY_MS,
     });
   }
@@ -3363,8 +3306,6 @@
     if (kind === 'app.watch') {
       addAppWatchTarget(details.name, details.value, details.options || {});
       recordTraceEvent(kind, `watch ${details.name || 'app value'}`, details, {
-        confidence: 'direct',
-        causeWindowMs: TRACE_CAUSE_WINDOW_MS,
         sample: false,
       });
       return;
@@ -3395,11 +3336,8 @@
       details.to ||
       details.key ||
       kind.replace(/\./g, ' ');
-    const confidence = kind.startsWith('app.') ? 'direct' : kind.startsWith('network.') ? 'strong' : 'inferred';
     recordTraceEvent(kind, `${kind}: ${truncate(label, 80)}`, details, {
-      confidence,
-      sampleDelayMs: kind.endsWith('.end') || kind.endsWith('.fire') ? 80 : 20,
-      causeWindowMs: kind.startsWith('network.') ? 1200 : TRACE_CAUSE_WINDOW_MS,
+      sampleDelayMs: kind.endsWith('.end') ? 80 : 20,
     });
   }
 
@@ -3541,13 +3479,13 @@
     summarySection.className = 'element-picker-trace-section';
     const summaryHeading = document.createElement('div');
     summaryHeading.className = 'element-picker-trace-section-title';
-    summaryHeading.textContent = 'Why';
+    summaryHeading.textContent = 'Current state';
     summarySection.appendChild(summaryHeading);
     const summaries = buildTraceSummaries();
     if (summaries.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'element-picker-trace-empty';
-      empty.textContent = 'No hidden, disabled, empty, or stale explanation yet.';
+      empty.textContent = 'No hidden, disabled, empty, or stale state observed.';
       summarySection.appendChild(empty);
     } else {
       summaries.slice(0, 6).forEach((summary) => {
@@ -3584,11 +3522,7 @@
         body.className = 'element-picker-trace-diff-body';
         body.textContent = sample.diffs.slice(0, 3).map(formatTraceDiff).join(' | ');
 
-        const cause = document.createElement('div');
-        cause.className = 'element-picker-trace-diff-cause';
-        cause.textContent = `Cause: ${sample.cause?.label || 'unknown'} (${sample.confidence || 'inferred'})`;
-
-        row.append(label, body, cause);
+        row.append(label, body);
         diffSection.appendChild(row);
       });
     }
@@ -3603,7 +3537,7 @@
     if (recentEvents.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'element-picker-trace-empty';
-      empty.textContent = 'Record user actions, route changes, network calls, timers, and app probes.';
+      empty.textContent = 'Record user actions, route changes, network calls, and app probes.';
       eventSection.appendChild(empty);
     } else {
       recentEvents.forEach((traceEvent) => {
@@ -4136,7 +4070,6 @@
         selector: target.selector,
         locator: target.locator,
       })),
-      activeCause: getTraceCause(),
     };
   }
 
@@ -4464,10 +4397,6 @@
 
     if (traceContext.latestTrace?.latestDir) {
       lines.push(`Latest trace directory: ${traceContext.latestTrace.latestDir}`);
-    }
-
-    if (traceContext.activeCause) {
-      lines.push(`Active cause: ${traceContext.activeCause.label} (${traceContext.activeCause.confidence})`);
     }
 
     if (traceContext.watchTargets?.length) {

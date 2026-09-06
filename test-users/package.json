@@ -8,8 +8,5 @@
     "test:e2e": "node tests/browser-smoke.mjs",
     "check": "node --check background.js && node --check core.js && node --check content.js && node --check demo/server.mjs",
     "verify": "npm run check && npm test && npm run test:e2e"
-  },
-  "devDependencies": {
-    "@tabler/icons": "3.46.0"
   }
 }

@@ -436,6 +436,18 @@ async function run() {
       `!!${shadowRootExpression}.querySelector('input[name="adapterUrl"]')`,
       'adapter site setting'
     );
+    const correctedAdapterIsValid = await page.evaluate(`(() => {
+      const root = ${shadowRootExpression};
+      const form = root.querySelector('[data-form="settings"]');
+      form.elements.adapterUrl.value = 'https://other.example.test/__test-users';
+      form.requestSubmit();
+      const rejected = form.elements.adapterUrl.validity.customError;
+      form.elements.adapterUrl.value = '/__test-users';
+      form.elements.adapterUrl.dispatchEvent(new Event('input', { bubbles: true }));
+      return { rejected, corrected: form.checkValidity() };
+    })()`);
+    assert.equal(correctedAdapterIsValid.rejected, true, 'cross-origin adapters must be rejected');
+    assert.equal(correctedAdapterIsValid.corrected, true, 'correcting the adapter URL must allow resubmission');
     await page.evaluate(`(() => {
       const root = ${shadowRootExpression};
       root.querySelector('input[name="siteName"]').value = 'HikeStrong';
@@ -528,8 +540,37 @@ async function run() {
     assert.equal(generated.password.length, 16);
     assert.equal(generated.name, 'Admin Tester');
 
+    log('correcting a rejected save with an email, username, or regenerated identity');
+    for (const identifier of ['email', 'username', 'regenerate']) {
+      const validity = await page.evaluate(`(() => {
+        const root = ${shadowRootExpression};
+        const form = root.querySelector('[data-form="user"]');
+        for (const name of ['email', 'username']) {
+          form.elements[name].value = '';
+          form.elements[name].dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        form.requestSubmit();
+        const rejected = form.elements.email.validity.customError;
+        if (${JSON.stringify(identifier)} === 'regenerate') {
+          root.querySelector('[data-action="regenerate"]').click();
+        } else {
+          const input = form.elements[${JSON.stringify(identifier)}];
+          input.value = ${JSON.stringify(identifier === 'email' ? generated.email : 'admin-smoke')};
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        return { rejected, corrected: form.checkValidity() };
+      })()`);
+      assert.equal(validity.rejected, true, 'saving without either identifier must be rejected');
+      assert.equal(validity.corrected, true, `${identifier} correction must allow resubmission`);
+    }
+
     await page.evaluate(`(() => {
       const root = ${shadowRootExpression};
+      root.querySelector('input[name="email"]').value = ${JSON.stringify(generated.email)};
+      root.querySelector('input[name="email"]').dispatchEvent(new Event('input', { bubbles: true }));
+      root.querySelector('input[name="username"]').value = '';
+      root.querySelector('input[name="username"]').dispatchEvent(new Event('input', { bubbles: true }));
+      root.querySelector('input[name="password"]').value = ${JSON.stringify(generated.password)};
       const notes = root.querySelector('textarea[name="notes"]');
       notes.value = 'Browser smoke scenario';
       notes.dispatchEvent(new Event('input', { bubbles: true }));
@@ -787,15 +828,23 @@ async function run() {
       'credential, payment, and promo fields must never be captured'
     );
 
-    log('excluding the phone field and editing the company value');
+    log('renaming the snapshot, excluding the phone field, and editing the company value');
     await page.evaluate(`(() => {
       const root = ${shadowRootExpression};
+      const name = root.querySelector('input[name="snapshotName"]');
+      name.value = 'West coast profile';
+      name.dispatchEvent(new Event('input', { bubbles: true }));
       const rows = [...root.querySelectorAll('.tu-snapshot-field')];
       const phoneRow = rows.find((row) =>
         /phone/i.test(row.querySelector('.tu-snapshot-field-label').textContent)
       );
       phoneRow.querySelector('[data-snapshot-include]').click();
     })()`);
+    assert.equal(
+      await page.evaluate(`${shadowRootExpression}.querySelector('input[name="snapshotName"]').value`),
+      'West coast profile',
+      'changing included fields must preserve the unsaved snapshot name'
+    );
     await page.evaluate(`(() => {
       const root = ${shadowRootExpression};
       const rows = [...root.querySelectorAll('.tu-snapshot-field')];
@@ -867,7 +916,7 @@ async function run() {
       return result.testUsersStateV1.snapshots;
     })()`);
     assert.equal(storedSnapshots.length, 1);
-    assert.equal(storedSnapshots[0].name, 'Runtime profile form');
+    assert.equal(storedSnapshots[0].name, 'West coast profile');
     assert.equal(storedSnapshots[0].path, '/demo/runtime-profile.html');
     assert.ok(
       storedSnapshots[0].fields.every(
@@ -896,9 +945,360 @@ async function run() {
       1,
       'saving site settings must preserve form snapshots'
     );
+    await page.evaluate(`${shadowRootExpression}.querySelector('[data-action="edit-snapshot"]').click()`);
+    assert.equal(
+      await page.evaluate(`${shadowRootExpression}.querySelector('input[name="snapshotName"]').value`),
+      'West coast profile',
+      'the saved snapshot name must survive reopening'
+    );
+    await page.evaluate(`${shadowRootExpression}.querySelector('[data-action="back"]').click()`);
+
+    log('linking this address to an existing site without renaming that site');
+    const controlUser = {
+      id: 'linked-site-control',
+      name: 'Control Tester',
+      email: 'control@example.test',
+      password: 'ControlTest!123',
+      role: 'Member',
+      siteId: 'site:shared-project',
+      origin: 'https://staging.shared-project.test',
+      environment: 'staging',
+    };
+    await worker.evaluate(`(async () => {
+      const { testUsersStateV1: state } = await chrome.storage.local.get('testUsersStateV1');
+      state.sites['site:shared-project'] = { id: 'site:shared-project', name: 'Shared project' };
+      state.origins['https://staging.shared-project.test'] = {
+        siteId: 'site:shared-project', environment: 'staging'
+      };
+      state.users.push(${JSON.stringify(controlUser)});
+      await chrome.storage.local.set({ testUsersStateV1: state });
+    })()`);
+
+    async function reloadOverlay() {
+      await page.evaluate('location.reload()');
+      await waitForCondition(
+        page,
+        `document.readyState === 'complete' && !document.querySelector('#test-users-extension-root')`,
+        'profile reload'
+      );
+      await worker.evaluate(`(async () => {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        await chrome.scripting.executeScript({
+          target: { tabId: tab.id, allFrames: true }, files: ['core.js', 'content.js']
+        });
+      })()`);
+      await waitForCondition(
+        page,
+        `!!${shadowRootExpression}?.querySelector('.tu-panel')`,
+        'reloaded overlay'
+      );
+    }
+
+    await reloadOverlay();
+    await page.evaluate(`${shadowRootExpression}.querySelector('[data-action="settings"]').click()`);
+    await page.evaluate(`(() => {
+      const root = ${shadowRootExpression};
+      root.querySelector('select[name="linkedSiteId"]').value = 'site:shared-project';
+      root.querySelector('[data-form="settings"]').requestSubmit();
+    })()`);
+    await waitForCondition(
+      page,
+      `!!${shadowRootExpression}.querySelector('[data-action="new-user"]')`,
+      'site link save'
+    );
+    const linkedState = await worker.evaluate(`(async () => {
+      return (await chrome.storage.local.get('testUsersStateV1')).testUsersStateV1;
+    })()`);
+    assert.equal(linkedState.sites['site:shared-project'].name, 'Shared project');
+    assert.equal(linkedState.origins[new URL(pageUrl).origin].siteId, 'site:shared-project');
+    assert.equal(linkedState.snapshots[0].siteId, 'site:shared-project');
+    assert.equal(linkedState.snapshots[0].id, storedSnapshots[0].id);
+    assert.deepEqual(linkedState.users, [controlUser], 'linking must preserve the other address login');
+
+    await reloadOverlay();
+    assert.equal(
+      await page.evaluate(`${shadowRootExpression}.querySelector('.tu-site-identity strong').textContent`),
+      'Shared project',
+      'the linked site identity must survive a page reload'
+    );
+    await page.evaluate(`${shadowRootExpression}.querySelector('[data-action="edit-snapshot"]').click()`);
+    assert.equal(
+      await page.evaluate(`${shadowRootExpression}.querySelector('input[name="snapshotName"]').value`),
+      'West coast profile',
+      'the snapshot must remain available after linking and reloading'
+    );
+
+    log('saving independent accounts from two already-open overlays');
+    const secondUrl = `http://127.0.0.1:${staticServer.port}${RUNTIME_PAGE}?second-tab`;
+    const secondTabId = await worker.evaluate(`(async () => {
+      return (await chrome.tabs.create({ url: ${JSON.stringify(secondUrl)}, active: false })).id;
+    })()`);
+    const secondTarget = await waitForTarget(
+      browser.cdp,
+      (target) => target.type === 'page' && target.url === secondUrl,
+      'second account tab'
+    );
+    const secondPage = await attachTarget(browser.cdp, secondTarget);
+    await waitForCondition(secondPage, 'document.readyState === "complete"', 'second tab readiness');
+    await worker.evaluate(`chrome.scripting.executeScript({
+      target: { tabId: ${secondTabId}, allFrames: true }, files: ['core.js', 'content.js']
+    })`);
+    await waitForCondition(
+      secondPage,
+      `!!${shadowRootExpression}?.querySelector('.tu-panel')`,
+      'second overlay'
+    );
+    await secondPage.evaluate(`(() => {
+      const root = ${shadowRootExpression};
+      root.querySelector('[data-action="new-user"]').click();
+      root.querySelector('input[name="email"]').value = 'second-tab@example.test';
+      root.querySelector('textarea[name="notes"]').value = 'Keep this unsaved draft';
+    })()`);
+    await worker.evaluate(`chrome.scripting.executeScript({
+      target: { tabId: ${secondTabId} },
+      func: () => {
+        globalThis.__testUsersStorageChanged = new Promise((resolveChange) => {
+          const listener = (changes, area) => {
+            if (area !== 'local' || !changes.testUsersStateV1) return;
+            chrome.storage.onChanged.removeListener(listener);
+            resolveChange();
+          };
+          chrome.storage.onChanged.addListener(listener);
+        });
+      }
+    })`);
+    await page.evaluate(`${shadowRootExpression}.querySelector('[data-action="back"]').click()`);
+    await page.evaluate(`${shadowRootExpression}.querySelector('[data-action="new-user"]').click()`);
+    await page.evaluate(`(() => {
+      const root = ${shadowRootExpression};
+      root.querySelector('input[name="email"]').value = 'first-tab@example.test';
+      root.querySelector('[data-action="save-only"]').click();
+    })()`);
+    await waitForCondition(page, `!!${shadowRootExpression}.querySelector('.tu-user-card')`, 'first tab save');
+    await worker.evaluate(`chrome.scripting.executeScript({
+      target: { tabId: ${secondTabId} }, func: () => globalThis.__testUsersStorageChanged
+    })`);
+    assert.equal(
+      await secondPage.evaluate(`${shadowRootExpression}.querySelector('input[name="email"]').value`),
+      'second-tab@example.test',
+      'another tab save must preserve the unsaved account identifier'
+    );
+    assert.equal(
+      await secondPage.evaluate(`${shadowRootExpression}.querySelector('textarea[name="notes"]').value`),
+      'Keep this unsaved draft',
+      'another tab save must preserve unsaved notes'
+    );
+    await secondPage.evaluate(`${shadowRootExpression}.querySelector('[data-action="save-only"]').click()`);
+    await waitForCondition(secondPage, `!!${shadowRootExpression}.querySelector('.tu-user-card')`, 'second tab save');
+    const multiTabState = await worker.evaluate(`(async () => {
+      return (await chrome.storage.local.get('testUsersStateV1')).testUsersStateV1;
+    })()`);
+    assert.deepEqual(
+      multiTabState.users.map((user) => user.email).sort(),
+      ['control@example.test', 'first-tab@example.test', 'second-tab@example.test'],
+      'saving from the second open tab must retain the first tab account'
+    );
+    assert.deepEqual(multiTabState.users.find((user) => user.id === controlUser.id), controlUser);
+    assert.deepEqual(multiTabState.snapshots, linkedState.snapshots);
+    assert.equal(multiTabState.users.find((user) => user.email === 'second-tab@example.test').notes, 'Keep this unsaved draft');
+    await waitForCondition(
+      page,
+      `${shadowRootExpression}.querySelectorAll('.tu-user-card').length === 2`,
+      'the first tab list synchronizing both local accounts'
+    );
+    await reloadOverlay();
+    assert.equal(
+      await page.evaluate(`${shadowRootExpression}.querySelectorAll('.tu-user-card').length`),
+      2,
+      'both accounts must survive a reload'
+    );
+
+    log('holding the first write while a second tab saves simultaneously');
+    const primaryTabId = await worker.evaluate(`(async () => {
+      return (await chrome.tabs.query({ active: true, currentWindow: true }))[0].id;
+    })()`);
+    // Gate the old tab writer and the background writer so this same witness
+    // remains valid when writes move into the service worker.
+    const installWriteGate = `() => {
+      const original = chrome.storage.local.set.bind(chrome.storage.local);
+      globalThis.__testUsersWriteGate = { held: false, released: false };
+      chrome.storage.local.set = async (...args) => {
+        const gate = globalThis.__testUsersWriteGate;
+        if (!gate.held && !gate.released) {
+          gate.held = true;
+          await new Promise((resolveWrite) => { gate.release = resolveWrite; });
+        }
+        return original(...args);
+      };
+    }`;
+    await worker.evaluate(`(${installWriteGate})()`);
+    await worker.evaluate(`chrome.scripting.executeScript({
+      target: { tabId: ${primaryTabId} }, func: ${installWriteGate}
+    })`);
+    for (const [client, email] of [[page, 'overlap-first@example.test'], [secondPage, 'overlap-second@example.test']]) {
+      await client.evaluate(`${shadowRootExpression}.querySelector('[data-action="new-user"]').click()`);
+      await client.evaluate(`(() => {
+        const root = ${shadowRootExpression};
+        root.querySelector('input[name="email"]').value = ${JSON.stringify(email)};
+      })()`);
+    }
+    await worker.evaluate(`(() => {
+      globalThis.__testUsersSaveMessages = 0;
+      chrome.runtime.onMessage.addListener((message) => {
+        if (message?.type === 'TEST_USERS_MUTATE_STATE') globalThis.__testUsersSaveMessages += 1;
+        return false;
+      });
+    })()`);
+    async function saveOverlappingEditors({ fallbackEmail = null, form = 'user', rejectSecond = false } = {}) {
+      const saveSelector = form === 'user' ? '[data-action="save-only"]' : `[data-form="${form}"] button[type="submit"]`;
+      const armGate = `() => {
+        Object.assign(globalThis.__testUsersWriteGate, { held: false, released: false });
+      }`;
+      await worker.evaluate(`(${armGate})()`);
+      await worker.evaluate('globalThis.__testUsersSaveMessages = 0');
+      await worker.evaluate(`chrome.scripting.executeScript({
+        target: { tabId: ${primaryTabId} }, func: ${armGate}
+      })`);
+      await page.evaluate(`${shadowRootExpression}.querySelector(${JSON.stringify(saveSelector)}).click()`);
+      await waitForCondition(worker, `(async () => {
+        const [tabGate] = await chrome.scripting.executeScript({
+          target: { tabId: ${primaryTabId} },
+          func: () => globalThis.__testUsersWriteGate.held
+        });
+        return globalThis.__testUsersWriteGate.held || tabGate.result;
+      })()`, 'first save held at storage');
+      await secondPage.evaluate(`${shadowRootExpression}.querySelector(${JSON.stringify(saveSelector)}).click()`);
+      await waitForCondition(worker, `(async () => {
+        const { testUsersStateV1: state } = await chrome.storage.local.get('testUsersStateV1');
+        return globalThis.__testUsersSaveMessages === 2 ||
+          state.users.some((user) => user.email === ${JSON.stringify(fallbackEmail)});
+      })()`, 'second save submitted while the first is held');
+      const releaseWriteGate = `() => {
+        const gate = globalThis.__testUsersWriteGate;
+        gate.released = true;
+        gate.release?.();
+      }`;
+      await worker.evaluate(`chrome.scripting.executeScript({
+        target: { tabId: ${primaryTabId} }, func: ${releaseWriteGate}
+      })`);
+      await worker.evaluate(`(${releaseWriteGate})()`);
+      for (const [index, client] of [page, secondPage].entries()) {
+        await waitForCondition(
+          client,
+          rejectSecond && index === 1
+            ? `${shadowRootExpression}.querySelector('.tu-page-toast--error')?.textContent.includes('changed in another tab')`
+            : `!${shadowRootExpression}.querySelector('[data-form="${form}"]')`,
+          'overlapping save completion'
+        );
+      }
+      return worker.evaluate(`(async () => {
+        return (await chrome.storage.local.get('testUsersStateV1')).testUsersStateV1;
+      })()`);
+    }
+
+    const overlappingState = await saveOverlappingEditors({ fallbackEmail: 'overlap-second@example.test' });
+    assert.deepEqual(
+      overlappingState.users.map((user) => user.email).sort(),
+      [...multiTabState.users.map((user) => user.email), 'overlap-first@example.test', 'overlap-second@example.test'].sort(),
+      'overlapping saves must retain both new accounts and all existing accounts'
+    );
+    assert.deepEqual(overlappingState.snapshots, multiTabState.snapshots);
+    assert.deepEqual(overlappingState.users.find((user) => user.id === controlUser.id), controlUser);
+
+    log('overlapping edits to existing accounts without losing either edit');
+    const editedUsers = multiTabState.users.filter((user) => user.id !== controlUser.id);
+    for (const [index, client] of [page, secondPage].entries()) {
+      await client.evaluate(`(() => {
+        const root = ${shadowRootExpression};
+        root.querySelector(${JSON.stringify(`[data-action="edit"][data-user-id="${editedUsers[index].id}"]`)}).click();
+        const notes = root.querySelector('textarea[name="notes"]');
+        notes.value = ${JSON.stringify(`Concurrent edit ${index + 1}`)};
+        notes.dispatchEvent(new Event('input', { bubbles: true }));
+      })()`);
+    }
+    const editedState = await saveOverlappingEditors();
+    assert.deepEqual(editedState.users.map((user) => user.id).sort(), overlappingState.users.map((user) => user.id).sort());
+    for (const [index, user] of editedUsers.entries()) {
+      assert.equal(editedState.users.find((record) => record.id === user.id).notes, `Concurrent edit ${index + 1}`);
+    }
+    for (const user of overlappingState.users.filter((record) => !editedUsers.some((edited) => edited.id === record.id))) {
+      assert.deepEqual(editedState.users.find((record) => record.id === user.id), user, 'unrelated accounts must remain unchanged');
+    }
+    assert.deepEqual(editedState.snapshots, overlappingState.snapshots);
+
+    log('overlapping edits to different fields of the same account');
+    const sharedUser = editedState.users.find((user) => user.id === editedUsers[0].id);
+    for (const [index, client] of [page, secondPage].entries()) {
+      await client.evaluate(`(() => {
+        const root = ${shadowRootExpression};
+        root.querySelector(${JSON.stringify(`[data-action="edit"][data-user-id="${sharedUser.id}"]`)}).click();
+        const input = root.querySelector(${JSON.stringify(index === 0 ? 'textarea[name="notes"]' : 'input[name="name"]')});
+        input.value = ${JSON.stringify(index === 0 ? 'Shared account notes' : 'Shared account name')};
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      })()`);
+    }
+    const sharedEditState = await saveOverlappingEditors();
+    const sharedSaved = sharedEditState.users.find((user) => user.id === sharedUser.id);
+    assert.equal(sharedSaved.name, 'Shared account name');
+    assert.equal(sharedSaved.notes, 'Shared account notes', 'a concurrent name edit must preserve the other tab notes edit');
+    assert.equal(sharedEditState.users.length, editedState.users.length);
+    assert.deepEqual(sharedEditState.snapshots, editedState.snapshots);
+
+    log('keeping conflicting same-field input available for review');
+    for (const [index, client] of [page, secondPage].entries()) {
+      await client.evaluate(`(() => {
+        const root = ${shadowRootExpression};
+        root.querySelector(${JSON.stringify(`[data-action="edit"][data-user-id="${sharedUser.id}"]`)}).click();
+        root.querySelector('textarea[name="notes"]').value = ${JSON.stringify(index === 0 ? 'First tab conflict notes' : 'Second tab unsaved conflict notes')};
+      })()`);
+    }
+    const conflictState = await saveOverlappingEditors({ rejectSecond: true });
+    assert.equal(conflictState.users.find((user) => user.id === sharedUser.id).notes, 'First tab conflict notes');
+    assert.equal(
+      await secondPage.evaluate(`${shadowRootExpression}.querySelector('textarea[name="notes"]').value`),
+      'Second tab unsaved conflict notes',
+      'a conflicting save must preserve the rejected draft'
+    );
+    assert.equal(conflictState.users.length, sharedEditState.users.length);
+    await secondPage.evaluate(`${shadowRootExpression}.querySelector('[data-action="back"]').click()`);
+
+    log('overlapping adapter and site-name edits in site settings');
+    for (const [index, client] of [page, secondPage].entries()) {
+      await client.evaluate(`${shadowRootExpression}.querySelector('[data-action="settings"]').click()`);
+      await client.evaluate(`(() => {
+        const root = ${shadowRootExpression};
+        const input = root.querySelector(${JSON.stringify(index === 0 ? 'input[name="adapterUrl"]' : 'input[name="siteName"]')});
+        input.value = ${JSON.stringify(index === 0 ? '/__test-users' : 'Concurrent project name')};
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      })()`);
+    }
+    const settingsState = await saveOverlappingEditors({ form: 'settings' });
+    assert.equal(settingsState.sites['site:shared-project'].name, 'Concurrent project name');
+    assert.equal(
+      settingsState.origins[new URL(pageUrl).origin].adapterUrl,
+      `http://127.0.0.1:${staticServer.port}/__test-users`,
+      'a concurrent site-name edit must retain the other tab adapter change'
+    );
+    assert.deepEqual(settingsState.users, conflictState.users);
+    assert.deepEqual(settingsState.snapshots, conflictState.snapshots);
+    await reloadOverlay();
+    assert.equal(
+      await page.evaluate(`${shadowRootExpression}.querySelectorAll('.tu-user-card').length`),
+      4,
+      'all four local accounts must survive a reload after overlapping saves'
+    );
+    await page.evaluate(`(() => {
+      const root = ${shadowRootExpression};
+      root.querySelector(${JSON.stringify(`[data-action="edit"][data-user-id="${editedUsers[0].id}"]`)}).click();
+    })()`);
+    assert.equal(
+      await page.evaluate(`${shadowRootExpression}.querySelector('textarea[name="notes"]').value`),
+      'First tab conflict notes',
+      'the overlapping edit must survive reopening after reload'
+    );
 
     log(
-      'passed: load, recognize, discover adapter, provision/reset, autofill, delete, and snapshot capture/exclude/edit/refill/preservation'
+      'passed: load, recognize, adapter and account validation recovery, provision/reset, autofill, delete, snapshot capture/exclude/edit/refill/preservation, site linking, and sequential/overlapping cross-tab creates and edits'
     );
   } finally {
     await browser?.close();

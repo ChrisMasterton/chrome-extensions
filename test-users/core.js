@@ -895,10 +895,177 @@
     };
   }
 
+  // Apply one user action to the latest state, rather than persisting a tab's
+  // snapshot of every site, account, and form snapshot.
+  function applyStoredMutation(value, mutation) {
+    const previous = normalizeStoredState(value);
+    const state = { ...previous, sites: { ...previous.sites }, origins: { ...previous.origins } };
+    const now = mutation.updatedAt || new Date().toISOString();
+    let result = {};
+
+    const mergeEdits = (current, base, submitted, keys, label) => {
+      const merged = { ...current };
+      for (const key of keys) {
+        const originalValue = JSON.stringify(base[key]);
+        const submittedValue = JSON.stringify(submitted[key]);
+        const currentValue = JSON.stringify(current[key]);
+        if (submittedValue === originalValue) continue;
+        if (currentValue !== originalValue && currentValue !== submittedValue) {
+          throw new Error(`${label} changed in another tab. Reopen it before saving.`);
+        }
+        merged[key] = submitted[key];
+      }
+      return merged;
+    };
+
+    const registerSite = () => {
+      const identity = resolveSiteContext(state, new URL(mutation.origin));
+      if (!state.sites[identity.siteId]) {
+        state.sites[identity.siteId] = {
+          id: identity.siteId, name: identity.siteName, createdAt: now,
+        };
+      }
+      if (!state.origins[identity.origin]) {
+        state.origins[identity.origin] = { siteId: identity.siteId, environment: '' };
+      }
+      return identity;
+    };
+
+    const saveRecord = (collection, record) => {
+      if (!record?.id) throw new Error('Saved records need an ID');
+      const identity = registerSite();
+      const existing = state[collection].find((candidate) => candidate.id === record.id);
+      let saved = { ...record };
+      if (mutation.base) {
+        const label = collection === 'users' ? 'test user' : 'snapshot';
+        if (!existing) throw new Error(`This ${label} was deleted in another tab`);
+        const editable = collection === 'users'
+          ? ['name', 'role', 'roleId', 'scenarioId', 'scenarioLabel', 'email', 'username', 'password', 'notes', 'environment']
+          : ['name', 'fields'];
+        saved = { ...mergeEdits(existing, mutation.base, record, editable, `This ${label}`), updatedAt: now };
+      }
+      saved.siteId = state.origins[record.origin]?.siteId || record.siteId || identity.siteId;
+      if (collection === 'users' && existing?.provisioning &&
+          ['name', 'email', 'username', 'password', 'roleId', 'scenarioId'].some(
+            (key) => String(existing[key] || '') !== String(saved[key] || '')
+          )) {
+        saved.provisioning = { ...existing.provisioning, status: 'stale', error: '' };
+      }
+      state[collection] = existing
+        ? state[collection].map((candidate) => candidate.id === saved.id ? saved : candidate)
+        : [saved, ...state[collection]];
+      return saved;
+    };
+
+    switch (mutation.type) {
+      case 'save-user':
+        result.user = saveRecord('users', mutation.user);
+        break;
+      case 'delete-user':
+        state.users = state.users.filter((user) => user.id !== mutation.id);
+        break;
+      case 'save-snapshot':
+        saveRecord('snapshots', mutation.snapshot);
+        break;
+      case 'delete-snapshot':
+        state.snapshots = state.snapshots.filter((snapshot) => snapshot.id !== mutation.id);
+        break;
+      case 'set-password-symbols': {
+        const identity = registerSite();
+        state.sites[identity.siteId] = {
+          ...state.sites[identity.siteId],
+          passwordSymbols: sanitizePasswordSymbols(mutation.symbols),
+          updatedAt: now,
+        };
+        break;
+      }
+      case 'set-provisioning':
+        state.users = state.users.map((user) => user.id === mutation.id
+          ? { ...user, provisioning: mutation.provisioning, updatedAt: now }
+          : user);
+        break;
+      case 'delete-site': {
+        state.users = state.users.filter((user) => user.siteId !== mutation.id);
+        state.snapshots = state.snapshots.filter((snapshot) => snapshot.siteId !== mutation.id);
+        result.removedLoginCount = previous.users.length - state.users.length;
+        result.removedSnapshotCount = previous.snapshots.length - state.snapshots.length;
+        delete state.sites[mutation.id];
+        state.origins = Object.fromEntries(
+          Object.entries(state.origins).filter(([, record]) => record?.siteId !== mutation.id)
+        );
+        break;
+      }
+      case 'save-settings': {
+        const identity = registerSite();
+        const origin = identity.origin;
+        const previousAdapterUrl = state.origins[origin].adapterUrl || '';
+        if (mutation.base && mutation.base.siteId !== identity.siteId &&
+            mutation.siteName && !mutation.linkedSiteId) {
+          throw new Error('These site settings changed in another tab. Reopen them before saving.');
+        }
+        const currentOrigin = {
+          ...state.origins[origin], environment: state.origins[origin].environment || '',
+          adapterUrl: previousAdapterUrl,
+        };
+        const originChanges = {
+          siteId: mutation.linkedSiteId || mutation.base?.siteId || identity.siteId,
+          environment: mutation.environment, adapterUrl: mutation.adapterUrl,
+        };
+        const savedOrigin = mutation.base
+          ? mergeEdits(currentOrigin, mutation.base, originChanges, ['siteId', 'environment', 'adapterUrl'], 'These site settings')
+          : { ...currentOrigin, ...originChanges };
+        const targetSiteId = savedOrigin.siteId;
+        if (!state.sites[targetSiteId]) throw new Error('The selected site no longer exists');
+        state.origins[origin] = {
+          ...savedOrigin, siteId: targetSiteId, updatedAt: now,
+        };
+        if (mutation.siteName) {
+          const site = state.sites[targetSiteId];
+          const savedSite = mutation.base?.siteId === targetSiteId
+            ? mergeEdits(site, { name: mutation.base.siteName }, { name: mutation.siteName }, ['name'], 'These site settings')
+            : { ...site, name: mutation.siteName };
+          state.sites[targetSiteId] = {
+            ...savedSite, updatedAt: now,
+          };
+        }
+        state.users = state.users.map((user) => {
+          if (user.origin !== origin) return user;
+          const provisioning = user.provisioning && previousAdapterUrl !== savedOrigin.adapterUrl
+            ? { ...user.provisioning, status: 'stale', error: '' }
+            : user.provisioning;
+          if (user.siteId === targetSiteId && provisioning === user.provisioning) return user;
+          return { ...user, siteId: targetSiteId, provisioning, updatedAt: now };
+        });
+        state.snapshots = state.snapshots.map((snapshot) =>
+          snapshot.origin === origin && snapshot.siteId !== targetSiteId
+            ? { ...snapshot, siteId: targetSiteId, updatedAt: now }
+            : snapshot
+        );
+        if (targetSiteId !== identity.siteId) {
+          const previousSiteInUse =
+            Object.values(state.origins).some((record) => record?.siteId === identity.siteId) ||
+            state.users.some((user) => user.siteId === identity.siteId) ||
+            state.snapshots.some((snapshot) => snapshot.siteId === identity.siteId);
+          if (!previousSiteInUse) delete state.sites[identity.siteId];
+        }
+        result = {
+          adapterUrl: savedOrigin.adapterUrl,
+          environment: savedOrigin.environment || identity.detectedEnvironment,
+        };
+        break;
+      }
+      default:
+        throw new Error('Unknown Test Users save operation');
+    }
+
+    return { state, result };
+  }
+
   return {
     ENVIRONMENTS,
     ENVIRONMENT_LABELS,
     PASSWORD_SYMBOL_CHOICES,
+    applyStoredMutation,
     buildAdapterRequest,
     buildFillPlan,
     buildGeneratedIdentity,

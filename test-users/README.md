@@ -26,6 +26,7 @@ By default each address is its own site. When one project spans several addresse
 - Filter accounts for the current site and environment, or search across all sites.
 - Delete an individual login from its edit screen, or delete a saved site and every login beneath it from **Settings → Saved sites**.
 - Keep all extension state in `chrome.storage.local` on the current Chrome profile.
+- Save from multiple open tabs without replacing another tab's accounts, snapshots, or settings. Edits to different fields are combined; conflicting edits to the same field keep the later draft open with an error so you can review the latest saved version.
 - Tint the environment chip amber on staging and red on production as a reminder to use generated accounts only.
 - Optionally connect a same-origin local or explicitly configured staging project adapter. The adapter advertises safe role/scenario metadata; **Provision & fill** creates the generated identity with that application-side state, and **Reset** restores it without resending credentials.
 

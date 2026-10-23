@@ -162,43 +162,25 @@
     return Core.normalizeStoredState(result[STORAGE_KEY]);
   }
 
-  async function writeStoredState(nextState) {
-    storedState = Core.normalizeStoredState(nextState);
-
+  async function mutateStoredState(mutation) {
     if (!isExtensionRuntime) {
+      const applied = Core.applyStoredMutation(storedState, mutation);
+      storedState = applied.state;
       demoState = storedState;
-      return;
+      return applied.result;
     }
 
-    await chrome.storage.local.set({ [STORAGE_KEY]: storedState });
+    const observedState = storedState;
+    const response = await chrome.runtime.sendMessage({ type: 'TEST_USERS_MUTATE_STATE', mutation });
+    if (!response?.ok) throw new Error(response?.error || 'Unable to save Test Users');
+    // A newer storage event may already have arrived while awaiting this reply.
+    if (storedState === observedState) storedState = Core.normalizeStoredState(response.state);
+    resolveCurrentIdentity();
+    return response.result;
   }
 
   function resolveCurrentIdentity() {
     currentIdentity = Core.resolveSiteContext(storedState, window.location);
-  }
-
-  // Writes the site and origin records for the current address the first
-  // time anything is saved here, so data always lands under a stable id.
-  function withCurrentSiteRegistered(state) {
-    const next = {
-      ...state,
-      sites: { ...state.sites },
-      origins: { ...state.origins },
-    };
-    if (!next.sites[currentIdentity.siteId]) {
-      next.sites[currentIdentity.siteId] = {
-        id: currentIdentity.siteId,
-        name: currentIdentity.siteName,
-        createdAt: new Date().toISOString(),
-      };
-    }
-    if (!next.origins[currentIdentity.origin]) {
-      next.origins[currentIdentity.origin] = {
-        siteId: currentIdentity.siteId,
-        environment: '',
-      };
-    }
-    return next;
   }
 
   function siteNameFor(siteId, fallback = 'Unknown site') {
@@ -1309,7 +1291,7 @@
 
   function bindEvents() {
     shadow.querySelectorAll('[data-action]').forEach((element) => {
-      element.addEventListener('click', handleAction);
+      element.addEventListener('click', (event) => handleAction(event).catch(showActionError));
     });
 
     shadow.querySelectorAll('[data-tab]').forEach((element) => {
@@ -1336,8 +1318,36 @@
     });
 
     shadow.querySelectorAll('[data-symbol]').forEach((element) => {
-      element.addEventListener('change', handleSymbolToggle);
+      element.addEventListener('change', () => handleSymbolToggle().catch(showActionError));
     });
+
+    const snapshotName = shadow.querySelector('[data-form="snapshot"] [name="snapshotName"]');
+    snapshotName?.addEventListener('input', () => {
+      if (appState.snapshotDraft) appState.snapshotDraft.name = snapshotName.value;
+    });
+
+    const userForm = shadow.querySelector('[data-form="user"]');
+    if (userForm) {
+      userForm.__testUsersBaseUser = storedState.users.find((user) => user.id === appState.editingId) || null;
+    }
+    for (const name of ['email', 'username']) {
+      userForm?.elements[name]?.addEventListener('input', () => {
+        userForm.elements.email.setCustomValidity('');
+      });
+    }
+
+    const settingsForm = shadow.querySelector('[data-form="settings"]');
+    if (settingsForm) {
+      settingsForm.__testUsersBaseSettings = {
+        siteId: currentIdentity.siteId, siteName: currentIdentity.siteName,
+        environment: getCurrentOriginRecord().environment || '', adapterUrl: getConfiguredAdapterUrl(),
+      };
+    }
+    for (const name of ['adapterUrl', 'environment']) {
+      settingsForm?.elements[name]?.addEventListener('input', () => {
+        settingsForm.elements.adapterUrl.setCustomValidity('');
+      });
+    }
 
     shadow.querySelectorAll('[data-snapshot-include]').forEach((element) => {
       element.addEventListener('change', () => {
@@ -1366,18 +1376,22 @@
 
     shadow.querySelector('[data-form="snapshot"]')?.addEventListener('submit', async (event) => {
       event.preventDefault();
-      await saveSnapshotFromForm(event.currentTarget);
+      await saveSnapshotFromForm(event.currentTarget).catch(showActionError);
     });
 
     shadow.querySelector('[data-form="user"]')?.addEventListener('submit', async (event) => {
       event.preventDefault();
-      const user = await saveUserFromForm(event.currentTarget);
+      const user = await saveUserFromForm(event.currentTarget).catch(showActionError);
       if (user) await activateUser(user);
     });
 
     shadow
       .querySelector('[data-form="settings"]')
-      ?.addEventListener('submit', saveSettingsFromForm);
+      ?.addEventListener('submit', (event) => saveSettingsFromForm(event).catch(showActionError));
+  }
+
+  function showActionError(error) {
+    showToast(error?.message || 'Unable to save Test Users', 'error');
   }
 
   async function handleAction(event) {
@@ -1517,6 +1531,7 @@
         id: snapshot.id,
         name: snapshot.name,
         path: snapshot.path,
+        base: snapshot,
         skippedCount: 0,
         fields: (snapshot.fields || []).map((field) => ({ ...field })),
       };
@@ -1581,6 +1596,7 @@
     );
     form.elements.name.value = generated.name;
     form.elements.email.value = generated.email;
+    form.elements.email.setCustomValidity('');
     form.elements.password.value = generated.password;
     form.elements.email.focus();
     showToast('Fresh credentials generated');
@@ -1593,13 +1609,7 @@
       .filter((input) => input.checked)
       .map((input) => input.dataset.symbol)
       .join('');
-    const next = withCurrentSiteRegistered(storedState);
-    next.sites[currentIdentity.siteId] = {
-      ...next.sites[currentIdentity.siteId],
-      passwordSymbols: symbols,
-      updatedAt: new Date().toISOString(),
-    };
-    await writeStoredState(next);
+    await mutateStoredState({ type: 'set-password-symbols', origin: currentIdentity.origin, symbols });
 
     const passwordInput = shadow.querySelector('[data-form="user"] [name="password"]');
     if (passwordInput) passwordInput.value = Core.generatePassword(undefined, symbols);
@@ -1632,7 +1642,7 @@
     if (!form.reportValidity()) return null;
 
     const data = new FormData(form);
-    const existing = storedState.users.find((user) => user.id === appState.editingId);
+    const existing = form.__testUsersBaseUser;
     const selectedRole = form.elements.role.selectedOptions[0];
     const roleId = Core.normalizeWhitespace(data.get('role')) || 'Member';
     const role = Core.normalizeWhitespace(selectedRole?.dataset.label || selectedRole?.textContent || roleId);
@@ -1663,28 +1673,7 @@
       updatedAt: now,
     };
 
-    const provisioningInputsChanged = Boolean(
-      existing?.provisioning &&
-        ['name', 'email', 'username', 'password', 'roleId', 'scenarioId'].some(
-          (key) => String(existing[key] || '') !== String(user[key] || '')
-        )
-    );
-    if (provisioningInputsChanged) {
-      user = {
-        ...user,
-        provisioning: {
-          ...existing.provisioning,
-          status: 'stale',
-          error: '',
-        },
-      };
-    }
-
-    const users = existing
-      ? storedState.users.map((candidate) => (candidate.id === existing.id ? user : candidate))
-      : [user, ...storedState.users];
-
-    await writeStoredState({ ...withCurrentSiteRegistered(storedState), users });
+    ({ user } = await mutateStoredState({ type: 'save-user', origin: currentIdentity.origin, user, base: existing }));
     appState.screen = 'users';
     appState.editingId = null;
     // Land on the environment the user was just saved to, so it is visible.
@@ -1700,10 +1689,7 @@
     const user = storedState.users.find((candidate) => candidate.id === userId);
     if (!user) return;
 
-    await writeStoredState({
-      ...storedState,
-      users: storedState.users.filter((candidate) => candidate.id !== userId),
-    });
+    await mutateStoredState({ type: 'delete-user', id: userId });
     appState.screen = 'users';
     appState.editingId = null;
     appState.pendingDeleteUserId = null;
@@ -1715,18 +1701,7 @@
     const site = getSavedSites().find((candidate) => candidate.siteId === siteId);
     if (!site) return;
 
-    const users = storedState.users.filter((user) => user.siteId !== siteId);
-    const snapshots = storedState.snapshots.filter((snapshot) => snapshot.siteId !== siteId);
-    const sites = Object.fromEntries(
-      Object.entries(storedState.sites).filter(([id]) => id !== siteId)
-    );
-    const origins = Object.fromEntries(
-      Object.entries(storedState.origins).filter(([, record]) => record?.siteId !== siteId)
-    );
-    const removedLoginCount = storedState.users.length - users.length;
-    const removedSnapshotCount = storedState.snapshots.length - snapshots.length;
-
-    await writeStoredState({ version: 2, sites, origins, users, snapshots });
+    const { removedLoginCount, removedSnapshotCount } = await mutateStoredState({ type: 'delete-site', id: siteId });
     appState.pendingDeleteSiteKey = null;
     resolveCurrentIdentity();
     render();
@@ -1762,62 +1737,22 @@
     }
     if (!form.reportValidity()) return;
 
-    const origin = currentIdentity.origin;
-    const previousSiteId = currentIdentity.siteId;
-    const previousAdapterUrl = getConfiguredAdapterUrl();
     const linkedSiteId = Core.normalizeWhitespace(data.get('linkedSiteId'));
     const siteName = Core.normalizeWhitespace(data.get('siteName'));
-    const now = new Date().toISOString();
-
-    const next = withCurrentSiteRegistered(storedState);
-    const targetSiteId = linkedSiteId && next.sites[linkedSiteId] ? linkedSiteId : previousSiteId;
-
-    next.origins[origin] = {
-      ...next.origins[origin],
-      siteId: targetSiteId,
-      environment: environmentOverride,
-      adapterUrl,
-      updatedAt: now,
-    };
-    if (siteName) {
-      next.sites[targetSiteId] = { ...next.sites[targetSiteId], name: siteName, updatedAt: now };
-    }
-
-    // Logins and snapshots created on this address follow it to its site, and
-    // an adapter change means previously provisioned accounts need redoing.
-    next.users = next.users.map((user) => {
-      if (user.origin !== origin) return user;
-      const provisioning =
-        user.provisioning && previousAdapterUrl !== adapterUrl
-          ? { ...user.provisioning, status: 'stale', error: '' }
-          : user.provisioning;
-      if (user.siteId === targetSiteId && provisioning === user.provisioning) return user;
-      return { ...user, siteId: targetSiteId, provisioning, updatedAt: now };
+    const base = form.__testUsersBaseSettings;
+    // An untouched name belongs to the source site; linking must not rename the destination.
+    const saved = await mutateStoredState({
+      type: 'save-settings', origin: currentIdentity.origin, linkedSiteId,
+      siteName: siteName !== base.siteName ? siteName : '',
+      environment: environmentOverride, adapterUrl, base,
     });
-    next.snapshots = next.snapshots.map((snapshot) =>
-      snapshot.origin === origin && snapshot.siteId !== targetSiteId
-        ? { ...snapshot, siteId: targetSiteId, updatedAt: now }
-        : snapshot
-    );
-
-    // A site left with nothing pointing at it disappears rather than
-    // lingering as an empty row under Saved sites.
-    if (targetSiteId !== previousSiteId) {
-      const previousSiteInUse =
-        Object.values(next.origins).some((record) => record?.siteId === previousSiteId) ||
-        next.users.some((user) => user.siteId === previousSiteId) ||
-        next.snapshots.some((snapshot) => snapshot.siteId === previousSiteId);
-      if (!previousSiteInUse) delete next.sites[previousSiteId];
-    }
-
-    await writeStoredState(next);
     resolveCurrentIdentity();
-    appState.activeEnvironment = currentIdentity.environment;
-    appState.adapter = { status: adapterUrl ? 'loading' : 'disabled', capabilities: null, error: '' };
+    appState.activeEnvironment = saved.environment;
+    appState.adapter = { status: saved.adapterUrl ? 'loading' : 'disabled', capabilities: null, error: '' };
     appState.screen = 'users';
     render();
-    showToast(adapterUrl ? 'Saved · checking provisioning adapter' : 'Saved');
-    if (adapterUrl) await loadAdapterCapabilities();
+    showToast(saved.adapterUrl ? 'Saved · checking provisioning adapter' : 'Saved');
+    if (saved.adapterUrl) await loadAdapterCapabilities();
   }
 
   async function readAdapterJson(response) {
@@ -1940,10 +1875,7 @@
         error: '',
       };
       const updatedUser = { ...user, provisioning, updatedAt: now };
-      const users = storedState.users.map((candidate) =>
-        candidate.id === user.id ? updatedUser : candidate
-      );
-      await writeStoredState({ ...storedState, users });
+      await mutateStoredState({ type: 'set-provisioning', id: user.id, provisioning, updatedAt: now });
       appState.provisioningUserId = null;
       render();
 
@@ -1970,10 +1902,10 @@
         },
         updatedAt: new Date().toISOString(),
       };
-      const users = storedState.users.map((candidate) =>
-        candidate.id === user.id ? failedUser : candidate
-      );
-      await writeStoredState({ ...storedState, users });
+      await mutateStoredState({
+        type: 'set-provisioning', id: user.id,
+        provisioning: failedUser.provisioning, updatedAt: failedUser.updatedAt,
+      });
       appState.provisioningUserId = null;
       render();
       showToast(message, 'error');
@@ -2045,13 +1977,7 @@
       updatedAt: now,
     };
 
-    const snapshots = existing
-      ? storedState.snapshots.map((candidate) =>
-          candidate.id === existing.id ? snapshot : candidate
-        )
-      : [snapshot, ...storedState.snapshots];
-
-    await writeStoredState({ ...withCurrentSiteRegistered(storedState), snapshots });
+    await mutateStoredState({ type: 'save-snapshot', origin: currentIdentity.origin, snapshot, base: draft.base });
     appState.screen = 'users';
     appState.snapshotDraft = null;
     appState.pendingDeleteSnapshotId = null;
@@ -2063,10 +1989,7 @@
     const snapshot = storedState.snapshots.find((candidate) => candidate.id === snapshotId);
     if (!snapshot) return;
 
-    await writeStoredState({
-      ...storedState,
-      snapshots: storedState.snapshots.filter((candidate) => candidate.id !== snapshotId),
-    });
+    await mutateStoredState({ type: 'delete-snapshot', id: snapshotId });
     appState.screen = 'users';
     appState.snapshotDraft = null;
     appState.pendingDeleteSnapshotId = null;
@@ -2371,6 +2294,14 @@
   });
 
   if (isExtensionRuntime) {
+    chrome.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName !== 'local' || !changes[STORAGE_KEY]) return;
+      storedState = Core.normalizeStoredState(changes[STORAGE_KEY].newValue);
+      resolveCurrentIdentity();
+      // Editors own unsaved input; only the list can be safely redrawn here.
+      if (appState.screen === 'users') render();
+    });
+
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       if (message?.type !== 'TEST_USERS_TOGGLE') return false;
       toggle();

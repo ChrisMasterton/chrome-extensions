@@ -1,4 +1,20 @@
+importScripts('core.js');
+
 const RESTRICTED_BADGE_DURATION_MS = 4000;
+const STORAGE_KEY = 'testUsersStateV1';
+let stateWriteQueue = Promise.resolve();
+
+function enqueueStoredMutation(mutation) {
+  const write = stateWriteQueue.then(async () => {
+    const saved = await chrome.storage.local.get(STORAGE_KEY);
+    const applied = TestUsersCore.applyStoredMutation(saved[STORAGE_KEY], mutation);
+    await chrome.storage.local.set({ [STORAGE_KEY]: applied.state });
+    return applied;
+  });
+  // A rejected write must not block the next independent save.
+  stateWriteQueue = write.catch(() => {});
+  return write;
+}
 
 async function toggleExistingOverlay(tabId) {
   try {
@@ -77,6 +93,13 @@ async function refillEveryFrame(tabId, fields) {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === 'TEST_USERS_MUTATE_STATE') {
+    enqueueStoredMutation(message.mutation)
+      .then((applied) => sendResponse({ ok: true, ...applied }))
+      .catch((error) => sendResponse({ ok: false, error: error?.message || 'Unable to save Test Users' }));
+    return true;
+  }
+
   const handlers = {
     TEST_USERS_FILL_ALL_FRAMES: (tabId) =>
       fillEveryFrame(tabId, message.user).then((purposes) => ({ purposes })),

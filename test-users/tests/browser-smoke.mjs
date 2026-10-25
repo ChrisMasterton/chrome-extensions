@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { access, cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { createServer as createNetServer } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -93,6 +93,13 @@ async function startStaticServer() {
             if (rawBody.length > 65536) throw new Error('Adapter request too large');
           }
           const payload = JSON.parse(rawBody);
+          if (adapterState.failNextOperation === payload.operation) {
+            adapterState.failNextOperation = null;
+            await new Promise((resolveDelay) => setTimeout(resolveDelay, 350));
+            response.writeHead(503);
+            response.end(JSON.stringify({ error: 'Fixture service temporarily unavailable' }));
+            return;
+          }
           const stateLabel = `${payload.role?.label || 'User'} · ${
             payload.scenario?.label || 'Default state'
           }`;
@@ -197,6 +204,7 @@ class PipeCdpClient {
     this.nextId = 1;
     this.pending = new Map();
     this.buffer = Buffer.alloc(0);
+    this.exceptions = [];
 
     output.on('data', (chunk) => {
       this.buffer = Buffer.concat([this.buffer, chunk]);
@@ -209,7 +217,10 @@ class PipeCdpClient {
         if (!rawMessage) continue;
 
         const message = JSON.parse(rawMessage);
-        if (!message.id) continue;
+        if (!message.id) {
+          if (message.method === 'Runtime.exceptionThrown') this.exceptions.push(message.params.exceptionDetails);
+          continue;
+        }
         const pending = this.pending.get(message.id);
         if (!pending) continue;
         this.pending.delete(message.id);
@@ -328,6 +339,7 @@ async function attachTarget(cdp, target) {
   await cdp.send('Runtime.enable', {}, sessionId);
   return {
     evaluate: (expression) => cdp.evaluate(expression, sessionId),
+    send: (method, params = {}) => cdp.send(method, params, sessionId),
   };
 }
 
@@ -397,6 +409,30 @@ async function run() {
     })()`);
 
     const shadowRootExpression = `document.querySelector('#test-users-extension-root')?.shadowRoot`;
+    async function selectView(view) {
+      await page.evaluate(`${shadowRootExpression}.querySelector('[data-view="${view}"]').click()`);
+    }
+    async function viewport(width, height) {
+      await page.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
+    }
+    async function capture(name) {
+      if (!process.env.TEST_USERS_E2E_ARTIFACT_DIR) return;
+      const directory = process.env.TEST_USERS_E2E_ARTIFACT_DIR;
+      await mkdir(directory, { recursive: true });
+      const { data } = await page.send('Page.captureScreenshot', { format: 'png' });
+      await writeFile(join(directory, `${name}.png`), Buffer.from(data, 'base64'));
+    }
+    async function assertCommitVisible(label) {
+      const visible = await page.evaluate(`(() => {
+        const root = ${shadowRootExpression};
+        const button = root.querySelector('.tu-editor-shell button[type="submit"]');
+        const rect = button.getBoundingClientRect();
+        const hit = root.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
+        return rect.top >= 0 && rect.bottom <= innerHeight && rect.left >= 0 && rect.right <= innerWidth &&
+          (hit === button || button.contains(hit));
+      })()`);
+      assert.equal(visible, true, label);
+    }
     await waitForCondition(
       page,
       `!!${shadowRootExpression}?.querySelector('.tu-panel')`,
@@ -428,6 +464,26 @@ async function run() {
     assert.deepEqual(environmentSwitch.segments, ['local', 'staging', 'production']);
     assert.equal(environmentSwitch.active, 'local', 'the detected environment starts selected');
     assert.equal(environmentSwitch.detected, 'local', 'the detected environment carries the dot');
+
+    log('checking task navigation, environment context, and independent searches');
+    await page.evaluate(`${shadowRootExpression}.querySelector('[data-env="staging"]').click()`);
+    assert.match(await page.evaluate(`${shadowRootExpression}.querySelector('.tu-context-notice').textContent`), /staging accounts.*page is local/);
+    assert.equal(await page.evaluate(`${shadowRootExpression}.querySelector('.tu-environment').textContent.trim()`), 'LOCAL');
+    await page.evaluate(`${shadowRootExpression}.querySelector('[data-env="local"]').click()`);
+    await page.evaluate(`(() => {
+      const input = ${shadowRootExpression}.querySelector('[data-input="search"]');
+      input.value = 'account query'; input.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
+    await selectView('forms');
+    assert.equal(await page.evaluate(`!!${shadowRootExpression}.querySelector('.tu-env-switch')`), false, 'forms are site/path scoped');
+    assert.equal(await page.evaluate(`${shadowRootExpression}.querySelector('[data-input="search"]').value`), '');
+    await page.evaluate(`${shadowRootExpression}.querySelector('[data-view="forms"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }))`);
+    assert.equal(await page.evaluate(`${shadowRootExpression}.activeElement?.dataset.view`), 'accounts', 'arrow keys switch and focus the task tab');
+    assert.equal(await page.evaluate(`${shadowRootExpression}.querySelector('[data-input="search"]').value`), 'account query');
+    await page.evaluate(`(() => {
+      const input = ${shadowRootExpression}.querySelector('[data-input="search"]');
+      input.value = ''; input.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
 
     log('naming the site and configuring the same-origin provisioning adapter');
     await page.evaluate(`${shadowRootExpression}.querySelector('[data-action="settings"]').click()`);
@@ -497,6 +553,13 @@ async function run() {
       `!!${shadowRootExpression}.querySelector('input[name="email"]')`,
       'credential editor'
     );
+    await viewport(1280, 720);
+    await assertCommitVisible('the account commit must be visible at 720px height');
+    await capture('account-editor-720');
+    await viewport(360, 480);
+    await assertCommitVisible('the account commit must be visible in a narrow, short window');
+    await capture('account-editor-small');
+    await viewport(1280, 720);
 
     const adapterOptions = await page.evaluate(`(() => {
       const root = ${shadowRootExpression};
@@ -640,6 +703,8 @@ async function run() {
     assert.equal(staticServer.adapterState.provisionRequests[0].identity.password, generated.password);
     assert.equal(staticServer.adapterState.provisionRequests[0].role.id, 'org-admin');
     assert.equal(staticServer.adapterState.provisionRequests[0].scenario.id, 'empty-org');
+    assert.match(await page.evaluate(`${shadowRootExpression}.querySelector('.tu-user-card .tu-action-result').textContent`), /Filled.*password fields/);
+    await capture('provisioned-account');
 
     log('resetting the provisioned scenario without resending credentials');
     await page.evaluate(`${shadowRootExpression}.querySelector('[data-action="reset-user"]').click()`);
@@ -655,6 +720,28 @@ async function run() {
       JSON.stringify(staticServer.adapterState.resetRequests[0]).includes(generated.password),
       false
     );
+
+    log('checking failure recovery and keeping provisioned state separate from fill results');
+    staticServer.adapterState.failNextOperation = 'reset';
+    await page.evaluate(`${shadowRootExpression}.querySelector('[data-action="reset-user"]').click()`);
+    await waitForCondition(page, `${shadowRootExpression}.querySelector('.tu-fill-button')?.textContent.includes('Resetting')`, 'reset busy state');
+    await waitForCondition(page, `!!${shadowRootExpression}.querySelector('.tu-inline-error')`, 'persistent provisioning error');
+    await capture('provisioning-error');
+    await page.evaluate(`${shadowRootExpression}.querySelector('[data-action="provision-user"]').click()`);
+    await waitForCondition(page, `!!${shadowRootExpression}.querySelector('.tu-provisioning-status--ready') && !${shadowRootExpression}.querySelector('.tu-user-card[aria-busy="true"]')`, 'retry provision completion');
+    await page.evaluate(`(() => {
+      for (const doc of [document, document.querySelector('iframe').contentDocument]) {
+        doc.querySelectorAll('input').forEach((input) => { input.disabled = true; });
+      }
+      ${shadowRootExpression}.querySelector('[data-action="fill"]').click();
+    })()`);
+    await waitForCondition(page, `${shadowRootExpression}.querySelector('.tu-action-result')?.textContent.includes('No login')`, 'no-fields result');
+    assert.equal(await page.evaluate(`!!${shadowRootExpression}.querySelector('.tu-provisioning-status--ready')`), true, 'a fill miss must not erase provisioned readiness');
+    await page.evaluate(`(() => {
+      for (const doc of [document, document.querySelector('iframe').contentDocument]) {
+        doc.querySelectorAll('input').forEach((input) => { input.disabled = false; });
+      }
+    })()`);
 
     await page.evaluate(`(() => {
       const search = ${shadowRootExpression}.querySelector('[data-input="search"]');
@@ -778,6 +865,7 @@ async function run() {
       'overlay on the profile page'
     );
 
+    await selectView('forms');
     log('filling the long form and capturing a snapshot');
     await page.evaluate(`(() => {
       const set = (selector, value) => {
@@ -809,6 +897,13 @@ async function run() {
       `!!${shadowRootExpression}.querySelector('[data-form="snapshot"]')`,
       'snapshot editor'
     );
+    await viewport(1280, 720);
+    await assertCommitVisible('snapshot save must stay visible at 720px height');
+    await capture('snapshot-review-720');
+    await viewport(360, 480);
+    await assertCommitVisible('snapshot save must stay visible in a narrow, short window');
+    await capture('snapshot-review-small');
+    await viewport(1280, 720);
 
     const snapshotRows = await page.evaluate(`(() => {
       const root = ${shadowRootExpression};
@@ -838,8 +933,14 @@ async function run() {
       const phoneRow = rows.find((row) =>
         /phone/i.test(row.querySelector('.tu-snapshot-field-label').textContent)
       );
-      phoneRow.querySelector('[data-snapshot-include]').click();
+      const content = root.querySelector('.tu-content');
+      content.scrollTop = 180;
+      const toggle = phoneRow.querySelector('[data-snapshot-include]');
+      toggle.focus({ preventScroll: true });
+      toggle.click();
     })()`);
+    assert.equal(await page.evaluate(`${shadowRootExpression}.activeElement?.hasAttribute('data-snapshot-include')`), true, 'snapshot inclusion keeps keyboard focus');
+    assert.ok(await page.evaluate(`${shadowRootExpression}.querySelector('.tu-content').scrollTop > 0`), 'snapshot inclusion keeps the review scroll position');
     assert.equal(
       await page.evaluate(`${shadowRootExpression}.querySelector('input[name="snapshotName"]').value`),
       'West coast profile',
@@ -911,6 +1012,16 @@ async function run() {
     assert.equal(refilled.cardNumber, '', 'card number must never be refilled');
     assert.equal(refilled.promoCode, '', 'promo code must never be refilled');
 
+    log('reporting partial refill without losing the unmatched field details');
+    await page.evaluate(`(() => {
+      document.querySelector('input[name="company"]').disabled = true;
+      ${shadowRootExpression}.querySelector('[data-action="refill-snapshot"]').click();
+    })()`);
+    await waitForCondition(page, `!!${shadowRootExpression}.querySelector('.tu-snapshot-card .tu-action-result details')`, 'partial refill details');
+    assert.match(await page.evaluate(`${shadowRootExpression}.querySelector('.tu-action-result details').textContent`), /company/i);
+    await capture('snapshot-partial-refill');
+    await page.evaluate(`document.querySelector('input[name="company"]').disabled = false`);
+
     const storedSnapshots = await worker.evaluate(`(async () => {
       const result = await chrome.storage.local.get('testUsersStateV1');
       return result.testUsersStateV1.snapshots;
@@ -933,7 +1044,7 @@ async function run() {
     );
     await waitForCondition(
       page,
-      `!!${shadowRootExpression}.querySelector('[data-action="new-user"]')`,
+      `!!${shadowRootExpression}.querySelector('[data-action="new-snapshot"]')`,
       'site settings save after snapshot'
     );
     const snapshotsAfterSettingsSave = await worker.evaluate(`(async () => {
@@ -945,6 +1056,7 @@ async function run() {
       1,
       'saving site settings must preserve form snapshots'
     );
+    await selectView('forms');
     await page.evaluate(`${shadowRootExpression}.querySelector('[data-action="edit-snapshot"]').click()`);
     assert.equal(
       await page.evaluate(`${shadowRootExpression}.querySelector('input[name="snapshotName"]').value`),
@@ -1021,6 +1133,16 @@ async function run() {
       'Shared project',
       'the linked site identity must survive a page reload'
     );
+    await page.evaluate(`(() => {
+      const scope = ${shadowRootExpression}.querySelector('[data-input="scope"]');
+      scope.value = 'all'; scope.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
+    assert.match(await page.evaluate(`${shadowRootExpression}.querySelector('.tu-user-list').textContent`), /Control Tester/);
+    await page.evaluate(`(() => {
+      const scope = ${shadowRootExpression}.querySelector('[data-input="scope"]');
+      scope.value = 'site'; scope.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
+    await selectView('forms');
     await page.evaluate(`${shadowRootExpression}.querySelector('[data-action="edit-snapshot"]').click()`);
     assert.equal(
       await page.evaluate(`${shadowRootExpression}.querySelector('input[name="snapshotName"]').value`),
@@ -1068,6 +1190,7 @@ async function run() {
       }
     })`);
     await page.evaluate(`${shadowRootExpression}.querySelector('[data-action="back"]').click()`);
+    await selectView('accounts');
     await page.evaluate(`${shadowRootExpression}.querySelector('[data-action="new-user"]').click()`);
     await page.evaluate(`(() => {
       const root = ${shadowRootExpression};
@@ -1186,7 +1309,7 @@ async function run() {
         await waitForCondition(
           client,
           rejectSecond && index === 1
-            ? `${shadowRootExpression}.querySelector('.tu-page-toast--error')?.textContent.includes('changed in another tab')`
+            ? `${shadowRootExpression}.querySelector('.tu-editor-notice .tu-action-result--error')?.textContent.includes('changed in another tab')`
             : `!${shadowRootExpression}.querySelector('[data-form="${form}"]')`,
           'overlapping save completion'
         );
@@ -1297,9 +1420,8 @@ async function run() {
       'the overlapping edit must survive reopening after reload'
     );
 
-    log(
-      'passed: load, recognize, adapter and account validation recovery, provision/reset, autofill, delete, snapshot capture/exclude/edit/refill/preservation, site linking, and sequential/overlapping cross-tab creates and edits'
-    );
+    assert.deepEqual(browser.cdp.exceptions, [], 'the main flows must not throw browser runtime exceptions');
+    log('passed: task/scope navigation, keyboard focus, short/narrow editor actions, provision/reset/retry, autofill, partial snapshot refill, deletion, persistence, site linking, and concurrent saves');
   } finally {
     await browser?.close();
     await staticServer.close();

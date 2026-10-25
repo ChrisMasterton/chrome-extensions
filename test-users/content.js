@@ -51,9 +51,17 @@
   let appState = {
     open: true,
     screen: 'users',
+    activeView: 'accounts',
     activeTab: 'site',
     activeEnvironment: 'local',
     query: '',
+    queries: { accounts: '', forms: '' },
+    userDraft: null,
+    userResults: {},
+    snapshotResults: {},
+    userOperations: {},
+    snapshotOperations: {},
+    editorNotice: null,
     editingId: null,
     pendingDeleteUserId: null,
     pendingDeleteSiteKey: null,
@@ -64,7 +72,6 @@
       capabilities: null,
       error: '',
     },
-    provisioningUserId: null,
     toast: null,
   };
 
@@ -324,6 +331,20 @@
   }
 
   function render() {
+    const previousContent = shadow.querySelector('.tu-content');
+    const scrollTop = previousContent?.scrollTop || 0;
+    const activeElement = shadow.activeElement;
+    const focusKey = activeElement?.getAttribute('data-focus-key');
+    const selection = typeof activeElement?.selectionStart === 'number'
+      ? [activeElement.selectionStart, activeElement.selectionEnd] : null;
+    const previousForm = shadow.querySelector('[data-form="user"]');
+    if (appState.screen === 'editor' && previousForm?.dataset.editorId === (appState.editingId || 'new')) {
+      appState.userDraft = {
+        ...Object.fromEntries(new FormData(previousForm)),
+        base: previousForm.__testUsersBaseUser,
+        optionsOpen: previousForm.querySelector('details')?.open,
+      };
+    }
     if (!appState.open) {
       mount.innerHTML = `
         <button class="tu-launcher" data-action="toggle" aria-label="Open Test Users">
@@ -347,6 +368,16 @@
       ${appState.toast ? renderToast(appState.toast) : ''}
     `;
     bindEvents();
+    // Retain position and keyboard focus during async updates and snapshot edits.
+    if (previousContent?.dataset.screen === shadow.querySelector('.tu-content')?.dataset.screen) {
+      shadow.querySelector('.tu-content').scrollTop = scrollTop;
+    }
+    if (focusKey) {
+      const nextFocus = [...shadow.querySelectorAll('[data-focus-key]')]
+        .find((element) => element.dataset.focusKey === focusKey);
+      nextFocus?.focus({ preventScroll: true });
+      if (nextFocus && selection) nextFocus.setSelectionRange(...selection);
+    }
   }
 
   const ENVIRONMENT_TITLES = {
@@ -386,14 +417,14 @@
             </span>
             <span class="tu-site-origin">${escapeHtml(currentIdentity.originLabel)}</span>
           </span>
-          <span class="tu-site-identity-edit">${icon('edit')}<span>Edit</span></span>
+          <span class="tu-site-identity-edit">${icon('settings')}</span>
         </button>
       </header>
     `;
   }
 
   function renderEnvironmentSwitch() {
-    if (appState.activeTab !== 'site') return '';
+    if (appState.activeTab !== 'site' || appState.activeView !== 'accounts') return '';
 
     const siteUsers = getSiteUsers();
     const segments = Core.ENVIRONMENTS.map((environment) => {
@@ -406,7 +437,7 @@
       return `
         <button class="tu-env-segment ${isActive ? 'is-active' : ''} tu-env-segment--${escapeAttribute(
           environment
-        )}" data-env="${escapeAttribute(environment)}" role="tab" aria-selected="${isActive}" title="${escapeAttribute(
+        )}" data-env="${escapeAttribute(environment)}" data-focus-key="env-${environment}" aria-pressed="${isActive}" title="${escapeAttribute(
           title
         )}">
           <span>${escapeHtml(environmentLabel(environment))}</span>
@@ -417,7 +448,7 @@
     }).join('');
 
     return `
-      <div class="tu-env-switch" role="tablist" aria-label="Environment">
+      <div class="tu-env-switch" role="group" aria-label="Account environment">
         ${segments}
       </div>
     `;
@@ -425,37 +456,40 @@
 
   function renderUsersScreen() {
     const users = getVisibleUsers();
-    const siteCount = getSiteUsers().length;
-    const allCount = storedState.users.length;
-    const userCards = users.length
-      ? users.map(renderUserCard).join('')
-      : renderEmptyState();
+    const isAccounts = appState.activeView === 'accounts';
+    const inScope = (item) => appState.activeTab === 'all' || item.siteId === currentIdentity.siteId;
+    const accountCount = storedState.users.filter((user) => inScope(user) &&
+      (appState.activeTab === 'all' || user.environment === appState.activeEnvironment)).length;
+    const formCount = storedState.snapshots.filter(inScope).length;
+    const mismatch = isAccounts && appState.activeTab === 'site' &&
+      appState.activeEnvironment !== currentIdentity.environment;
 
     return `
-      <div class="tu-tabs" role="tablist" aria-label="User scope">
-        <button class="tu-tab ${appState.activeTab === 'site' ? 'is-active' : ''}" data-tab="site" role="tab" aria-selected="${appState.activeTab === 'site'}" title="Test users saved for ${escapeAttribute(
-          currentIdentity.siteName
-        )}">
-          <span class="tu-tab-label">${escapeHtml(currentIdentity.siteName)}</span>
-          <span class="tu-tab-count">${siteCount}</span>
-        </button>
-        <button class="tu-tab ${appState.activeTab === 'all' ? 'is-active' : ''}" data-tab="all" role="tab" aria-selected="${appState.activeTab === 'all'}">
-          <span class="tu-tab-label">All sites</span>
-          <span class="tu-tab-count">${allCount}</span>
-        </button>
+      <div class="tu-tabs" role="tablist" aria-label="Saved items">
+        ${[['accounts', 'Accounts', accountCount], ['forms', 'Forms', formCount]].map(([view, label, count]) => `
+          <button id="tu-${view}-tab" class="tu-tab ${appState.activeView === view ? 'is-active' : ''}"
+            data-view="${view}" data-focus-key="view-${view}" role="tab" aria-selected="${appState.activeView === view}"
+            aria-controls="tu-library-panel" tabindex="${appState.activeView === view ? '0' : '-1'}">
+            ${icon(view === 'accounts' ? 'users' : 'forms')}<span>${label}</span><span class="tu-tab-count">${count}</span>
+          </button>`).join('')}
       </div>
       ${renderEnvironmentSwitch()}
       <div class="tu-search-bar">
         <label class="tu-search">
           ${icon('search')}
-          <span class="tu-sr-only">Search users or notes</span>
-          <input data-input="search" type="search" placeholder="Search users or notes" value="${escapeAttribute(appState.query)}">
+          <span class="tu-sr-only">${isAccounts ? 'Search accounts' : 'Search forms'}</span>
+          <input data-input="search" type="search" placeholder="${isAccounts ? 'Search accounts' : 'Search forms'}" value="${escapeAttribute(appState.query)}">
+        </label>
+        <label class="tu-scope"><span class="tu-sr-only">Saved item scope</span>
+          <select data-input="scope" data-focus-key="scope">
+            <option value="site" ${appState.activeTab === 'site' ? 'selected' : ''}>This site</option>
+            <option value="all" ${appState.activeTab === 'all' ? 'selected' : ''}>All sites</option>
+          </select>
         </label>
       </div>
-      <main class="tu-content">
-        ${renderAdapterNotice()}
-        <div class="tu-user-list">${userCards}</div>
-        ${renderSnapshotSection()}
+      ${mismatch ? `<p class="tu-context-notice">Viewing ${escapeHtml(environmentLabel(appState.activeEnvironment).toLowerCase())} accounts · this page is ${escapeHtml(environmentLabel(currentIdentity.environment).toLowerCase())}.</p>` : ''}
+      <main id="tu-library-panel" class="tu-content" data-screen="${appState.activeView}" role="tabpanel" tabindex="0" aria-labelledby="tu-${appState.activeView}-tab">
+        ${isAccounts ? `${renderAdapterNotice()}<div class="tu-user-list">${users.length ? users.map(renderUserCard).join('') : renderEmptyState()}</div>` : renderSnapshotSection()}
       </main>
     `;
   }
@@ -465,7 +499,7 @@
 
     const status = appState.adapter.status;
     const message = status === 'ready'
-      ? `${appState.adapter.capabilities.label} ready for provisioned personas`
+      ? `${appState.adapter.capabilities.label} connected`
       : status === 'loading'
         ? 'Checking the provisioning adapter…'
         : appState.adapter.error || 'Provisioning adapter unavailable';
@@ -481,17 +515,15 @@
     const snapshots = getVisibleSnapshots();
     const cards = snapshots.length
       ? `<div class="tu-snapshot-list">${snapshots.map(renderSnapshotCard).join('')}</div>`
-      : `<p class="tu-snapshots-hint">Snapshot a longer form once, then refill it in one click on the next debugging run. Email, username, and password fields are never captured.</p>`;
+      : `<div class="tu-empty-state"><div class="tu-empty-icon">${icon('forms')}</div>
+          <strong>${appState.query ? 'No matching forms' : 'Save a form for the next run'}</strong>
+          <p>${appState.query ? 'Try a different name, page, or site.' : 'Capture this page, review the fields, then refill them whenever you return.'}</p></div>`;
 
     return `
-      <section class="tu-snapshots" aria-labelledby="tu-snapshots-heading">
-        <div class="tu-snapshots-heading">
-          <h3 id="tu-snapshots-heading">Form snapshots</h3>
-          <button class="tu-secondary-button tu-snapshot-new" data-action="new-snapshot" title="Capture every editable field on this page">${icon(
-            'camera'
-          )}<span>Snapshot page</span></button>
-        </div>
+      <section class="tu-snapshots" aria-label="Form snapshots">
+        <p class="tu-form-scope">${appState.activeTab === 'site' ? 'Forms for this site' : 'Forms across all sites'} · current page first</p>
         ${cards}
+        <p class="tu-snapshots-hint">Credentials, payment details, and one-time codes are never captured or refilled.</p>
       </section>
     `;
   }
@@ -517,10 +549,11 @@
           <button class="tu-edit-button" data-action="edit-snapshot" data-snapshot-id="${escapeAttribute(
             snapshot.id
           )}" aria-label="Edit ${escapeAttribute(snapshot.name)}">${icon('edit')}</button>
-          <button class="tu-primary-button tu-refill-button" data-action="refill-snapshot" data-snapshot-id="${escapeAttribute(
+          <button class="tu-secondary-button tu-refill-button" data-action="refill-snapshot" data-snapshot-id="${escapeAttribute(
             snapshot.id
-          )}">${icon('forms')}<span>Refill</span></button>
+          )}" ${appState.snapshotOperations[snapshot.id] ? 'disabled' : ''}>${icon('forms')}<span>${appState.snapshotOperations[snapshot.id] ? 'Filling…' : 'Refill'}</span></button>
         </div>
+        <div class="tu-result-slot">${renderActionResult(appState.snapshotResults[snapshot.id])}</div>
       </article>
     `;
   }
@@ -530,7 +563,7 @@
     if (!provisioning?.status) return 'unprovisioned';
     if (
       provisioning.status === 'ready' &&
-      (provisioning.adapterUrl !== getConfiguredAdapterUrl() ||
+      (provisioning.adapterUrl !== (storedState.origins[user.origin]?.adapterUrl || '') ||
         (provisioning.expiresAt && new Date(provisioning.expiresAt).getTime() <= Date.now()))
     ) {
       return 'stale';
@@ -543,7 +576,7 @@
     if (status === 'unprovisioned' || !user.provisioning) return '';
 
     const labelByStatus = {
-      ready: user.provisioning.stateLabel || 'Provisioned',
+      ready: 'Ready',
       stale: 'Needs reprovisioning',
       failed: 'Provisioning failed',
     };
@@ -552,19 +585,36 @@
       : user.provisioning.accountRef || labelByStatus[status];
     return `<span class="tu-provisioning-status tu-provisioning-status--${escapeAttribute(
       status
-    )}" title="${escapeAttribute(title)}">${escapeHtml(labelByStatus[status] || status)}</span>`;
+    )}" title="${escapeAttribute(title)}">${icon(status === 'ready' ? 'circle-check' : 'alert-circle')}${escapeHtml(labelByStatus[status] || status)}</span>`;
+  }
+
+  function renderActionResult(result) {
+    if (!result) return '';
+    return `<div class="tu-action-result tu-action-result--${escapeAttribute(result.type || 'success')}">
+      <p>${icon(result.type === 'success' ? 'circle-check' : 'alert-circle')}<span>${escapeHtml(result.message)}</span></p>
+      ${result.unmatched?.length ? `<details><summary>Unmatched fields (${result.unmatched.length})</summary><ul>${result.unmatched.map((label) => `<li>${escapeHtml(label)}</li>`).join('')}</ul></details>` : ''}
+    </div>`;
+  }
+
+  function setActionResult(kind, id, result) {
+    appState[kind === 'user' ? 'userResults' : 'snapshotResults'][id] = result;
+    const card = [...shadow.querySelectorAll(kind === 'user' ? 'article[data-user-id]' : 'article[data-snapshot-id]')]
+      .find((element) => (kind === 'user' ? element.dataset.userId : element.dataset.snapshotId) === id);
+    const slot = card?.querySelector('.tu-result-slot');
+    if (slot) slot.innerHTML = renderActionResult(result);
   }
 
   function renderUserCard(user) {
     const showProject = appState.activeTab === 'all';
     const status = getProvisioningStatus(user);
     const canProvision = adapterAppliesToUser(user);
-    const isProvisioning = appState.provisioningUserId === user.id;
+    const operation = appState.userOperations[user.id];
+    const isProvisioning = Boolean(operation);
     const action = canProvision && status !== 'ready' ? 'provision-user' : 'fill';
     const actionLabel = isProvisioning
-      ? 'Provisioning…'
+      ? operation === 'reset' ? 'Resetting…' : operation === 'fill' ? 'Filling…' : 'Provisioning…'
       : action === 'provision-user'
-        ? status === 'stale' ? 'Reprovision & fill' : 'Provision & fill'
+        ? status === 'stale' ? 'Reprovision & fill' : status === 'failed' ? 'Retry provision & fill' : 'Provision & fill'
         : 'Fill login';
     const canReset = Boolean(
       canProvision &&
@@ -573,12 +623,11 @@
         user.provisioning?.accountRef
     );
     return `
-      <article class="tu-user-card" data-user-id="${escapeAttribute(user.id)}">
-        <div class="tu-avatar" aria-hidden="true">${escapeHtml(initials(user.name))}</div>
+      <article class="tu-user-card" data-user-id="${escapeAttribute(user.id)}" aria-busy="${isProvisioning}">
         <div class="tu-user-copy">
           <div class="tu-user-title-row">
             <strong>${escapeHtml(user.name)}</strong>
-            <span class="tu-role ${roleClass(user.role)}">${escapeHtml(
+            <span class="tu-role ${roleClass(user.role)}" title="${status === 'ready' ? 'Provisioned role' : 'Saved role label'}">${escapeHtml(
               String(user.role || 'User').toUpperCase()
             )}</span>
           </div>
@@ -586,8 +635,10 @@
             user.email || user.username
           )}</div>
           ${user.scenarioLabel ? `<div class="tu-scenario">${escapeHtml(user.scenarioLabel)}</div>` : ''}
-          <div class="tu-notes">${escapeHtml(user.notes || 'No notes yet')}</div>
+          ${user.notes ? `<div class="tu-notes">${escapeHtml(user.notes)}</div>` : ''}
           ${renderProvisioningBadge(user)}
+          ${status === 'ready' && user.provisioning?.stateLabel && user.provisioning.stateLabel !== [user.role, user.scenarioLabel].filter(Boolean).join(' · ') ? `<div class="tu-scenario">${escapeHtml(user.provisioning.stateLabel)}</div>` : ''}
+          ${status === 'failed' && user.provisioning?.error ? `<p class="tu-inline-error">${escapeHtml(user.provisioning.error)}</p>` : ''}
           ${
             showProject
               ? `<div class="tu-project-label">${escapeHtml(
@@ -596,27 +647,28 @@
               : ''
           }
         </div>
-        <div class="tu-card-actions">
-          <div class="tu-card-icon-actions">
+        <div class="tu-card-icon-actions">
             <button class="tu-edit-button" data-action="edit" data-user-id="${escapeAttribute(
               user.id
             )}" aria-label="Edit ${escapeAttribute(user.name)}">${icon('edit')}</button>
-            ${
-              canReset
-                ? `<button class="tu-edit-button" data-action="reset-user" data-user-id="${escapeAttribute(
-                    user.id
-                  )}" aria-label="Reset ${escapeAttribute(user.name)} scenario and fill login" title="Reset scenario and fill">${icon(
-                    'refresh'
-                  )}</button>`
-                : ''
-            }
-          </div>
-          <button class="tu-primary-button tu-fill-button" data-action="${action}" data-user-id="${escapeAttribute(
+        </div>
+        <div class="tu-card-actions">
+          <button class="tu-secondary-button tu-fill-button" data-action="${action}" data-user-id="${escapeAttribute(
             user.id
           )}" ${isProvisioning ? 'disabled' : ''}>${icon(
             action === 'provision-user' ? 'sparkles' : 'login-2'
           )}<span>${escapeHtml(actionLabel)}</span></button>
+            ${
+              canReset
+                ? `<button class="tu-reset-button" data-action="reset-user" data-user-id="${escapeAttribute(
+                    user.id
+                  )}" ${isProvisioning ? 'disabled' : ''} aria-label="Reset ${escapeAttribute(user.name)} scenario and fill login" title="Reset scenario and fill">${icon(
+                    'refresh'
+                  )}<span>Reset scenario &amp; fill</span></button>`
+                : ''
+            }
         </div>
+        <div class="tu-result-slot">${renderActionResult(appState.userResults[user.id])}</div>
       </article>
     `;
   }
@@ -720,8 +772,9 @@
     const roleOptions = getEditorRoleOptions(existingUser);
     const scenarioOptions = getEditorScenarioOptions(existingUser);
     const passwordSymbols = getPasswordSymbols();
+    const draft = appState.userDraft;
     const generated =
-      existingUser ||
+      draft || existingUser ||
       Core.buildGeneratedIdentity(
         currentIdentity.siteName,
         roleOptions.find((role) => role.label === 'Member')?.label || roleOptions[0]?.label || 'Member',
@@ -729,15 +782,16 @@
         passwordSymbols
       );
     const title = existingUser ? 'Edit test user' : 'New test user';
-    const selectedRoleId = existingUser?.roleId ||
+    const selectedRoleId = draft?.role || existingUser?.roleId ||
       roleOptions.find((role) => role.label === generated.role)?.id ||
       roleOptions[0]?.id;
     const selectedEnvironment =
-      Core.normalizeEnvironment(existingUser?.environment) || appState.activeEnvironment;
+      Core.normalizeEnvironment(draft?.environment || existingUser?.environment) || appState.activeEnvironment;
 
     return `
-      <main class="tu-content tu-editor">
-        <button class="tu-back-button" data-action="back">${icon('arrow-left')}<span>Back to users</span></button>
+      <form class="tu-editor-shell" data-form="user" data-editor-id="${escapeAttribute(appState.editingId || 'new')}">
+      <div class="tu-editor-heading">
+        <button type="button" class="tu-back-button" data-action="back">${icon('arrow-left')}<span>Back to accounts</span></button>
         <div class="tu-section-heading">
           <div>
             <h2>${title}</h2>
@@ -745,27 +799,15 @@
               environmentLabel(selectedEnvironment)
             )}</p>
           </div>
-          <button class="tu-secondary-button tu-regenerate" data-action="regenerate" title="Replace name, email, and password with fresh values">${icon(
+          <button type="button" class="tu-secondary-button tu-regenerate" data-action="regenerate" title="Replace name, email, and password with fresh values">${icon(
             'sparkles'
           )}<span>Regenerate</span></button>
         </div>
-        <form class="tu-form" data-form="user">
-          <label>
-            <span>Name</span>
-            <input name="name" autocomplete="off" value="${escapeAttribute(generated.name)}" required>
-          </label>
-          <label>
-            <span>Environment</span>
-            <select name="environment">
-              ${Core.ENVIRONMENTS.map(
-                (environment) =>
-                  `<option value="${escapeAttribute(environment)}" ${
-                    selectedEnvironment === environment ? 'selected' : ''
-                  }>${escapeHtml(environmentLabel(environment))}</option>`
-              ).join('')}
-            </select>
-          </label>
-          <label>
+        <div class="tu-editor-notice" role="status">${renderActionResult(appState.editorNotice)}</div>
+      </div>
+      <main class="tu-content tu-editor" data-screen="editor">
+        <div class="tu-form">
+          <label class="tu-form-wide">
             <span>Role</span>
             <select name="role">
               ${roleOptions
@@ -791,7 +833,7 @@
                         (scenario) =>
                           `<option value="${escapeAttribute(scenario.id)}" data-label="${escapeAttribute(
                             scenario.label
-                          )}" ${existingUser?.scenarioId === scenario.id ? 'selected' : ''}>${escapeHtml(
+                          )}" ${(draft?.scenario ?? existingUser?.scenarioId) === scenario.id ? 'selected' : ''}>${escapeHtml(
                             scenario.label
                           )}</option>`
                       )
@@ -800,6 +842,21 @@
                 </label>`
               : ''
           }
+          <label>
+            <span>Name</span>
+            <input name="name" autocomplete="off" value="${escapeAttribute(generated.name)}" required>
+          </label>
+          <label>
+            <span>Environment</span>
+            <select name="environment">
+              ${Core.ENVIRONMENTS.map(
+                (environment) =>
+                  `<option value="${escapeAttribute(environment)}" ${
+                    selectedEnvironment === environment ? 'selected' : ''
+                  }>${escapeHtml(environmentLabel(environment))}</option>`
+              ).join('')}
+            </select>
+          </label>
           <label class="tu-form-wide">
             <span>Email</span>
             <div class="tu-inline-field">
@@ -812,23 +869,26 @@
             </div>
           </label>
           <label class="tu-form-wide">
-            <span>Username</span>
-            <div class="tu-inline-field">
-              <input name="username" autocomplete="off" value="${escapeAttribute(
-                generated.username || ''
-              )}" placeholder="Only for sites that sign in with a username">
-              <button type="button" data-action="copy-field" data-field="username" aria-label="Copy username">${icon(
-                'copy'
-              )}</button>
-            </div>
-          </label>
-          <label class="tu-form-wide">
             <span>Password</span>
             <div class="tu-inline-field">
               <input name="password" type="text" autocomplete="off" value="${escapeAttribute(
                 generated.password
               )}" required>
               <button type="button" data-action="copy-field" data-field="password" aria-label="Copy password">${icon(
+                'copy'
+              )}</button>
+            </div>
+          </label>
+          <details class="tu-advanced tu-form-wide" ${(draft ? draft.optionsOpen : generated.username) ? 'open' : ''}>
+            <summary>More options <span>Username · password rules</span></summary>
+            <div class="tu-form tu-advanced-fields">
+          <label class="tu-form-wide">
+            <span>Username</span>
+            <div class="tu-inline-field">
+              <input name="username" autocomplete="off" value="${escapeAttribute(
+                generated.username || ''
+              )}" placeholder="Only for sites that sign in with a username">
+              <button type="button" data-action="copy-field" data-field="username" aria-label="Copy username">${icon(
                 'copy'
               )}</button>
             </div>
@@ -849,6 +909,8 @@
             </div>
             <small>Untick any this site rejects — with none ticked, passwords are letters and numbers only. Remembered for this site.</small>
           </div>
+            </div>
+          </details>
           <label class="tu-form-wide">
             <span>Notes</span>
             <textarea name="notes" rows="2" maxlength="160" placeholder="What role or scenario is this for?">${escapeHtml(
@@ -871,7 +933,9 @@
                 </div>`
               : ''
           }
-          <div class="tu-form-actions tu-form-wide">
+        </div>
+      </main>
+      <footer class="tu-footer tu-form-actions">
             ${
               existingUser
                 ? `<button class="tu-danger-button" type="button" data-action="delete" data-user-id="${escapeAttribute(
@@ -889,9 +953,8 @@
                   : 'Save &amp; fill'
               }</span></button>
             </div>
-          </div>
-        </form>
-      </main>
+      </footer>
+    </form>
     `;
   }
 
@@ -901,7 +964,7 @@
     if (field.kind === 'checkbox') {
       return `
         <label class="tu-snapshot-checked">
-          <input type="checkbox" data-snapshot-checked ${idAttribute} ${field.checked ? 'checked' : ''}>
+          <input type="checkbox" data-snapshot-checked data-focus-key="checked-${escapeAttribute(field.id)}" ${idAttribute} ${field.checked ? 'checked' : ''}>
           <span>${field.checked ? 'Checked' : 'Unchecked'} when refilled</span>
         </label>
       `;
@@ -961,7 +1024,7 @@
         <label class="tu-snapshot-include" title="${
           field.excluded ? 'Excluded from refill' : 'Included in refill'
         }">
-          <input type="checkbox" data-snapshot-include data-field-id="${escapeAttribute(
+          <input type="checkbox" data-snapshot-include data-focus-key="include-${escapeAttribute(field.id)}" data-field-id="${escapeAttribute(
             field.id
           )}" ${field.excluded ? '' : 'checked'}>
           <span class="tu-sr-only">Include ${escapeHtml(field.label)} in refill</span>
@@ -998,18 +1061,22 @@
     }
 
     return `
-      <main class="tu-content tu-editor">
-        <button class="tu-back-button" data-action="back">${icon('arrow-left')}<span>Back to users</span></button>
+      <form class="tu-editor-shell" data-form="snapshot">
+      <div class="tu-editor-heading">
+        <button type="button" class="tu-back-button" data-action="back">${icon('arrow-left')}<span>Back to forms</span></button>
         <div class="tu-section-heading">
           <div>
             <h2>${isExisting ? 'Edit snapshot' : 'New snapshot'}</h2>
             <p>${escapeHtml(summaryParts.join(' · '))}</p>
           </div>
-          <button class="tu-secondary-button tu-regenerate" data-action="rescan-snapshot" title="Capture the page again: adds new fields, fills in empty values, and keeps your edits">${icon(
+          <button type="button" class="tu-secondary-button tu-regenerate" data-action="rescan-snapshot" title="Capture the page again: adds new fields, fills in empty values, and keeps your edits">${icon(
             'refresh'
           )}<span>Re-scan</span></button>
         </div>
-        <form class="tu-form" data-form="snapshot">
+        <div class="tu-editor-notice" role="status">${renderActionResult(appState.editorNotice)}</div>
+      </div>
+      <main class="tu-content tu-editor" data-screen="snapshot">
+        <div class="tu-form">
           <label class="tu-form-wide">
             <span>Snapshot name</span>
             <input name="snapshotName" autocomplete="off" value="${escapeAttribute(
@@ -1040,7 +1107,9 @@
                 </div>`
               : ''
           }
-          <div class="tu-form-actions tu-form-wide">
+        </div>
+      </main>
+      <footer class="tu-footer tu-form-actions">
             ${
               isExisting
                 ? `<button class="tu-danger-button" type="button" data-action="delete-snapshot" data-snapshot-id="${escapeAttribute(
@@ -1051,9 +1120,8 @@
             <button class="tu-primary-button" type="submit">${icon(
               'device-floppy'
             )}<span>Save snapshot</span></button>
-          </div>
-        </form>
-      </main>
+      </footer>
+    </form>
     `;
   }
 
@@ -1257,6 +1325,7 @@
   }
 
   function renderFooter() {
+    if (appState.screen === 'editor' || appState.screen === 'snapshot') return '';
     if (appState.screen !== 'users') {
       return `
         <footer class="tu-footer tu-footer--compact">
@@ -1268,14 +1337,11 @@
     return `
       <footer class="tu-footer">
         <div class="tu-footer-actions">
-          <button class="tu-secondary-button" data-action="new-user">${icon(
-            'plus'
-          )}<span>New test user</span></button>
-          <button class="tu-icon-button tu-settings-button" data-action="settings" aria-label="Site settings">${icon(
-            'settings'
-          )}</button>
+          <button class="tu-primary-button" data-action="${appState.activeView === 'accounts' ? 'new-user' : 'new-snapshot'}">${icon(
+            appState.activeView === 'accounts' ? 'plus' : 'camera'
+          )}<span>${appState.activeView === 'accounts' ? 'New test user' : 'Snapshot page'}</span></button>
+          <span class="tu-storage-note" title="Passwords are stored in Chrome on this device. Use generated accounts only.">${icon('lock')} Stored on this device</span>
         </div>
-        <span class="tu-storage-note">${icon('lock')} Stored only on this device</span>
       </footer>
     `;
   }
@@ -1290,15 +1356,34 @@
   }
 
   function bindEvents() {
+    shadow.querySelectorAll('.tu-form [name], [data-snapshot-value]').forEach((element) => {
+      element.dataset.focusKey = `field-${element.name || element.dataset.fieldId}`;
+    });
     shadow.querySelectorAll('[data-action]').forEach((element) => {
       element.addEventListener('click', (event) => handleAction(event).catch(showActionError));
     });
 
-    shadow.querySelectorAll('[data-tab]').forEach((element) => {
+    shadow.querySelectorAll('[data-view]').forEach((element) => {
       element.addEventListener('click', () => {
-        appState.activeTab = element.dataset.tab;
+        appState.queries[appState.activeView] = appState.query;
+        appState.activeView = element.dataset.view;
+        appState.query = appState.queries[appState.activeView];
         render();
+        shadow.querySelector(`[data-view="${appState.activeView}"]`)?.focus();
       });
+      element.addEventListener('keydown', (event) => {
+        if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+        event.preventDefault();
+        const views = [...shadow.querySelectorAll('[data-view]')];
+        const index = event.key === 'Home' ? 0 : event.key === 'End' ? views.length - 1 :
+          (views.indexOf(element) + (event.key === 'ArrowRight' ? 1 : -1) + views.length) % views.length;
+        views[index].click();
+      });
+    });
+
+    shadow.querySelector('[data-input="scope"]')?.addEventListener('change', (event) => {
+      appState.activeTab = event.currentTarget.value;
+      render();
     });
 
     shadow.querySelectorAll('[data-env]').forEach((element) => {
@@ -1328,7 +1413,8 @@
 
     const userForm = shadow.querySelector('[data-form="user"]');
     if (userForm) {
-      userForm.__testUsersBaseUser = storedState.users.find((user) => user.id === appState.editingId) || null;
+      userForm.__testUsersBaseUser = appState.userDraft ? appState.userDraft.base :
+        storedState.users.find((user) => user.id === appState.editingId) || null;
     }
     for (const name of ['email', 'username']) {
       userForm?.elements[name]?.addEventListener('input', () => {
@@ -1400,6 +1486,12 @@
     const siteKey = event.currentTarget.dataset.siteKey;
     const snapshotId = event.currentTarget.dataset.snapshotId;
     const fieldId = event.currentTarget.dataset.fieldId;
+    if (['new-user', 'edit', 'back', 'settings', 'new-snapshot', 'edit-snapshot'].includes(action)) {
+      clearTimeout(toastTimer);
+      appState.toast = null;
+      appState.editorNotice = null;
+      shadow.querySelector('.tu-page-toast')?.remove();
+    }
 
     if (action === 'toggle' || action === 'close') {
       appState.open = !appState.open;
@@ -1410,6 +1502,8 @@
     if (action === 'new-user') {
       appState.screen = 'editor';
       appState.editingId = null;
+      appState.userDraft = null;
+      appState.activeView = 'accounts';
       appState.pendingDeleteUserId = null;
       render();
       return;
@@ -1418,6 +1512,7 @@
     if (action === 'edit') {
       appState.screen = 'editor';
       appState.editingId = userId;
+      appState.userDraft = null;
       appState.pendingDeleteUserId = null;
       render();
       return;
@@ -1426,6 +1521,7 @@
     if (action === 'back') {
       appState.screen = 'users';
       appState.editingId = null;
+      appState.userDraft = null;
       appState.pendingDeleteUserId = null;
       appState.pendingDeleteSiteKey = null;
       appState.snapshotDraft = null;
@@ -1536,6 +1632,7 @@
         fields: (snapshot.fields || []).map((field) => ({ ...field })),
       };
       appState.screen = 'snapshot';
+      appState.activeView = 'forms';
       appState.pendingDeleteSnapshotId = null;
       render();
       return;
@@ -1676,6 +1773,8 @@
     ({ user } = await mutateStoredState({ type: 'save-user', origin: currentIdentity.origin, user, base: existing }));
     appState.screen = 'users';
     appState.editingId = null;
+    appState.userDraft = null;
+    appState.activeView = 'accounts';
     // Land on the environment the user was just saved to, so it is visible.
     if (user.siteId === currentIdentity.siteId) {
       appState.activeEnvironment = user.environment;
@@ -1822,6 +1921,7 @@
   }
 
   async function provisionUser(user, operation) {
+    if (appState.userOperations[user.id]) return false;
     if (!adapterIsReady()) await loadAdapterCapabilities();
     if (!adapterAppliesToUser(user)) {
       showToast('Provisioning adapter is not ready for this site', 'error');
@@ -1837,7 +1937,8 @@
     }
 
     const adapterUrl = getConfiguredAdapterUrl();
-    appState.provisioningUserId = user.id;
+    appState.userOperations[user.id] = operation;
+    delete appState.userResults[user.id];
     render();
 
     try {
@@ -1876,7 +1977,7 @@
       };
       const updatedUser = { ...user, provisioning, updatedAt: now };
       await mutateStoredState({ type: 'set-provisioning', id: user.id, provisioning, updatedAt: now });
-      appState.provisioningUserId = null;
+      delete appState.userOperations[user.id];
       render();
 
       const filled = await fillCredentials(updatedUser, { quiet: true });
@@ -1906,7 +2007,7 @@
         type: 'set-provisioning', id: user.id,
         provisioning: failedUser.provisioning, updatedAt: failedUser.updatedAt,
       });
-      appState.provisioningUserId = null;
+      delete appState.userOperations[user.id];
       render();
       showToast(message, 'error');
       return false;
@@ -1914,6 +2015,7 @@
   }
 
   async function startNewSnapshot() {
+    appState.activeView = 'forms';
     const rawFields = await snapshotEveryFrame();
     const { fields, skippedCount } = Core.buildSnapshotFields(rawFields);
 
@@ -1979,6 +2081,7 @@
 
     await mutateStoredState({ type: 'save-snapshot', origin: currentIdentity.origin, snapshot, base: draft.base });
     appState.screen = 'users';
+    appState.activeView = 'forms';
     appState.snapshotDraft = null;
     appState.pendingDeleteSnapshotId = null;
     render();
@@ -1998,15 +2101,28 @@
   }
 
   async function refillSnapshot(snapshot) {
+    if (appState.snapshotOperations[snapshot.id]) return;
     const fields = Array.isArray(snapshot.fields) ? snapshot.fields : [];
     const includedCount = fields.filter((field) => !field.excluded).length;
-    const matchedIds = await refillEveryFrame(fields);
-    const filledCount = new Set(matchedIds).size;
-
-    showToast(
-      Core.describeRefillResult(filledCount, includedCount),
-      filledCount ? 'success' : 'error'
-    );
+    appState.snapshotOperations[snapshot.id] = true;
+    delete appState.snapshotResults[snapshot.id];
+    render();
+    try {
+      const matchedIds = new Set(await refillEveryFrame(fields));
+      const message = Core.describeRefillResult(matchedIds.size, includedCount);
+      setActionResult('snapshot', snapshot.id, {
+        message, type: matchedIds.size === includedCount && includedCount ? 'success' : 'warning',
+        unmatched: fields.filter((field) => !field.excluded && !matchedIds.has(field.id))
+          .map((field) => field.label || field.name || 'Unnamed field'),
+      });
+      showToast(message, matchedIds.size ? 'success' : 'error');
+    } catch (error) {
+      setActionResult('snapshot', snapshot.id, { message: error.message || 'Unable to refill this form', type: 'error' });
+      showActionError(error);
+    } finally {
+      delete appState.snapshotOperations[snapshot.id];
+      render();
+    }
   }
 
   function setInputValue(input, value) {
@@ -2238,21 +2354,37 @@
   }
 
   async function fillCredentials(user, options = {}) {
-    const framePurposes = await fillEveryFrame(user);
-    const purposes = framePurposes ?? applyFillPlan(user);
-
-    if (!purposes.length) {
-      if (!options.quiet) showToast('No login or sign-up fields found on this page', 'error');
+    if (appState.userOperations[user.id]) return false;
+    appState.userOperations[user.id] = 'fill';
+    render();
+    try {
+      const framePurposes = await fillEveryFrame(user);
+      const purposes = framePurposes ?? applyFillPlan(user);
+      const message = purposes.length
+        ? `Filled ${Core.describeFillPlan(purposes.map((purpose) => ({ purpose })))}`
+        : 'No login or sign-up fields found on this page';
+      setActionResult('user', user.id, { message, type: purposes.length ? 'success' : 'warning' });
+      if (!options.quiet) showToast(message, purposes.length ? 'success' : 'error');
+      return Boolean(purposes.length);
+    } catch (error) {
+      setActionResult('user', user.id, { message: error.message || 'Unable to fill this account', type: 'error' });
+      if (!options.quiet) showActionError(error);
       return false;
+    } finally {
+      delete appState.userOperations[user.id];
+      render();
     }
-
-    if (!options.quiet) {
-      showToast(`Filled ${Core.describeFillPlan(purposes.map((purpose) => ({ purpose })))}`);
-    }
-    return true;
   }
 
   function showToast(message, type = 'success') {
+    if (appState.screen === 'editor' || appState.screen === 'snapshot') {
+      appState.editorNotice = { message, type };
+      appState.toast = null;
+      shadow.querySelector('.tu-page-toast')?.remove();
+      const notice = shadow.querySelector('.tu-editor-notice');
+      if (notice) notice.innerHTML = renderActionResult(appState.editorNotice);
+      return;
+    }
     appState.toast = { message, type };
     syncToast();
     clearTimeout(toastTimer);

@@ -2,6 +2,15 @@
 
 Test Users is a Manifest V3 Chrome extension for generating, organizing, and autofilling disposable local or staging accounts.
 
+## Using the panel
+
+- **Accounts** lists saved identities for the selected site and environment. **Forms** lists saved form snapshots for the site, with the current page first. Each view keeps its own search.
+- The scope control beside search switches between **This site** and **All sites**. The header always describes the page you are on; browsing another environment does not change the page's environment chip.
+- **Fill login** fills matching fields without submitting the application's form. The exact result stays beside the account. Provisioned accounts additionally show **Ready** and a labeled **Reset scenario & fill** action; provisioning failures retain an error and retry action.
+- Account creation and snapshot review keep their save actions visible while fields scroll. **More options** in the account editor contains the optional username and password-generation rules.
+- Snapshot refill retains its result beside the saved form, including an expandable list of unmatched fields after a partial refill. Editor feedback appears inside the panel so it does not cover save actions.
+- Use the arrow keys, Home, or End to switch between Accounts and Forms with keyboard focus. Escape collapses the panel.
+
 ## How sites and environments work
 
 A **site** is keyed by the page's address alone — hostname plus port, such as `localhost:3000` or `app.hikestrong.com`. Nothing about the browser-tab title is ever used, so the site never changes as you navigate around an app. You can rename a site in **Settings** (for example to `HikeStrong`); the name seeds generated emails and labels the panel.
@@ -22,7 +31,7 @@ By default each address is its own site. When one project spans several addresse
 - Save a short name, role, and scenario note with each account, plus an optional username for sites that sign in with a username instead of an email — at least one of email or username is required. Username fields are filled with the stored username when set, falling back to the email (or its local part when the form also has an email field).
 - Fill login and sign-up forms: full or first/last name, username, email, and every password field. Fields are matched by labels, placeholders, `autocomplete` attributes, and name/id hints, including inside open shadow DOM and same-origin iframes, and a toast confirms exactly which fields were filled.
 - Snapshot longer forms and refill them in one click on the next debugging run. A snapshot captures every editable field on the page — text inputs, selects, checkboxes, radios, and textareas, including open shadow DOM and same-origin iframes — while email, username, password, payment, and one-time-code fields are never captured or refilled.
-- Review a snapshot before saving: untick fields to exclude them from refill, edit or correct captured values, remove rows, and **Re-scan** the page to pick up fields the first capture missed (hand-edited values are kept). Refill matches fields by stable identity (id, name, label, placeholder, autocomplete) rather than position, and the toast reports how many fields matched.
+- Review a snapshot before saving: untick fields to exclude them from refill, edit or correct captured values, remove rows, and **Re-scan** the page to pick up fields the first capture missed (hand-edited values are kept). Refill matches fields by stable identity (id, name, label, placeholder, autocomplete) rather than position, and the saved form reports how many fields matched.
 - Filter accounts for the current site and environment, or search across all sites.
 - Delete an individual login from its edit screen, or delete a saved site and every login beneath it from **Settings → Saved sites**.
 - Keep all extension state in `chrome.storage.local` on the current Chrome profile.
@@ -87,7 +96,7 @@ The extension requests `activeTab`, `scripting`, and `storage`. It does not requ
 npm run demo
 ```
 
-Then open [http://127.0.0.1:4173/demo/login.html](http://127.0.0.1:4173/demo/login.html). The demo uses temporary sample users and does not write them to Chrome storage. Its safe example adapter is available at `/__test-users`; enter that path under **Site settings → Provisioning adapter** to try provision and reset. For the form-snapshot flow, open [http://127.0.0.1:4173/demo/profile.html](http://127.0.0.1:4173/demo/profile.html), fill a few fields, and click **Snapshot page**.
+Then open [http://127.0.0.1:4173/demo/login.html](http://127.0.0.1:4173/demo/login.html). The demo uses temporary sample users and does not write them to Chrome storage. Its safe example adapter is available at `/__test-users`; enter that path under **Site settings → Provisioning adapter** to try provision and reset. For the form-snapshot flow, open [http://127.0.0.1:4173/demo/profile.html](http://127.0.0.1:4173/demo/profile.html), fill a few fields, then select **Forms → Snapshot page**.
 
 ## Checks
 

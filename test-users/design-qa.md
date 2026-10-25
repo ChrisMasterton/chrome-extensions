@@ -1,5 +1,24 @@
 # Test Users design QA
 
+## 2026-10-24 — Accounts and Forms redesign
+
+The current panel separates **Accounts** from **Forms**, keeps the page identity visible, and places the site scope beside search. Account environment selection remains independent of the page environment, with an explicit mismatch message. Form snapshots retain their site/path scope.
+
+Account rows emphasize the name, role, and scenario, with quieter fill buttons and a labeled reset action. Readiness, provisioning failure, and the latest fill result remain separate. Partial snapshot refill exposes the unmatched field labels. Account creation and snapshot review keep their headings and commit actions outside the field scroller; optional usernames and generator rules live under **More options**. Editor messages appear in the heading instead of floating over the save buttons.
+
+Verification:
+
+- `npm run verify`: syntax checks, all 38 Node tests, and the isolated Chrome extension smoke suite passed.
+- The Chrome suite exercises task/scope navigation, independent searches, keyboard tab switching, environment mismatch, generation/validation, provision/reset/retry, readiness after a fill miss, cross-frame autofill, deletion, snapshot capture/exclude/edit/refill, partial-match details, site linking, reload persistence, and concurrent saves/conflicts.
+- Browser geometry and hit tests confirm the account and snapshot commit buttons remain visible at **1280 × 720** and **360 × 480**. Screenshot review caught a stale toast covering the editor actions; editor feedback now stays inside the heading, and responsive toast animation uses the mobile position.
+- Snapshot include/exclude changes retain keyboard focus and scroll position. Important results remain readable without motion or color alone; decorative transitions respect reduced motion.
+- Manual demo review exercised generation, provision-and-fill, reset, snapshot value editing, re-scan preserving edits, save, and refill restoring the edited value.
+- No browser runtime exceptions were reported by the Chrome suite. This is implementation and browser evidence; user-comprehension testing and real project adapter integration were not performed.
+
+Set `TEST_USERS_E2E_ARTIFACT_DIR` to an absolute output directory when running `npm run test:e2e` to retain the editor, provisioning, failure, and partial-refill screenshots. The suite otherwise cleans up its temporary Chrome profile and fixtures.
+
+The comparison below is historical and describes the original design.
+
 > **2026-08-13 note:** This document records the original 0.1.0 comparison pass and its screenshots are now historical. The header was since redesigned — a site-identity card (initial badge, project name, address, environment chip, Edit affordance) replaced the `LOCALHOST · <project>` caption, and the scope tabs are now named after the detected project with counts. See `RELEASE_NOTES.md` at the repo root for the current state.
 
 ## Evidence

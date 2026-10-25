@@ -4,12 +4,18 @@ Vibe Digger is a Chrome extension for debugging React apps while you vibe-code. 
 
 ## Features
 
-- **Inspect** — hover any element to see the React component that owns it, with its owner chain. Click to pin the component's props, hooks, class state, render count, and source location (when React provides it) into the panel.
+- **Inspect** — choose **Pick element**, then hover any element to see the React component that owns it, with its owner chain. Click to pin the component's props, hooks, class state, render count, and source location (when React provides it) into the panel.
 - **Heatmap** — flashes components as they re-render, labeled with cumulative render counts and colored by heat (violet → yellow → orange → red). Great for spotting wasted renders from an unmemoized tree.
-- **Net** — records the page's whole network lifecycle in order: every `fetch`, XHR, `sendBeacon`, and **WebSocket** with its request body, response body (JSON/text, bounded, secret-redacted), payload sizes, status, duration, and the **initiator stack** — the code path that fired it. WebSockets appear as one live entry per socket with its sent/received frames (timestamped, redacted, bounded), close code, and clean/unclean verdict. Step through the story yourself, or copy it for an agent: request/response evidence can't be faked by UI that merely looks right. On localhost, capture starts at `document_start`, so boot-time requests are included.
+- **Network** — records the page's whole network lifecycle in order: every `fetch`, XHR, `sendBeacon`, and **WebSocket** with its request body, response body (JSON/text, bounded, secret-redacted), payload sizes, status, duration, and the **initiator stack** — the code path that fired it. WebSockets appear as one live entry per socket with its sent/received frames (timestamped, redacted, bounded), close code, and clean/unclean verdict. Step through the story yourself, or copy it for an agent: request/response evidence can't be faked by UI that merely looks right. On localhost, capture starts at `document_start`, so boot-time requests are included.
 - **Issues** — digs up console errors, React warnings (missing keys, act warnings, etc.), console warnings, uncaught errors, unhandled promise rejections, and failed `fetch`/XHR requests. Duplicates are deduped with counts; obvious secrets are redacted.
-- **Copy** — puts a markdown capture on the clipboard: page info, the pinned component with props/hooks, top render counts, the ordered network lifecycle with bodies, and the issue list. Paste it straight into a coding agent instead of describing the bug in prose.
-- **Scoped copy icons** — copy one API/Net entry, one issue, or the complete Inspect, Net, or Issues view as focused agent-ready Markdown without including unrelated capture data.
+- **Copy capture** — puts a markdown capture on the clipboard: page info, the pinned component with props/hooks, top render counts, the ordered network lifecycle with bodies, and the issue list. Paste it straight into a coding agent instead of describing the bug in prose.
+- **Scoped copy icons** — copy one network entry, one issue, or the complete Inspect, Network, or Issues view as focused agent-ready Markdown without including unrelated capture data.
+
+## Panel workflow
+
+**Inspect**, **Network**, and **Issues** are separate views. Pick element and Heatmap are independent toggles. The panel keeps a stable frame while views change, and the Copy capture action stays visible below scrolling evidence.
+
+Network and issue disclosures are keyboard-accessible and retain expansion, focus, and reading position when new evidence arrives. Each view and entry also has a scoped copy action. Copy capture waits for both evidence lists and clipboard completion before reporting success; a failed write remains visible and can be retried. Capture continues while minimized, and minimizing exits picking mode.
 
 ## Installation
 
@@ -29,7 +35,7 @@ On non-local sites, both scripts are injected on demand when you click the icon 
 
 If the real React DevTools hook is already present, Vibe Digger wraps it instead of replacing it; the two coexist.
 
-The Net capture is scoped to the current page load. Closing or hiding the panel
+The network capture is scoped to the current page load. Closing or hiding the panel
 does not clear it. Use **Clear all** to reset it manually; navigating or reloading
 the page starts a fresh capture. The buffer keeps at most 300 entries and drops
 the oldest entry when a new one exceeds that limit.
@@ -50,13 +56,14 @@ A small React app that exercises every feature lives in `demo/`:
 npm run demo   # serves http://localhost:5183
 ```
 
-It ticks every second (turn on the Heatmap and watch the unmemoized tree flash while the memoized clock stays quiet), has a filterable list and counter to inspect, and buttons that produce a missing-key warning, a 404 fetch, an async throw, an unhandled rejection, and a manual warning for the Issues panel. The demo server also exposes a small JSON API (`/api/items` fetched on mount, `/api/echo` POST, `/api/slow`, and a malformed-body 400) plus a WebSocket echo at `/ws/echo`, so the Net tab has a real request/response/frame story to tell.
+It ticks every second (turn on the Heatmap and watch the unmemoized tree flash while the memoized clock stays quiet), has a filterable list and counter to inspect, and buttons that produce a missing-key warning, a 404 fetch, an async throw, an unhandled rejection, and a manual warning for the Issues panel. The demo server also exposes a small JSON API (`/api/items` fetched on mount, `/api/echo` POST, `/api/slow`, and a malformed-body 400) plus a WebSocket echo at `/ws/echo`, so the Network tab has a real request/response/frame story to tell.
 
 ## Development
 
 ```sh
 npm run check   # syntax-check all scripts
 npm test        # manifest/consistency tests
+npm run test:e2e # isolated Chrome UI and capture flows (demo requires cdnjs access)
 npm run icons   # regenerate icon PNGs
 ```
 
@@ -66,5 +73,7 @@ npm run icons   # regenerate icon PNGs
 - Hook values are shown positionally (`#0 state`, `#1 ref`, …); custom hook names are not recoverable from fibers.
 - Production React builds minify component names and strip debug source info; the inspector works best against dev builds.
 - Network capture covers `fetch`, `XMLHttpRequest`, `sendBeacon`, and WebSockets — not EventSource or static resource loads (images, scripts). Response bodies are captured only for JSON/text-like content types, bounded at ~3KB each; WebSocket entries keep the last 60 frames (~800 chars each, binary frames noted by size only).
-- Net size labels count known payload-body bytes, not HTTP headers or transport framing. Text is measured as UTF-8, WebSocket totals accumulate frame payloads, and unknown sizes are shown as `?`.
+- Network size labels count known payload-body bytes, not HTTP headers or transport framing. Text is measured as UTF-8, WebSocket totals accumulate frame payloads, and unknown sizes are shown as `?`.
 - Everything is standalone and clipboard-based. Wiring captures into the local Codex inbox (like `element-picker`) is a possible follow-up.
+
+Set `VIBE_DIGGER_E2E_SCREENSHOT_DIR` to an absolute directory to retain browser screenshots. The browser lane uses a temporary profile and the real React demo; it exercises inspection/heatmap, streamed HTTP/WebSocket evidence, keyboard navigation and disclosures, reading position, delayed clipboard acknowledgement, native clipboard success, injected clipboard failure/retry, scoped copying, minimize/restore, and short-window controls. Test profiles, servers, and fixture data are cleaned up afterward.

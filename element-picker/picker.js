@@ -63,18 +63,10 @@
   let pauseButton = null;
   let breakOnLoadButton = null;
   let clickThroughButton = null;
-  let watchButton = null;
-  let recordButton = null;
-  let traceButton = null;
-  let sendTraceButton = null;
   let countBadge = null;
   let commentInput = null;
-  let toastLayer = null;
   let statusPill = null;
   let inboxHealth = 'unknown';
-  let vibeToggleButton = null;
-  let vibeGroup = null;
-  let vibeGroupOpen = false;
   let currentElement = null;
   let selections = [];
   let isExporting = false;
@@ -92,7 +84,21 @@
   let tourPanelPosition = 'top-right';
   let tourPanelPositionLocked = false;
   let tracePanel = null;
-  let tracePanelOpen = false;
+  let activeWorkspace = 'capture';
+  let captureBody = null;
+  let captureList = null;
+  let captureSendButton = null;
+  let captureCopyButton = null;
+  let undoButton = null;
+  let modeLabel = null;
+  let recordingLabel = null;
+  let stopRecordingButton = null;
+  let notice = null;
+  let transientNotice = null;
+  let noticeTimer = null;
+  let isSendingTrace = false;
+  const workspaceTabs = new Map();
+  const handoffs = { capture: null, trace: null, tour: null };
   let watchTargets = [];
   let watchTargetCounter = 1;
   let traceEventCounter = 1;
@@ -366,52 +372,14 @@
     });
   }
 
-  function ensureToastLayer() {
-    if (toastLayer && toastLayer.isConnected) return toastLayer;
-
-    toastLayer = document.createElement('div');
-    markPickerUi(toastLayer);
-    toastLayer.style.cssText = [
-      'position: fixed',
-      'top: 16px',
-      'left: 16px',
-      'z-index: 2147483647',
-      'display: flex',
-      'flex-direction: column',
-      'gap: 8px',
-      'pointer-events: none',
-      'max-width: min(460px, calc(100vw - 32px))',
-    ].join(';');
-    document.body.appendChild(toastLayer);
-    return toastLayer;
-  }
-
   function showToast(message, duration = 2000) {
-    const layer = ensureToastLayer();
-
-    const toast = document.createElement('div');
-    markPickerUi(toast);
-    toast.textContent = message;
-    toast.style.cssText = [
-      'background: #111827',
-      'color: #fff',
-      'padding: 12px 18px',
-      'border-radius: 8px',
-      'font-family: ui-sans-serif, system-ui, sans-serif',
-      'font-size: 13px',
-      'line-height: 1.25',
-      'box-shadow: 0 10px 20px rgba(0,0,0,0.35)',
-      'pointer-events: none',
-      'text-align: left',
-    ].join(';');
-
-    layer.appendChild(toast);
-    window.setTimeout(() => {
-      toast.remove();
-      if (toastLayer && !toastLayer.childElementCount) {
-        toastLayer.remove();
-        toastLayer = null;
-      }
+    const result = { state: 'info', message, workspace: activeWorkspace };
+    transientNotice = result;
+    clearTimeout(noticeTimer);
+    updateWorkspaceVisibility();
+    noticeTimer = setTimeout(() => {
+      if (transientNotice === result) transientNotice = null;
+      updateWorkspaceVisibility();
     }, duration);
   }
 
@@ -446,9 +414,10 @@
   }
 
   function setTourPanelPosition(position) {
-    if (!tourPanel || !TOUR_PANEL_POSITIONS.includes(position)) return;
+    if (!toolbar || !TOUR_PANEL_POSITIONS.includes(position)) return;
     tourPanelPosition = position;
-    tourPanel.dataset.position = position;
+    toolbar.dataset.position = position;
+    if (tourPanel) tourPanel.dataset.position = position;
   }
 
   function getNextTourPanelPosition(position = tourPanelPosition) {
@@ -495,7 +464,7 @@
 
     for (const position of candidateOrder) {
       setTourPanelPosition(position);
-      const panelRect = tourPanel.getBoundingClientRect();
+      const panelRect = toolbar.getBoundingClientRect();
       const overlapArea = getOverlapArea(panelRect, targetRect);
       scored.push({ position, overlapArea });
 
@@ -520,7 +489,7 @@
   }
 
   function queueTourPanelPlacement(options = {}) {
-    if (!tourPanel) return;
+    if (!tourPanel || !isTourActive()) return;
     window.requestAnimationFrame(() => placeTourPanel(options));
   }
 
@@ -608,8 +577,10 @@
 
     tourPanel = document.createElement('div');
     tourPanel.id = TOUR_PANEL_ID;
+    tourPanel.setAttribute('role', 'tabpanel');
+    tourPanel.setAttribute('aria-labelledby', 'element-picker-tab-tour');
     markPickerUi(tourPanel);
-    document.body.appendChild(tourPanel);
+    toolbar.insertBefore(tourPanel, notice);
     setTourPanelPosition(tourPanelPosition);
     return tourPanel;
   }
@@ -619,13 +590,13 @@
     if (tourHighlight) tourHighlight.remove();
 
     activeTour = null;
+    activeWorkspace = 'capture';
     activeTourStepIndex = 0;
     activeTourElement = null;
     tourPanel = null;
     tourHighlight = null;
     tourAskInput = null;
     tourAskNotes.clear();
-    tourPanelPosition = 'top-right';
     tourPanelPositionLocked = false;
     updateToolbarState();
   }
@@ -636,7 +607,7 @@
   }
 
   function isTourActive() {
-    return !!activeTour?.steps?.length;
+    return activeWorkspace === 'tour' && !!activeTour?.steps?.length;
   }
 
   function getTourStepKey(step = getActiveTourStep(), stepIndex = activeTourStepIndex) {
@@ -749,7 +720,9 @@
       return;
     }
 
+    activeWorkspace = 'tour';
     const panel = ensureTourPanel();
+    panel.hidden = false;
     const total = activeTour.steps.length;
     const onCurrentUrl = isCurrentTourStepUrl(step);
     activeTourElement = onCurrentUrl ? findTourElement(step) : null;
@@ -792,7 +765,7 @@
     });
     backButton.disabled = activeTourStepIndex === 0;
 
-    const closeButton = createTourPanelButton('Close', () => {
+    const closeButton = createTourPanelButton('End tour', () => {
       clearTour();
       showToast('Guided review closed.', 1500);
     });
@@ -805,7 +778,7 @@
 
     const askButton = createTourPanelButton('Ask Codex', () => {
       askCodexAboutTourStep();
-    }, 'primary');
+    }, 'secondary');
     askButton.disabled = !activeTourElement;
 
     const nextButton = createTourPanelButton(activeTourStepIndex === total - 1 ? 'Done' : 'Next', () => {
@@ -832,15 +805,16 @@
     } else {
       controls.append(askButton);
     }
+    if (onCurrentUrl && !activeTourElement) controls.append(createTourPanelButton('Find target again', renderTourStep));
     controls.append(nextButton, closeButton);
 
     tourAskInput = onCurrentUrl ? createTourAskInput(step, activeTourStepIndex) : null;
 
-    if (tourAskInput) {
-      panel.replaceChildren(eyebrow, title, body, status, tourAskInput, controls);
-    } else {
-      panel.replaceChildren(eyebrow, title, body, status, controls);
-    }
+    const content = document.createElement('div');
+    content.className = 'element-picker-tour-content';
+    content.append(eyebrow, title, body, status);
+    if (tourAskInput) content.appendChild(tourAskInput);
+    panel.replaceChildren(content, controls);
 
     queueTourPanelPlacement();
     updateToolbarState();
@@ -848,7 +822,7 @@
 
   async function loadLatestTour() {
     try {
-      showToast('Loading latest Codex guided review...', 1600);
+      setHandoff('tour', { state: 'pending', message: 'Loading guided review…' });
       const response = await chrome.runtime.sendMessage({
         type: 'ELEMENT_PICKER_GET_LATEST_TOUR',
         tourUrl: CODEX_TOUR_URL,
@@ -858,6 +832,7 @@
         throw new Error(response?.error || 'No guided review is available');
       }
 
+      activeWorkspace = 'tour';
       activeTour = response.tour;
       activeTourStepIndex = 0;
       tourPanelPositionLocked = false;
@@ -866,10 +841,10 @@
       renderTourStep();
       updateToolbarState();
       setInboxHealth('online');
-      showToast(`Loaded guided review: ${activeTour.title}`, 2400);
+      handoffs.tour = null;
+      updateToolbarState();
     } catch (error) {
-      console.error('Failed to load Codex guided review:', error);
-      showToast(`Tour load failed: ${error?.message || 'start the Codex QA inbox server'}`, 4200);
+      setHandoff('tour', { state: 'error', message: `Tour load failed: ${error?.message || 'Start the local inbox, then retry.'}` });
     }
   }
 
@@ -894,6 +869,7 @@
       return;
     }
 
+    activeWorkspace = 'tour';
     activeTour = message.tour;
     activeTourStepIndex = Math.max(0, Math.min(
       Number.parseInt(message.stepIndex || 0, 10),
@@ -1013,16 +989,79 @@
     return pill;
   }
 
-  function setVibeGroupOpen(open) {
-    vibeGroupOpen = open;
-    if (vibeGroup) {
-      vibeGroup.classList.toggle('element-picker-toolbar-group-hidden', !open);
-      vibeGroup.setAttribute('aria-hidden', open ? 'false' : 'true');
+  function setWorkspace(view) {
+    if (tourAskInput && activeWorkspace === 'tour') saveTourAskText(tourAskInput.value);
+    activeWorkspace = view;
+    if (overlay) overlay.style.display = 'none';
+    if (tourHighlight) tourHighlight.style.display = 'none';
+    if (view === 'tour') {
+      if (activeTour?.steps?.length) renderTourStep();
+      else renderTourStart();
     }
-    if (vibeToggleButton) {
-      vibeToggleButton.setAttribute('aria-expanded', open ? 'true' : 'false');
-    }
+    updateToolbarState();
     updateTraceUi();
+  }
+
+  function renderTourStart() {
+    const panel = ensureTourPanel();
+    panel.replaceChildren();
+    const description = document.createElement('p');
+    description.textContent = 'Load a guided review from your local Codex inbox.';
+    panel.append(description, createTourPanelButton('Load tour', loadLatestTour, 'primary'));
+  }
+
+  function setHandoff(workspace, result) {
+    transientNotice = null;
+    clearTimeout(noticeTimer);
+    handoffs[workspace] = result;
+    updateToolbarState();
+    if (workspace === 'trace') updateTraceUi();
+  }
+
+  function updateWorkspaceVisibility() {
+    if (!toolbar) return;
+    toolbar.dataset.workspace = activeWorkspace;
+    for (const [view, tab] of workspaceTabs) {
+      const selected = view === activeWorkspace;
+      tab.setAttribute('aria-selected', String(selected));
+      tab.tabIndex = selected ? 0 : -1;
+    }
+    if (captureBody) captureBody.hidden = activeWorkspace !== 'capture';
+    if (tracePanel) tracePanel.hidden = activeWorkspace !== 'trace';
+    if (tourPanel) tourPanel.hidden = activeWorkspace !== 'tour';
+    if (modeLabel) modeLabel.textContent = activeWorkspace === 'tour' ? 'Guided review' : isPaused ? clickThroughArmed ? 'Picking · next click uses page' : 'Picking elements' : 'Using page';
+    if (pauseButton) {
+      pauseButton.hidden = activeWorkspace === 'tour';
+      pauseButton.textContent = isPaused ? 'Use page' : 'Pick elements';
+      pauseButton.title = isPaused ? 'Use the page normally; recording continues if active' : 'Pick elements to capture or watch';
+      pauseButton.setAttribute('aria-label', pauseButton.title);
+    }
+    if (recordingLabel) {
+      recordingLabel.textContent = isTraceRecording ? `Recording · ${watchTargets.length} watched` : 'Not recording';
+      recordingLabel.dataset.recording = String(isTraceRecording);
+    }
+    if (stopRecordingButton) stopRecordingButton.hidden = !isTraceRecording || activeWorkspace === 'trace';
+    const result = transientNotice?.workspace === activeWorkspace ? transientNotice : handoffs[activeWorkspace];
+    if (notice && notice.__result !== result) {
+      notice.__result = result;
+      notice.hidden = !result;
+      notice.dataset.state = result?.state || '';
+      notice.replaceChildren();
+      if (result) {
+        const message = document.createElement('span');
+        message.textContent = result.message;
+        notice.appendChild(message);
+        if (result.path) {
+          const details = document.createElement('details');
+          const summary = document.createElement('summary');
+          summary.textContent = 'Saved location';
+          const path = document.createElement('div');
+          path.textContent = result.path;
+          details.append(summary, path);
+          notice.appendChild(details);
+        }
+      }
+    }
   }
 
   function isTextEntryElement(element) {
@@ -1039,17 +1078,7 @@
   function updateToolbarState() {
     const tourActive = isTourActive();
 
-    if (toolbar) {
-      toolbar.classList.toggle('element-picker-toolbar-hidden-by-tour', tourActive);
-      toolbar.setAttribute('aria-hidden', tourActive ? 'true' : 'false');
-    }
-
-    if (pauseButton) {
-      pauseButton.textContent = isPaused ? 'Resume' : 'Pause';
-      pauseButton.title = isPaused
-        ? 'Resume normal page interaction'
-        : 'Pause page interaction and inspect elements';
-    }
+    updateWorkspaceVisibility();
 
     if (breakOnLoadButton) {
       breakOnLoadButton.textContent = breakOnLoadEnabled ? 'Break Load On' : 'Break on Load';
@@ -1071,8 +1100,34 @@
       clickThroughButton.classList.toggle('element-picker-toolbar-button-primary', clickThroughArmed);
     }
 
+    const optionsSummary = toolbar?.querySelector('.element-picker-capture-options summary');
+    if (optionsSummary) optionsSummary.textContent = `Picking options${breakOnLoadEnabled ? ' · break on load' : ''}${clickThroughArmed ? ' · next click uses page' : ''}`;
+
     if (countBadge) {
       countBadge.textContent = `${selections.length} selected`;
+      if (captureSendButton) {
+        captureSendButton.disabled = isExporting || selections.length === 0;
+        captureSendButton.textContent = isExporting ? 'Preparing…' : handoffs.capture?.state === 'error' && handoffs.capture?.action !== 'copy' ? 'Retry send' : 'Send capture';
+      }
+      if (captureCopyButton) {
+        captureCopyButton.disabled = isExporting || selections.length === 0;
+        captureCopyButton.textContent = handoffs.capture?.state === 'error' && handoffs.capture?.action === 'copy' ? 'Retry copy' : 'Copy capture';
+      }
+      if (undoButton) undoButton.disabled = selections.length === 0;
+      if (captureList) {
+        captureList.replaceChildren();
+        if (!selections.length) {
+          const hint = document.createElement('p');
+          hint.textContent = 'Click an element on the page to add it to this capture.';
+          captureList.appendChild(hint);
+        }
+        selections.forEach((selection, index) => {
+          const row = document.createElement('div');
+          row.className = 'element-picker-capture-row';
+          row.textContent = `${index + 1}. ${selection.info.tag}${selection.info.id ? '#' + selection.info.id : ''} · ${truncate(getTextPreview(selection.element), 64)}`;
+          captureList.appendChild(row);
+        });
+      }
     }
 
     if (overlay) {
@@ -1138,112 +1193,99 @@
   }
 
   function createToolbar() {
-    toolbar = document.createElement('div');
+    toolbar = document.createElement('section');
     toolbar.id = TOOLBAR_ID;
+    toolbar.setAttribute('aria-label', 'QA Bridge');
     markPickerUi(toolbar);
+    setTourPanelPosition('top-right');
 
-    const title = document.createElement('div');
-    markPickerUi(title);
-    title.className = 'element-picker-toolbar-title';
+    const header = document.createElement('div');
+    header.className = 'element-picker-workspace-header';
+    const title = document.createElement('strong');
     title.textContent = 'QA Bridge';
-
-    countBadge = document.createElement('div');
-    markPickerUi(countBadge);
-    countBadge.className = 'element-picker-toolbar-count';
-
     statusPill = createStatusPill();
-
-    commentInput = createCommentInput();
-
-    pauseButton = createToolbarButton('Resume', 'Resume normal page interaction', () => {
-      isPaused = !isPaused;
-      if (!isPaused) {
-        clickThroughArmed = false;
-      }
-      updateToolbarState();
-      showToast(isPaused ? 'Page paused. Click elements to inspect.' : 'Page interaction resumed. Toolbar remains available.', 1800);
+    const move = createToolbarButton('Move', 'Move the workspace to the next corner', () => {
+      tourPanelPositionLocked = true;
+      setTourPanelPosition(getNextTourPanelPosition());
     });
+    const close = createToolbarButton('Close', 'Close the QA bridge', cleanup);
+    header.append(title, statusPill, move, close);
 
+    const tabs = document.createElement('div');
+    tabs.className = 'element-picker-workspace-tabs';
+    tabs.setAttribute('role', 'tablist');
+    tabs.setAttribute('aria-label', 'QA workspace');
+    for (const [view, label] of [['capture', 'Capture'], ['trace', 'Trace'], ['tour', 'Tour']]) {
+      const tab = createToolbarButton(label, label, () => setWorkspace(view));
+      tab.dataset.workspace = view;
+      tab.id = `element-picker-tab-${view}`;
+      tab.setAttribute('role', 'tab');
+      tab.setAttribute('aria-controls', view === 'capture' ? 'element-picker-capture' : view === 'trace' ? TRACE_PANEL_ID : TOUR_PANEL_ID);
+      tab.addEventListener('keydown', (event) => {
+        if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+        event.preventDefault();
+        const controls = [...workspaceTabs.values()];
+        const index = event.key === 'Home' ? 0 : event.key === 'End' ? controls.length - 1 :
+          (controls.indexOf(tab) + (event.key === 'ArrowRight' ? 1 : -1) + controls.length) % controls.length;
+        controls[index].click(); controls[index].focus();
+      });
+      workspaceTabs.set(view, tab);
+      tabs.appendChild(tab);
+    }
+    const mode = document.createElement('div');
+    mode.className = 'element-picker-workspace-mode';
+    modeLabel = document.createElement('span');
+    pauseButton = createToolbarButton('Use page', '', () => {
+      isPaused = !isPaused;
+      if (!isPaused) clickThroughArmed = false;
+      updateToolbarState();
+    });
+    recordingLabel = document.createElement('span');
+    recordingLabel.className = 'element-picker-recording-state';
+    stopRecordingButton = createToolbarButton('Stop recording', 'Stop recording the trace', stopTraceRecording, 'danger');
+    mode.append(modeLabel, pauseButton, recordingLabel, stopRecordingButton);
+
+    captureBody = document.createElement('div');
+    captureBody.id = 'element-picker-capture';
+    captureBody.setAttribute('role', 'tabpanel');
+    captureBody.setAttribute('aria-labelledby', 'element-picker-tab-capture');
+    const content = document.createElement('div');
+    content.className = 'element-picker-capture-content';
+    const selectionHeading = document.createElement('div');
+    selectionHeading.className = 'element-picker-selection-heading';
+    countBadge = document.createElement('strong');
+    countBadge.className = 'element-picker-toolbar-count';
+    undoButton = createToolbarButton('Undo', 'Remove latest selected element', removeLastSelection);
+    selectionHeading.append(countBadge, undoButton);
+    captureList = document.createElement('div');
+    captureList.className = 'element-picker-capture-list';
+    commentInput = createCommentInput();
+    commentInput.rows = 3;
+    const options = document.createElement('details');
+    options.className = 'element-picker-capture-options';
+    const summary = document.createElement('summary');
+    summary.textContent = 'Picking options';
     breakOnLoadButton = createToolbarButton('Break on Load', BREAK_ON_LOAD_HELP, () => {
       setBreakOnLoadEnabled(!breakOnLoadEnabled, { notify: true });
     });
-
     clickThroughButton = createToolbarButton('Click Through', CLICK_THROUGH_HELP, () => {
       clickThroughArmed = !clickThroughArmed;
       updateToolbarState();
-      showToast(
-        clickThroughArmed
-          ? 'Click Through armed. The next page click will go to the app.'
-          : 'Click Through cancelled.',
-        2200
-      );
     });
-
-    const undoButton = createToolbarButton('Undo', 'Remove latest selected element', () => {
-      removeLastSelection();
-      updateToolbarState();
-    });
-
-    vibeToggleButton = createToolbarButton('Vibe ▾', 'Show or hide the Vibe Debugger controls (Watch, Record, Trace)', () => {
-      setVibeGroupOpen(!vibeGroupOpen);
-      if (vibeGroupOpen) showToast('Vibe Debugger controls shown.', 1200);
-    });
-    vibeToggleButton.setAttribute('aria-expanded', 'false');
-
-    watchButton = createToolbarButton('Watch', TRACE_ACTION_HELP.watch, () => {
-      watchCurrentSelection();
-    });
-
-    recordButton = createToolbarButton('Record', TRACE_ACTION_HELP.record, () => {
-      toggleTraceRecording();
-    });
-
-    traceButton = createToolbarButton('Trace', TRACE_ACTION_HELP.trace, () => {
-      toggleTracePanel();
-    });
-
-    sendTraceButton = createToolbarButton('Send Trace', TRACE_ACTION_HELP.send, () => {
-      sendTraceToCodex();
-    }, 'primary');
-
-    vibeGroup = document.createElement('div');
-    markPickerUi(vibeGroup);
-    vibeGroup.className = 'element-picker-toolbar-group element-picker-toolbar-group-hidden';
-    vibeGroup.setAttribute('aria-hidden', 'true');
-    vibeGroup.append(watchButton, recordButton, traceButton, sendTraceButton);
-
-    const copyButton = createToolbarButton('Copy', 'Copy selected element bundle to clipboard (keeps the bridge open)', () => {
-      exportBundle();
-    });
-
-    const sendButton = createToolbarButton('Send to Codex', 'Save selected element bundle to the local Codex QA inbox', () => {
-      sendBundleToCodex();
-    }, 'primary');
-
-    const tourButton = createToolbarButton('Load Tour', 'Load the latest Codex guided review from the local QA inbox', () => {
-      loadLatestTour();
-    });
-
-    const closeButton = createToolbarButton('Close', 'Close the QA bridge', () => {
-      cleanup();
-    });
-
-    toolbar.append(
-      title,
-      statusPill,
-      countBadge,
-      commentInput,
-      pauseButton,
-      breakOnLoadButton,
-      clickThroughButton,
-      undoButton,
-      vibeToggleButton,
-      vibeGroup,
-      copyButton,
-      sendButton,
-      tourButton,
-      closeButton
-    );
+    options.append(summary, breakOnLoadButton, clickThroughButton);
+    content.append(selectionHeading, captureList, commentInput, options);
+    const actions = document.createElement('div');
+    actions.className = 'element-picker-capture-actions';
+    captureCopyButton = createToolbarButton('Copy capture', 'Copy selected element bundle to clipboard', exportBundle);
+    captureSendButton = createToolbarButton('Send capture', 'Send selected elements and comment to the local Codex inbox', sendBundleToCodex, 'primary');
+    actions.append(captureCopyButton, captureSendButton);
+    captureBody.append(content, actions);
+    notice = document.createElement('div');
+    notice.className = 'element-picker-handoff';
+    notice.setAttribute('role', 'status');
+    toolbar.append(header, tabs, mode, captureBody, notice);
+    ensureTracePanel();
+    ensureTourPanel();
     document.body.appendChild(toolbar);
     updateToolbarState();
     updateTraceUi();
@@ -2734,7 +2776,7 @@
     });
 
     const added = watchTargets.length - before;
-    tracePanelOpen = true;
+    activeWorkspace = 'trace';
     ensureTracePanel();
     updateTraceUi();
     showToast(
@@ -2754,6 +2796,7 @@
     traceEndedAtMs = 0;
     resetTraceBuffers();
     latestTraceManifest = null;
+    handoffs.trace = null;
 
     stopMutationRecording();
     if (watchSampleTimer) {
@@ -2996,12 +3039,13 @@
     traceEndedAt = null;
     traceEndedAtMs = 0;
     latestTraceManifest = null;
+    handoffs.trace = null;
     startMutationRecording();
     recordTraceEvent('trace.start', 'Trace recording started', {
       watchTargets: watchTargets.length,
     }, { always: true, sample: false });
     watchTargets.forEach((target) => sampleWatchTarget(target, { force: true, reason: 'trace.start' }));
-    tracePanelOpen = true;
+    activeWorkspace = 'trace';
     ensureTracePanel();
     updateTraceUi();
     showToast(`Vibe trace recording. Watching ${watchTargets.length} ${pluralize(watchTargets.length, 'target', 'targets')}.`, 2600);
@@ -3216,6 +3260,7 @@
   }
 
   async function sendTraceToCodex() {
+    if (isSendingTrace) return;
     if (watchTargets.length === 0 && traceEvents.length === 0) {
       showToast('No trace yet. Add a watch or start recording first.', 2600);
       return;
@@ -3227,7 +3272,8 @@
 
     const trace = buildTracePayload();
     const markdown = formatTraceMarkdown(trace);
-    showToast('Sending vibe trace to Codex QA inbox...', 2400);
+    isSendingTrace = true;
+    setHandoff('trace', { state: 'pending', message: 'Sending trace…' });
 
     try {
       const response = await chrome.runtime.sendMessage({
@@ -3246,13 +3292,14 @@
         traceDir: response.traceDir || null,
         latestDir: response.latestDir || null,
       };
-      updateTraceUi();
+      setHandoff('trace', { state: 'success', message: `Last sent trace ${response.traceId || ''}`, path: response.latestDir || response.traceDir });
       setInboxHealth('online');
-      showToast(`Saved vibe trace ${response.traceId || ''}. Tell Codex: "look at latest trace."`, 4200);
     } catch (error) {
-      console.error('Failed to send vibe trace:', error);
+      setHandoff('trace', { state: 'error', message: `Trace send failed: ${error?.message || 'Start the local inbox, then retry.'}` });
       setInboxHealth('offline');
-      showToast(`Trace send failed: ${error?.message || 'start the Codex QA inbox server'}`, 4200);
+    } finally {
+      isSendingTrace = false;
+      updateTraceUi();
     }
   }
 
@@ -3353,6 +3400,7 @@
     button.textContent = label;
     button.title = title || label;
     button.setAttribute('aria-label', title || label);
+    button.dataset.action = onClick.name || label;
     button.className = `element-picker-trace-button element-picker-trace-button-${variant}`;
     button.addEventListener('click', (event) => {
       event.preventDefault();
@@ -3368,17 +3416,11 @@
 
     tracePanel = document.createElement('div');
     tracePanel.id = TRACE_PANEL_ID;
+    tracePanel.setAttribute('role', 'tabpanel');
+    tracePanel.setAttribute('aria-labelledby', 'element-picker-tab-trace');
     markPickerUi(tracePanel);
-    document.body.appendChild(tracePanel);
+    toolbar.insertBefore(tracePanel, notice);
     return tracePanel;
-  }
-
-  function toggleTracePanel() {
-    tracePanelOpen = !tracePanelOpen;
-    if (tracePanelOpen) {
-      ensureTracePanel();
-    }
-    updateTraceUi();
   }
 
   function getTraceStatusText() {
@@ -3392,13 +3434,17 @@
   }
 
   function renderTracePanel() {
-    if (!tracePanelOpen) {
+    if (activeWorkspace !== 'trace') {
       if (tracePanel) tracePanel.style.display = 'none';
       return;
     }
 
     const panel = ensureTracePanel();
-    panel.style.display = 'block';
+    panel.style.display = '';
+    panel.hidden = false;
+    const scrollTop = panel.querySelector('.element-picker-trace-content')?.scrollTop || 0;
+    const focusedAction = panel.contains(document.activeElement) ? document.activeElement.dataset.action : null;
+    const previousConditions = new Map([...panel.querySelectorAll('[data-watch-id]')].map(row => [row.dataset.watchId, row.dataset.conditions]));
     panel.textContent = '';
 
     const header = document.createElement('div');
@@ -3406,7 +3452,7 @@
 
     const title = document.createElement('div');
     title.className = 'element-picker-trace-title';
-    title.textContent = 'Vibe Debugger';
+    title.textContent = 'Trace';
 
     const status = document.createElement('div');
     status.className = 'element-picker-trace-status';
@@ -3422,18 +3468,15 @@
     controls.className = 'element-picker-trace-controls';
     controls.append(
       createTracePanelButton('Watch selected', watchCurrentSelection, 'secondary', TRACE_ACTION_HELP.watch),
-      createTracePanelButton(isTraceRecording ? 'Stop' : 'Record', toggleTraceRecording, isTraceRecording ? 'danger' : 'primary', TRACE_ACTION_HELP.record),
-      createTracePanelButton('Send Trace', sendTraceToCodex, 'primary', TRACE_ACTION_HELP.send),
-      createTracePanelButton('Clear', () => {
+      createTracePanelButton(isTraceRecording ? 'Stop' : 'Record', toggleTraceRecording, isTraceRecording ? 'danger' : traceEvents.length ? 'secondary' : 'primary', TRACE_ACTION_HELP.record),
+      createTracePanelButton(isSendingTrace ? 'Sending…' : handoffs.trace?.state === 'error' ? 'Retry send' : 'Send Trace', sendTraceToCodex, !isTraceRecording && traceEvents.length ? 'primary' : 'secondary', TRACE_ACTION_HELP.send),
+      createTracePanelButton(isTraceRecording ? 'Stop & clear' : 'Clear trace', () => {
         clearTraceData({ keepWatchTargets: true });
         showToast('Trace timeline cleared. Watch targets kept.', 1800);
-      }, 'secondary', 'Clear the trace timeline while keeping watched targets.'),
-      createTracePanelButton('Close', () => {
-        tracePanelOpen = false;
-        updateTraceUi();
-      }, 'secondary', 'Close the Vibe Debugger panel.')
+      }, 'secondary', 'Stop recording and clear the timeline, keeping watched targets.')
     );
 
+    const summaries = buildTraceSummaries();
     const watchSection = document.createElement('div');
     watchSection.className = 'element-picker-trace-section';
     const watchHeading = document.createElement('div');
@@ -3450,6 +3493,12 @@
       watchTargets.slice(-8).forEach((target) => {
         const row = document.createElement('div');
         row.className = 'element-picker-trace-watch-row';
+        row.dataset.watchId = target.watchId;
+        const conditions = summaries.filter(summary => summary.watchId === target.watchId).map(summary => summary.kind).sort().join(' ');
+        row.dataset.conditions = conditions;
+        if (conditions && previousConditions.has(target.watchId) && previousConditions.get(target.watchId) !== conditions) {
+          row.classList.add('element-picker-condition-changed');
+        }
 
         const name = document.createElement('div');
         name.className = 'element-picker-trace-watch-name';
@@ -3467,7 +3516,8 @@
         } else {
           const visibleText = snapshot.visibility?.visible ? 'visible' : 'hidden';
           const domText = snapshot.dom?.text ? ` | "${truncate(snapshot.dom.text, 54)}"` : '';
-          state.textContent = `${visibleText}${domText}`;
+          const disabled = conditions.split(' ').includes('disabled') ? ' · disabled' : '';
+          state.textContent = `${visibleText}${disabled}${domText}`;
         }
 
         row.append(name, state);
@@ -3481,7 +3531,6 @@
     summaryHeading.className = 'element-picker-trace-section-title';
     summaryHeading.textContent = 'Current state';
     summarySection.appendChild(summaryHeading);
-    const summaries = buildTraceSummaries();
     if (summaries.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'element-picker-trace-empty';
@@ -3548,59 +3597,23 @@
       });
     }
 
-    const footer = document.createElement('div');
-    footer.className = 'element-picker-trace-footer';
-    footer.textContent = latestTraceManifest?.latestDir
-      ? `Latest sent: ${latestTraceManifest.latestDir}`
-      : 'Trace exports write to ~/CodexInbox/web-qa/traces/latest.';
-
-    panel.append(header, metrics, controls, watchSection, summarySection, diffSection, eventSection, footer);
+    const content = document.createElement('div');
+    content.className = 'element-picker-trace-content';
+    content.append(watchSection, summarySection, diffSection, eventSection);
+    panel.append(header, metrics, controls, content);
+    content.scrollTop = scrollTop;
+    panel.querySelectorAll('button').forEach((button) => {
+      if (isSendingTrace && (button.dataset.action === 'toggleTraceRecording' || button.textContent.toLowerCase().includes('clear'))) button.disabled = true;
+      if (button.textContent === 'Watch selected') button.disabled = selections.length === 0 && !currentElement;
+      if (button.textContent.includes('Send') || button.textContent === 'Retry send' || button.textContent === 'Sending…') {
+        button.disabled = isSendingTrace || (!watchTargets.length && !traceEvents.length);
+      }
+    });
+    if (focusedAction) [...panel.querySelectorAll('button')].find((button) => button.dataset.action === focusedAction)?.focus({ preventScroll: true });
   }
 
   function updateTraceUi() {
-    if (vibeToggleButton) {
-      const caret = vibeGroupOpen ? '▴' : '▾';
-      const activitySuffix = isTraceRecording
-        ? ' ●'
-        : watchTargets.length
-          ? ` ${watchTargets.length}`
-          : '';
-      vibeToggleButton.textContent = `Vibe${activitySuffix} ${caret}`;
-      vibeToggleButton.classList.toggle('element-picker-toolbar-button-danger', isTraceRecording);
-      vibeToggleButton.title = isTraceRecording
-        ? 'Recording a Vibe trace. Click to show or hide the controls.'
-        : watchTargets.length
-          ? `${watchTargets.length} Vibe watch ${pluralize(watchTargets.length, 'target', 'targets')}. Click to show or hide the controls.`
-          : 'Show or hide the Vibe Debugger controls (Watch, Record, Trace)';
-    }
-
-    if (watchButton) {
-      watchButton.textContent = watchTargets.length ? `Watch ${watchTargets.length}` : 'Watch';
-      watchButton.title = watchTargets.length
-        ? `${watchTargets.length} Vibe Debugger watch ${pluralize(watchTargets.length, 'target', 'targets')}. ${TRACE_ACTION_HELP.watch}`
-        : TRACE_ACTION_HELP.watch;
-      watchButton.setAttribute('aria-label', watchButton.title);
-    }
-
-    if (recordButton) {
-      recordButton.textContent = isTraceRecording ? 'Stop' : 'Record';
-      recordButton.title = isTraceRecording ? `Stop recording. ${TRACE_ACTION_HELP.record}` : TRACE_ACTION_HELP.record;
-      recordButton.setAttribute('aria-label', recordButton.title);
-      recordButton.classList.toggle('element-picker-toolbar-button-danger', isTraceRecording);
-    }
-
-    if (traceButton) {
-      traceButton.textContent = tracePanelOpen ? 'Hide Trace' : 'Trace';
-      traceButton.title = tracePanelOpen ? 'Hide the Vibe Debugger panel.' : TRACE_ACTION_HELP.trace;
-      traceButton.setAttribute('aria-label', traceButton.title);
-    }
-
-    if (sendTraceButton) {
-      sendTraceButton.disabled = watchTargets.length === 0 && traceEvents.length === 0;
-      sendTraceButton.title = TRACE_ACTION_HELP.send;
-      sendTraceButton.setAttribute('aria-label', TRACE_ACTION_HELP.send);
-    }
-
+    updateWorkspaceVisibility();
     renderTracePanel();
   }
 
@@ -4576,26 +4589,22 @@
     const count = selections.length;
     showToast(`Building bundle for ${count} ${pluralize(count, 'element', 'elements')}...`, 2500);
 
-    const bundle = await buildCurrentBundle();
+    setHandoff('capture', { state: 'pending', action: 'copy', message: 'Preparing capture…' });
 
     try {
+      const bundle = await buildCurrentBundle();
       const copyMode = await copyBundleToClipboard(bundle);
-      if (copyMode === 'full') {
-        showToast(`Copied full debug bundle (${count} ${pluralize(count, 'element', 'elements')}). Press ESC or Close when done.`, 2600);
-      } else if (copyMode === 'slim') {
-        showToast('Copied bundle without inline crop images.', 2600);
-      } else {
-        showToast('Copied summary bundle (payload was too large).', 2600);
-      }
+      setHandoff('capture', { state: 'success', action: 'copy', message: `Copied ${copyMode === 'full' ? 'full capture' : copyMode === 'slim' ? 'capture without inline images' : 'capture summary'}` });
       if (cleanupAfter) {
         cleanup();
       } else {
         isExporting = false;
       }
     } catch (error) {
-      console.error('Failed to copy debug bundle:', error);
+      setHandoff('capture', { state: 'error', action: 'copy', message: 'Copy failed. Retry Copy capture or send to the local inbox.' });
       isExporting = false;
-      showToast('Failed to copy bundle. Check console for details.', 2600);
+    } finally {
+      updateToolbarState();
     }
   }
 
@@ -4607,8 +4616,9 @@
     }
 
     isExporting = true;
+    const handoffWorkspace = isTourActive() ? 'tour' : 'capture';
     const count = selections.length;
-    showToast(`Sending ${count} ${pluralize(count, 'element', 'elements')} to Codex QA inbox...`, 2600);
+    setHandoff(handoffWorkspace, { state: 'pending', message: `Sending ${count} selected ${pluralize(count, 'element', 'elements')}…` });
 
     try {
       const bundle = await buildCurrentBundle(options);
@@ -4625,14 +4635,15 @@
         throw new Error(response?.error || 'Codex QA inbox did not accept the capture');
       }
 
+      setHandoff(handoffWorkspace, { state: 'success', message: `Last saved capture ${response.captureId || ''}`, path: response.latestDir || response.captureDir });
       setInboxHealth('online');
-      showToast(`Saved QA capture ${response.captureId || ''}. Tell Codex: "look at latest QA capture."`, 4200);
       isExporting = false;
     } catch (error) {
-      console.error('Failed to send bundle to Codex QA inbox:', error);
+      setHandoff(handoffWorkspace, { state: 'error', message: `Send failed: ${error?.message || 'Start the local inbox, then retry.'}` });
       setInboxHealth('offline');
       isExporting = false;
-      showToast(`Send failed: ${error?.message || 'start the Codex QA inbox server'}`, 4200);
+    } finally {
+      updateToolbarState();
     }
   }
 
@@ -4691,7 +4702,7 @@
     if (currentElement) {
       updateOverlay(currentElement);
     }
-    if (activeTourElement) {
+    if (activeTourElement && isTourActive()) {
       updateTourHighlight(activeTourElement);
       queueTourPanelPlacement();
     }
@@ -4717,6 +4728,8 @@
       return;
     }
 
+    if (isPickerUi(event.target)) return;
+
     if (event.key === 'Enter') {
       event.preventDefault();
       if (isTourActive()) {
@@ -4739,6 +4752,7 @@
   }
 
   function cleanup() {
+    clearTimeout(noticeTimer);
     setBreakOnLoadEnabled(false);
     stopTraceRecording({ silent: true });
     window.postMessage({ source: 'element-picker-vibe-probe-control', command: 'stop' }, '*');
@@ -4761,7 +4775,6 @@
     if (badgeLayer) badgeLayer.remove();
     if (toolbar) toolbar.remove();
     if (tracePanel) tracePanel.remove();
-    if (toastLayer) toastLayer.remove();
     clearTour();
 
     overlay = null;
@@ -4770,20 +4783,12 @@
     pauseButton = null;
     breakOnLoadButton = null;
     clickThroughButton = null;
-    watchButton = null;
-    recordButton = null;
-    traceButton = null;
-    sendTraceButton = null;
     countBadge = null;
     commentInput = null;
-    toastLayer = null;
     statusPill = null;
     inboxHealth = 'unknown';
-    vibeToggleButton = null;
-    vibeGroup = null;
-    vibeGroupOpen = false;
     tracePanel = null;
-    tracePanelOpen = false;
+    activeWorkspace = 'capture';
     currentElement = null;
     selections = [];
     watchTargets = [];
@@ -4812,5 +4817,5 @@
   window.addEventListener('resize', onViewportChange, true);
   chrome.runtime.onMessage.addListener(onRuntimeMessage);
 
-  showToast('QA Bridge paused: click elements, watch them, then record or send captures to Codex.', 3600);
+
 })();

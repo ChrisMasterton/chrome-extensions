@@ -2,6 +2,16 @@
 
 A Chrome/Edge/Arc extension that lets you pause a page, select suspicious UI, and hand a rich debug bundle to Codex through a local inbox. Clipboard export still works.
 
+## Workspace
+
+The panel has three keyboard-accessible views: **Capture**, **Trace**, and **Tour**. Only one view is visible at a time. **Move** cycles the panel between corners; tours automatically place the whole workspace away from their target when space allows.
+
+- **Capture** shows selected elements, a comment, **Copy capture**, and **Send capture**. **Picking options** contains Break on Load and Click Through; active options remain summarized when collapsed.
+- **Pick elements / Use page** controls how page clicks behave. This is separate from recording: the recording state stays visible in every workspace, and tours expose a Stop recording action while a trace is running. Application timers are never paused.
+- **Trace** keeps watch/record/send actions visible above scrolling observations and diffs. Hidden, disabled, and disconnected states retain text labels; a brief optional emphasis marks consequential watch changes.
+- **Tour** contains the current review step, a note, and Next/Done. Switching views preserves the step and note. Missing targets offer **Find target again**, and End tour returns to Capture.
+- Handoff success and failures stay inside the workspace. A failed send retains the selection and comment and offers Retry send. Saved locations are available on request. Feedback never floats over the controls.
+
 ## Major Updates in 1.9
 
 This release turns the old clipboard-oriented element picker into a two-way QA bridge between the browser and Codex:
@@ -26,7 +36,7 @@ The near-zero-friction loop is:
 1. Start the local inbox server: `npm run inbox`
 2. Click the extension icon on any page.
 3. Click one or more suspicious elements.
-4. Click **Send to Codex** in the floating toolbar.
+4. Click **Send capture** in the Capture workspace.
 5. In Codex, say: `look at latest QA capture`.
 
 The reverse loop is:
@@ -34,8 +44,8 @@ The reverse loop is:
 1. Ask Codex to walk you through a page or a change.
 2. Codex posts a guided review tour to the local inbox.
 3. Click the extension icon on the page.
-4. Click **Load Tour** in the floating toolbar.
-5. Step through Codex's highlighted notes. During a tour, the normal QA toolbar is replaced by the tour panel so random page clicks do not add extra selections.
+4. Open **Tour** and click **Load tour**.
+5. Step through the highlighted notes in Tour. Picking is locked while this view is active.
 6. Type a question or observation in **Ask Codex about this step...**, then click **Ask Codex** to send that step, tour context, and your note back as a fresh capture.
 
 ## Project Files
@@ -71,17 +81,15 @@ The skill tells Codex to read `~/CodexInbox/web-qa/latest/manifest.json`, inspec
 
 ## Usage
 
-1. Click the extension icon in your toolbar (click it again to close the bridge)
-2. The page starts paused with a floating **QA Bridge** toolbar
-3. Hover elements to preview the highlight
-4. Click elements to add them to the current bundle
-5. Add a short comment in the toolbar when you want Codex to know what you noticed
-6. Click **Send to Codex** to write the bundle to `~/CodexInbox/web-qa/latest`
-7. Click **Copy** or press `Enter` to export the bundle to clipboard; the bridge stays open so you can keep selecting
-8. Press `Backspace`/`Delete` (or `Cmd/Ctrl + Z`) to undo the last selection
-9. Click **Resume** to restore page interaction, or click **Close**/the toolbar icon/`ESC` to end the session
+1. Click the extension icon to open QA Bridge in **Capture**.
+2. With **Picking elements** active, click one or more elements on the page.
+3. Add a comment, then choose **Send capture** or **Copy capture**. Sending writes to the local inbox; copying keeps the workspace open.
+4. Switch to **Trace**, choose **Watch selected**, then **Record**.
+5. Choose **Use page** to exercise the application while recording. Stop recording and use **Send Trace** to export the evidence.
+6. Switch to **Tour → Load tour** to follow a guided review. Add a question and use Ask Codex to capture the current target and note.
+7. Escape closes the current tour, or closes the bridge when outside a tour. Enter exports from the page; focused panel controls keep their normal keyboard behavior. Undo removes the latest selection.
 
-> The toolbar icon toggles the QA Bridge on a tab. On pages where extensions cannot run (for example `chrome://` pages, the Web Store, or PDFs) the icon shows a red **!** badge instead of failing silently.
+> Restricted pages such as `chrome://`, the Web Store, and PDFs show a red **!** on the extension icon when injection is unavailable.
 
 ## Local Codex Inbox
 
@@ -131,17 +139,14 @@ Plain English:
 - **Break on Load** pauses the QA Bridge after SPA route changes or same-origin page loads so you can add watches on the new screen.
 - **Click Through** arms the next page click so it goes to the app instead of selecting another element.
 
-1. Click the extension icon on a page.
-2. Click **Vibe ▾** in the toolbar to reveal the Vibe Debugger controls (they are collapsed by default to keep the toolbar compact).
-3. Select or hover the UI you care about.
-4. Click **Watch** to track that target.
-5. Click **Record**, then click **Resume** and use the page normally.
-6. Click **Break on Load** before navigating when you want the QA Bridge to pause again on the next screen.
-7. Open **Trace** to see watched values, recent diffs, timeline events, and quick explanations like hidden, disabled, empty, or stale.
-8. Click **Send Trace** to write `trace.json`, `trace.md`, and `manifest.json` to `~/CodexInbox/web-qa/traces/latest`.
-9. In Codex, say: `look at latest trace`.
+1. Open QA Bridge and select the UI you want to observe in **Capture**.
+2. Switch to **Trace** and choose **Watch selected**.
+3. Choose **Record**, then **Use page**, and interact with the app.
+4. In **Capture → Picking options**, enable **Break on Load** when navigation should return to picking mode. **Click Through** sends the next click to the app while picking remains enabled.
+5. Return to **Trace** to review watched values, current observations, diffs, and timeline events.
+6. Stop and choose **Send Trace**. In Codex, say `look at latest trace`.
 
-The **Vibe** toggle shows a `●` while recording and a count of active watch targets even when the controls are collapsed, so background activity stays visible.
+Recording continues when changing workspace. Clearing a trace stops recording and clears its timeline while keeping watch targets.
 
 The recorder observes user events, DOM mutations, route changes, fetch/XHR, storage writes, console warnings/errors, selected-element React fiber props/state when available, and optional app probe events. It stores diffs instead of repeated identical snapshots. Events and diffs have timestamps for comparison; temporal proximity alone does not establish a cause. Page timers and animation scheduling are left untouched. Delayed UI changes still appear in DOM diffs, and apps can emit explicit events when more context is useful.
 
@@ -274,3 +279,5 @@ The extension works without icons, but if you want them:
 - Create 16x16, 48x48, and 128x128 PNG files
 - Name them `icon16.png`, `icon48.png`, `icon128.png`
 - Or just remove the icon references from `manifest.json`
+
+For UI evidence, set `CODEX_QA_E2E_SCREENSHOT_DIR` to an absolute directory when running `npm run test:e2e`. The isolated browser lane covers capture/trace exports, offline retry, tour/trace isolation, target avoidance, note preservation, missing-target recovery, and action visibility at 1280×720 and 360×480.

@@ -29,6 +29,9 @@
     minimizedButton: null,
     issuesButton: null,
     inspectButton: null,
+    copyButton: null,
+    feedback: null,
+    tabs: new Map(),
     heatmapButton: null,
   };
 
@@ -36,7 +39,7 @@
     open: false,
     minimized: false,
     panelPosition: null,
-    view: 'home', // 'home' | 'issues' | 'network'
+    view: 'inspect', // 'inspect' | 'issues' | 'network'
     inspectMode: false,
     heatmapOn: false,
     status: null,
@@ -44,7 +47,9 @@
     issues: [],
     network: [],
     expandedNetworkIds: new Set(),
-    copyPending: false,
+    expandedIssueIds: new Set(),
+    viewScroll: {},
+    copyPending: null,
     lastHover: null,
   };
 
@@ -60,11 +65,11 @@
     :host { all: initial; }
     * { box-sizing: border-box; }
     .vd-panel {
-      position: fixed; right: 16px; bottom: 16px; width: min(360px, calc(100vw - 32px));
-      max-height: min(64vh, 560px); display: flex; flex-direction: column;
+      position: fixed; right: 16px; bottom: 16px; width: min(390px, calc(100vw - 32px));
+      height: min(560px, calc(100vh - 32px)); max-height: calc(100vh - 32px); display: flex; flex-direction: column;
       background: #16142a; color: #e8e6f5; border: 1px solid #3d3866;
       border-radius: 12px; box-shadow: 0 12px 32px rgba(0,0,0,.45);
-      font: 12px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       z-index: 2147483647; overflow: hidden;
     }
     .vd-minimized {
@@ -79,7 +84,7 @@
     .vd-minimized:hover { background: #302a5c; border-color: #8b5cf6; }
     .vd-minimized-dot { width: 7px; height: 7px; border-radius: 50%; background: #a78bfa; }
     .vd-header {
-      display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+      flex: 0 0 auto; display: flex; align-items: center; gap: 8px; padding: 8px 10px;
       background: #201c3d; border-bottom: 1px solid #3d3866; cursor: grab;
       user-select: none; touch-action: none;
     }
@@ -89,7 +94,7 @@
     .vd-dot { width: 8px; height: 8px; border-radius: 50%; background: #6b7280; flex: none; }
     .vd-dot.on { background: #34d399; }
     .vd-status-text { color: #a5a0c8; font-size: 11px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .vd-toolbar { display: flex; gap: 6px; padding: 8px 10px; border-bottom: 1px solid #2c2850; flex-wrap: wrap; }
+    .vd-toolbar { flex: 0 0 auto; display: flex; gap: 6px; padding: 8px 10px; border-bottom: 1px solid #2c2850; flex-wrap: wrap; }
     .vd-btn {
       appearance: none; border: 1px solid #4c4585; background: #262149; color: #dcd9f0;
       border-radius: 7px; padding: 4px 9px; font: inherit; font-size: 11px; cursor: pointer;
@@ -101,7 +106,7 @@
     .vd-view-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
     .vd-icon-btn {
       appearance: none; flex: none; display: inline-flex; align-items: center; justify-content: center;
-      width: 22px; height: 22px; padding: 3px; border: 1px solid transparent;
+      width: 28px; height: 28px; padding: 3px; border: 1px solid transparent;
       border-radius: 6px; background: transparent; color: #8d87b8; cursor: pointer;
     }
     .vd-icon-btn:hover { color: #fff; border-color: #4c4585; background: #262149; }
@@ -113,7 +118,7 @@
       text-align: center; line-height: 15px;
     }
     .vd-badge.zero { background: #3d3866; }
-    .vd-body { overflow-y: auto; padding: 10px; flex: 1; }
+    .vd-body { min-height: 0; overflow-y: auto; padding: 14px; flex: 1; overscroll-behavior: contain; }
     .vd-hint { color: #a5a0c8; }
     .vd-hint code { background: #262149; padding: 1px 4px; border-radius: 4px; font-family: ui-monospace, monospace; }
     .vd-section-title { font-weight: 700; margin: 10px 0 4px; color: #c4b5fd; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
@@ -175,6 +180,36 @@
       color: #fff; background: inherit-color; padding: 0 4px; border-radius: 3px; white-space: nowrap;
     }
     @keyframes vd-fade { from { opacity: 1; } to { opacity: 0; } }
+    .vd-tabs { display: flex; flex: 0 0 auto; gap: 20px; padding: 0 14px; border-bottom: 1px solid #393454; }
+    .vd-tab { padding: 10px 0; border: 0; border-radius: 0; background: transparent; color: #b5afd1; font: inherit; font-size: 12px; cursor: pointer; }
+    .vd-tab[aria-selected="true"] { color: #f1ebff; box-shadow: inset 0 -2px #b79af9; }
+    .vd-footer { flex: 0 0 auto; padding: 12px 14px; border-top: 1px solid #393454; background: #1c1932; }
+    .vd-footer-actions { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+    .vd-capture-state { color: #b5afd1; font-size: 11px; }
+    .vd-copy-capture { background: #7350c5; border-color: #9d7ce5; color: #fff; padding: 6px 12px; }
+    .vd-copy-capture:disabled { opacity: .65; cursor: wait; }
+    .vd-feedback { max-height: 80px; overflow-y: auto; color: #ade0c3; font-size: 12px; overflow-wrap: anywhere; }
+    .vd-feedback:not(:empty) { margin-top: 10px; }
+    .vd-feedback[data-state="error"] { color: #ffbeb5; }
+    .vd-feedback[data-state="pending"] { color: #c3b8ed; }
+    .vd-row-toggle { display: flex; flex: 1; align-items: baseline; gap: 6px; min-width: 0; padding: 3px 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+    .vd-row-toggle::before { content: '▸'; color: #b5afd1; }
+    .vd-row-toggle[aria-expanded="true"]::before { content: '▾'; }
+    .vd-row-toggle:disabled { cursor: text; opacity: 1; }
+    .vd-row-toggle:disabled::before { content: ''; }
+    .vd-net-head, .vd-issue-head { align-items: center; }
+    .vd-net, .vd-issue { cursor: default; }
+    .vd-empty { color: #b5afd1; text-align: left; padding: 18px 0; }
+    .vd-hint h2 { color: #f1ebff; font-size: 16px; margin: 4px 0 10px; }
+    button:focus-visible { outline: 2px solid #cbb6ff; outline-offset: 2px; }
+    .vd-btn[aria-pressed="true"] { background: #6c43b3; border-color: #a782f3; color: #fff; }
+    @media (prefers-reduced-motion: reduce) { .vd-flash { animation: none; opacity: .7; } }
+    @media (prefers-reduced-motion: no-preference) {
+      .vd-badge.vd-attention { animation: vd-attention 600ms ease-out; }
+      @keyframes vd-attention { from { box-shadow: 0 0 0 4px #c4b5fd66; } to { box-shadow: 0 0 0 0 transparent; } }
+    }
+    @media (max-width: 420px) { .vd-panel { right: 8px; bottom: 8px; width: calc(100vw - 16px); height: calc(100vh - 16px); max-height: calc(100vh - 16px); } }
+
   `;
 
   function ensureShell() {
@@ -221,7 +256,12 @@
       async (event) => {
         event.stopPropagation();
         const text = typeof textFactory === 'function' ? textFactory() : textFactory;
-        if (!text || !(await writeClipboardText(text))) return;
+        if (!text) return;
+        if (!(await writeClipboardText(text))) {
+          setFeedback('Copy failed. Retry this copy or Copy capture.', 'error');
+          return;
+        }
+        setFeedback(`Copied ${label.replace(/^Copy /, '').toLowerCase()}.`, 'success');
         control.classList.add('copied');
         control.textContent = '✓';
         setTimeout(() => {
@@ -331,43 +371,56 @@
     ui.statusDot = dot;
     ui.statusText = statusText;
 
+    const tabs = document.createElement('div');
+    tabs.className = 'vd-tabs';
+    tabs.setAttribute('role', 'tablist');
+    tabs.setAttribute('aria-label', 'Debug views');
+    for (const [view, label] of [['inspect', 'Inspect'], ['network', 'Network'], ['issues', 'Issues']]) {
+      const control = button(label, () => switchView(view), 'vd-tab');
+      control.dataset.view = view;
+      control.id = `vd-tab-${view}`;
+      control.setAttribute('role', 'tab');
+      control.setAttribute('aria-controls', 'vd-evidence');
+      control.addEventListener('keydown', (event) => {
+        if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+        event.preventDefault();
+        const controls = [...ui.tabs.values()];
+        const index = event.key === 'Home' ? 0 : event.key === 'End' ? controls.length - 1 :
+          (controls.indexOf(control) + (event.key === 'ArrowRight' ? 1 : -1) + controls.length) % controls.length;
+        controls[index].click(); controls[index].focus();
+      });
+      ui.tabs.set(view, control); tabs.appendChild(control);
+    }
+    ui.issuesButton = ui.tabs.get('issues');
+    ui.networkButton = ui.tabs.get('network');
+    for (const view of ['network', 'issues']) {
+      const badge = document.createElement('span'); badge.className = 'vd-badge zero'; badge.textContent = '0';
+      ui.tabs.get(view).appendChild(badge);
+    }
     const toolbar = document.createElement('div');
     toolbar.className = 'vd-toolbar';
-    ui.inspectButton = button('Inspect', () => setInspectMode(!model.inspectMode));
+    ui.inspectButton = button('Pick element', () => setInspectMode(!model.inspectMode));
     ui.heatmapButton = button('Heatmap', () => setHeatmap(!model.heatmapOn));
-    ui.issuesButton = button('Issues<span class="vd-badge zero">0</span>', () => {
-      model.view = model.view === 'issues' ? 'home' : 'issues';
-      sendControl('get-issues');
-      renderBody();
-    });
-    ui.networkButton = button('Net<span class="vd-badge zero">0</span>', () => {
-      model.view = model.view === 'network' ? 'home' : 'network';
-      sendControl('get-network');
-      renderBody();
-    });
-    const copyButton = button('Copy', () => {
-      model.copyPending = true;
-      sendControl('get-network');
-      sendControl('get-issues');
-      copyButton.textContent = 'Copied ✓';
-      setTimeout(() => {
-        copyButton.textContent = 'Copy';
-      }, 1500);
-    });
-    toolbar.append(
-      ui.inspectButton,
-      ui.heatmapButton,
-      ui.networkButton,
-      ui.issuesButton,
-      copyButton
-    );
-
+    toolbar.append(ui.inspectButton, ui.heatmapButton);
     ui.body = document.createElement('div');
+    ui.body.id = 'vd-evidence';
     ui.body.className = 'vd-body';
-
-    ui.panel.append(header, toolbar, ui.body);
+    ui.body.setAttribute('role', 'tabpanel');
+    ui.body.tabIndex = 0;
+    const footer = document.createElement('div');
+    footer.className = 'vd-footer';
+    const actions = document.createElement('div'); actions.className = 'vd-footer-actions';
+    const captureState = document.createElement('span'); captureState.className = 'vd-capture-state';
+    captureState.textContent = 'Capturing this page';
+    ui.copyButton = button('Copy capture', requestCaptureCopy, 'vd-btn vd-copy-capture');
+    ui.copyButton.disabled = Boolean(model.copyPending);
+    ui.feedback = document.createElement('div'); ui.feedback.className = 'vd-feedback';
+    ui.feedback.setAttribute('role', 'status');
+    actions.append(captureState, ui.copyButton); footer.append(actions, ui.feedback);
+    ui.panel.append(header, tabs, toolbar, ui.body, footer);
+    updateViewControls();
     ui.minimizedButton = button(
-      '<span class="vd-minimized-dot"></span>Vibe Digger',
+      '<span class="vd-minimized-dot"></span>Vibe Digger · capturing',
       () => restorePanel(),
       'vd-minimized'
     );
@@ -380,6 +433,62 @@
     sendControl('hello');
     sendControl('get-issues');
     sendControl('get-network');
+  }
+
+  function updateViewControls() {
+    for (const [view, control] of ui.tabs) {
+      const selected = model.view === view;
+      control.setAttribute('aria-selected', String(selected));
+      control.tabIndex = selected ? 0 : -1;
+    }
+    ui.body?.setAttribute('aria-labelledby', `vd-tab-${model.view}`);
+    ui.inspectButton?.setAttribute('aria-pressed', String(model.inspectMode));
+    ui.heatmapButton?.setAttribute('aria-pressed', String(model.heatmapOn));
+    if (ui.inspectButton) ui.inspectButton.textContent = model.inspectMode ? 'Picking · Esc to exit' : 'Pick element';
+  }
+
+  function switchView(view) {
+    model.viewScroll[model.view] = ui.body?.scrollTop || 0;
+    if (view !== 'inspect') setInspectMode(false);
+    model.view = view;
+    updateViewControls();
+    if (view === 'network') sendControl('get-network');
+    if (view === 'issues') sendControl('get-issues');
+    renderBody();
+    if (model.viewScroll[view] !== undefined) ui.body.scrollTop = model.viewScroll[view];
+  }
+
+  function setFeedback(message, state = 'success') {
+    if (!ui.feedback) return;
+    ui.feedback.textContent = message;
+    ui.feedback.dataset.state = state;
+  }
+
+  let copyTimeout = null;
+  function requestCaptureCopy() {
+    if (model.copyPending) return;
+    model.copyPending = { network: false, issues: false, writing: false };
+    ui.copyButton.disabled = true;
+    setFeedback('Preparing capture…', 'pending');
+    copyTimeout = setTimeout(() => {
+      model.copyPending = null;
+      if (ui.copyButton) ui.copyButton.disabled = false;
+      setFeedback('Capture timed out. Retry Copy capture.', 'error');
+    }, 5000);
+    sendControl('get-network');
+    sendControl('get-issues');
+  }
+
+  async function finishCaptureCopy() {
+    const pending = model.copyPending;
+    if (!pending?.network || !pending?.issues || pending.writing) return;
+    pending.writing = true;
+    clearTimeout(copyTimeout);
+    const copied = await writeClipboardText(buildBundle());
+    if (model.copyPending !== pending) return;
+    model.copyPending = null;
+    if (ui.copyButton) ui.copyButton.disabled = false;
+    setFeedback(copied ? 'Capture copied.' : 'Copy failed. Retry Copy capture.', copied ? 'success' : 'error');
   }
 
   function minimizePanel() {
@@ -399,12 +508,14 @@
   }
 
   function closePanel() {
+    clearTimeout(copyTimeout);
+    model.copyPending = null;
     stopPanelDrag();
     setInspectMode(false);
     setHeatmap(false);
     model.open = false;
     model.minimized = false;
-    model.view = 'home';
+    model.view = 'inspect';
     ui.panel?.remove();
     ui.minimizedButton?.remove();
     ui.panel = null;
@@ -416,6 +527,7 @@
 
   function updateStatusHeader() {
     if (!ui.panel || !model.status) return;
+    updateViewControls();
     const s = model.status;
     ui.statusDot.className = `vd-dot${s.reactDetected ? ' on' : ''}`;
     if (!s.reactDetected) {
@@ -425,14 +537,19 @@
     } else {
       ui.statusText.textContent = `React · ${s.commitCount} commits observed`;
     }
+    ui.statusText.title = ui.statusText.textContent;
+    ui.heatmapButton.title = s.hookMode === 'none' ? 'Reload the page to observe React commits' : 'Show React re-renders on the page';
     const badge = ui.issuesButton.querySelector('.vd-badge');
     const count = model.issues.length;
+    const increased = count > Number(badge.textContent);
     badge.textContent = String(count);
     badge.className = `vd-badge${count === 0 ? ' zero' : ''}`;
+    if (increased) badge.classList.add('vd-attention');
 
     const netBadge = ui.networkButton.querySelector('.vd-badge');
     netBadge.textContent = String(model.network.length);
     netBadge.className = 'vd-badge zero';
+    if (ui.minimizedButton) ui.minimizedButton.textContent = `Vibe Digger · capturing${count ? ` · ${count} issues` : ''}`;
   }
 
   function escapeHtml(text) {
@@ -452,41 +569,32 @@
 
   function renderBody() {
     if (!ui.body) return;
-    if (model.panelPosition) requestAnimationFrame(constrainPanelToViewport);
-    const existingNetworkRows =
-      model.view === 'network' ? ui.body.querySelectorAll('.vd-net') : [];
-    const networkScrollState = existingNetworkRows.length
-      ? {
-          top: ui.body.scrollTop,
-          stickToBottom:
-            ui.body.scrollHeight - ui.body.clientHeight - ui.body.scrollTop < 16,
-        }
-      : null;
+    const focusedKey = ui.body.contains(ui.shadow.activeElement) ? ui.shadow.activeElement.dataset.focusKey : null;
+    const existingNetworkRows = model.view === 'network' ? ui.body.querySelectorAll('.vd-net') : [];
+    const networkScrollState = existingNetworkRows.length ? {
+      top: ui.body.scrollTop,
+      stickToBottom: ui.body.scrollHeight - ui.body.clientHeight - ui.body.scrollTop < 16,
+    } : null;
+    const issueAnchor = model.view === 'issues' ? [...ui.body.querySelectorAll('.vd-issue')]
+      .find(row => row.getBoundingClientRect().bottom > ui.body.getBoundingClientRect().top) : null;
+    const anchor = issueAnchor ? { id: issueAnchor.dataset.id, offset: issueAnchor.getBoundingClientRect().top - ui.body.getBoundingClientRect().top } : null;
     ui.body.textContent = '';
-
-    if (model.view === 'issues') {
-      renderIssuesView();
-      return;
+    if (model.view === 'issues') renderIssuesView();
+    else if (model.view === 'network') renderNetworkView(networkScrollState);
+    else if (model.pinned) renderPinnedView();
+    else renderInspectStart();
+    if (anchor) {
+      const row = [...ui.body.querySelectorAll('.vd-issue')].find(item => item.dataset.id === anchor.id);
+      if (row) ui.body.scrollTop += row.getBoundingClientRect().top - ui.body.getBoundingClientRect().top - anchor.offset;
     }
+    if (focusedKey) [...ui.body.querySelectorAll('[data-focus-key]')]
+      .find(item => item.dataset.focusKey === focusedKey)?.focus({ preventScroll: true });
+  }
 
-    if (model.view === 'network') {
-      renderNetworkView(networkScrollState);
-      return;
-    }
-
-    if (model.pinned) {
-      renderPinnedView();
-      return;
-    }
-
+  function renderInspectStart() {
     const hint = document.createElement('div');
     hint.className = 'vd-hint';
-    hint.innerHTML = `
-      <p><b>Inspect</b> — hover any element to see its React component; click to pin props, hooks, and state here. <code>Esc</code> exits.</p>
-      <p><b>Heatmap</b> — flashes components as they re-render, with cumulative counts.</p>
-      <p><b>Net</b> — the page's whole network lifecycle in order: every request and response body, plus the code that sent it.</p>
-      <p><b>Issues</b> — errors, React warnings, rejections, and failed requests dug from the page.</p>
-      <p><b>Copy</b> — puts an agent-ready markdown bundle on the clipboard for Claude/Codex.</p>`;
+    hint.innerHTML = `<h2>Inspect a component</h2><p>Use <b>Pick element</b>, then click a component on the page to inspect its props, hooks, and state.</p>`;
     ui.body.appendChild(hint);
 
     if (model.status?.renderCounts?.length) {
@@ -591,23 +699,37 @@
     for (const issue of issues) {
       const row = document.createElement('div');
       row.className = 'vd-issue';
+      row.dataset.id = issue.id;
+      if (model.expandedIssueIds.has(issue.id)) row.classList.add('expanded');
       const head = document.createElement('div');
       head.className = 'vd-issue-head';
-      head.innerHTML = `
+      const toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.className = 'vd-row-toggle';
+      toggle.dataset.focusKey = `issue-${issue.id}`;
+      toggle.setAttribute('aria-expanded', String(model.expandedIssueIds.has(issue.id)));
+      toggle.setAttribute('aria-controls', `vd-issue-${issue.id}`);
+      toggle.innerHTML = `
         <span class="vd-kind ${escapeHtml(issue.kind)}">${escapeHtml(issue.kind)}</span>
         <span class="vd-issue-msg">${escapeHtml(issue.message)}</span>
         <span class="vd-issue-count">×${issue.count}</span>`;
-      head.appendChild(copyIconButton(() => buildIssueCopy(issue), 'Copy this issue'));
+      head.append(toggle, copyIconButton(() => buildIssueCopy(issue), 'Copy this issue'));
       row.appendChild(head);
       if (issue.detail && issue.detail !== issue.message) {
         const detail = document.createElement('div');
         detail.className = 'vd-issue-detail';
+        detail.id = `vd-issue-${issue.id}`;
         detail.textContent = issue.detail;
         row.appendChild(detail);
-        row.addEventListener('click', (event) => {
-          if (event.target.closest('button')) return;
-          row.classList.toggle('expanded');
+        toggle.addEventListener('click', () => {
+          const expanded = row.classList.toggle('expanded');
+          toggle.setAttribute('aria-expanded', String(expanded));
+          if (expanded) model.expandedIssueIds.add(issue.id);
+          else model.expandedIssueIds.delete(issue.id);
         });
+      } else {
+        toggle.removeAttribute('aria-expanded'); toggle.removeAttribute('aria-controls');
+        toggle.disabled = true;
       }
       ui.body.appendChild(row);
     }
@@ -679,7 +801,7 @@
     const actions = document.createElement('div');
     actions.className = 'vd-view-actions';
     const clear = button('Clear all', () => sendControl('clear-network'), 'vd-btn ghost');
-    actions.append(clear, copyIconButton(() => buildNetworkViewCopy(), 'Copy Net view'));
+    actions.append(clear, copyIconButton(() => buildNetworkViewCopy(), 'Copy Network view'));
     ui.body.appendChild(actions);
 
     // Chronological: the order IS the story.
@@ -690,7 +812,13 @@
       row.dataset.id = entry.id;
       const head = document.createElement('div');
       head.className = 'vd-net-head';
-      head.innerHTML = `
+      const toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.className = 'vd-row-toggle';
+      toggle.dataset.focusKey = `network-${entry.id}`;
+      toggle.setAttribute('aria-expanded', String(model.expandedNetworkIds.has(entry.id)));
+      toggle.setAttribute('aria-controls', `vd-network-${entry.id}`);
+      toggle.innerHTML = `
         <span class="vd-net-seq">#${entry.seq}</span>
         <span class="vd-net-method">${escapeHtml(entry.method)}</span>
         <span class="vd-net-path">${escapeHtml(shortPath(entry.url))}</span>
@@ -701,11 +829,12 @@
             ? `${entry.frameCount || 0}⇅`
             : entry.durationMs != null ? `${entry.durationMs}ms` : ''
         }</span>`;
-      head.appendChild(copyIconButton(() => buildNetworkEntryCopy(entry), 'Copy this network entry'));
+      head.append(toggle, copyIconButton(() => buildNetworkEntryCopy(entry), 'Copy this network entry'));
       row.appendChild(head);
 
       const detail = document.createElement('div');
       detail.className = 'vd-net-detail';
+      detail.id = `vd-network-${entry.id}`;
       const sections = [
         ['URL', `${entry.method} ${entry.url}\n+${(entry.sinceLoadMs / 1000).toFixed(2)}s after load (${entry.kind})`],
         ['Request body', entry.requestBody],
@@ -736,9 +865,9 @@
         detail.append(t, pre);
       }
       row.appendChild(detail);
-      row.addEventListener('click', (event) => {
-        if (event.target.closest('button, .vd-net-pre')) return; // copy or select text
+      toggle.addEventListener('click', () => {
         const expanded = row.classList.toggle('expanded');
+        toggle.setAttribute('aria-expanded', String(expanded));
         if (expanded) model.expandedNetworkIds.add(entry.id);
         else model.expandedNetworkIds.delete(entry.id);
       });
@@ -784,7 +913,9 @@
 
   function setInspectMode(enabled) {
     if (model.inspectMode === enabled) return;
+    if (enabled && model.view !== 'inspect') switchView('inspect');
     model.inspectMode = enabled;
+    updateViewControls();
     ui.inspectButton?.classList.toggle('active', enabled);
     if (enabled) {
       window.addEventListener('mousemove', onInspectMove, true);
@@ -802,6 +933,7 @@
   function setHeatmap(enabled) {
     if (model.heatmapOn === enabled) return;
     model.heatmapOn = enabled;
+    updateViewControls();
     ui.heatmapButton?.classList.toggle('active', enabled);
     sendControl('heatmap', { enabled });
     if (!enabled) ui.flashLayer.textContent = '';
@@ -984,7 +1116,7 @@
   }
 
   function buildNetworkViewCopy() {
-    const lines = captureHeading(`Vibe Digger Net (${model.network.length})`);
+    const lines = captureHeading(`Vibe Digger Network (${model.network.length})`);
     if (!model.network.length) return [...lines, 'No network entries captured.'].join('\n');
     for (const entry of model.network) lines.push(buildNetworkEntryCopy(entry), '');
     return lines.join('\n').trimEnd();
@@ -1104,14 +1236,10 @@
       textarea.style.opacity = '0';
       (document.body || document.documentElement).appendChild(textarea);
       textarea.select();
-      const copied = document.execCommand('copy');
-      textarea.remove();
-      return copied;
+      try { return document.execCommand('copy'); }
+      catch { return false; }
+      finally { textarea.remove(); }
     }
-  }
-
-  async function copyBundle() {
-    await writeClipboardText(buildBundle());
   }
 
   // ---------------------------------------------------------------------------
@@ -1127,12 +1255,12 @@
       case 'status':
         model.status = data.details;
         updateStatusHeader();
-        if (model.view === 'home' && !model.pinned) renderBody();
+        if (model.view === 'inspect' && !model.pinned) renderBody();
         break;
       case 'inspect-result':
         if (data.details.pin) {
           model.pinned = data.details;
-          model.view = 'home';
+          model.view = 'inspect';
           renderBody();
         } else {
           showHoverResult(data.details);
@@ -1155,6 +1283,7 @@
         break;
       }
       case 'network-list':
+        if (model.copyPending) model.copyPending.network = true;
         model.network = data.details.entries || [];
         {
           const currentIds = new Set(model.network.map((entry) => entry.id));
@@ -1164,6 +1293,7 @@
         }
         updateStatusHeader();
         if (model.view === 'network') renderBody();
+        finishCaptureCopy();
         break;
       case 'issue': {
         const issue = data.details.issue;
@@ -1175,16 +1305,17 @@
         break;
       }
       case 'issues':
+        if (model.copyPending) model.copyPending.issues = true;
         model.issues = data.details.issues || [];
         if (model.status && data.details.renderCounts) {
           model.status.renderCounts = data.details.renderCounts;
         }
         updateStatusHeader();
         if (model.open) renderBody();
-        if (model.copyPending) {
-          model.copyPending = false;
-          copyBundle();
+        for (const id of model.expandedIssueIds) {
+          if (!model.issues.some(issue => issue.id === id)) model.expandedIssueIds.delete(id);
         }
+        finishCaptureCopy();
         break;
       default:
         break;

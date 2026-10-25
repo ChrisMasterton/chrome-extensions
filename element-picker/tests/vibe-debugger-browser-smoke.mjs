@@ -536,6 +536,35 @@ async function run() {
       'QA Bridge toolbar and Vibe app API'
     );
 
+    async function clickButton(label) {
+      await pageClient.evaluate(`(() => {
+        const button = [...document.querySelectorAll('#__element-picker-toolbar button')]
+          .find((item) => item.textContent.trim() === ${jsString(label)} && item.getClientRects().length && !item.closest('[hidden]'));
+        if (!button || button.disabled) throw new Error('Unavailable control: ' + ${jsString(label)});
+        button.click();
+      })()`);
+    }
+    async function viewport(width, height) {
+      await pageClient.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
+      await pageClient.evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+    }
+    async function capture(name) {
+      if (!process.env.CODEX_QA_E2E_SCREENSHOT_DIR) return;
+      await mkdir(process.env.CODEX_QA_E2E_SCREENSHOT_DIR, { recursive: true });
+      const { data } = await pageClient.send('Page.captureScreenshot', { format: 'png' });
+      await writeFile(join(process.env.CODEX_QA_E2E_SCREENSHOT_DIR, name + '.png'), Buffer.from(data, 'base64'));
+    }
+    async function assertReachable(label) {
+      assert.equal(await pageClient.evaluate(`(() => {
+        const button = [...document.querySelectorAll('#__element-picker-toolbar button')]
+          .find(item => item.textContent.trim() === ${jsString(label)} && item.getClientRects().length && !item.closest('[hidden]'));
+        if (!button) return false;
+        const r = button.getBoundingClientRect();
+        const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+        return r.top >= 0 && r.bottom <= innerHeight && r.left >= 0 && r.right <= innerWidth && button.contains(hit);
+      })()`), true, label + ' must remain visible and clickable');
+    }
+    await viewport(1280, 720);
     log('driving watch, record, page interactions, and trace export');
     const timerArguments = await pageClient.evaluate(`new Promise((resolve) => {
       setTimeout((...args) => resolve(args), 0, 'sentinel', 42);
@@ -547,7 +576,7 @@ async function run() {
     await pageClient.evaluate(`(async () => {
       const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       const buttonByText = (text) => Array.from(document.querySelectorAll('#__element-picker-toolbar button'))
-        .find((button) => button.textContent.trim() === text);
+        .find((button) => button.textContent.trim() === text && button.getClientRects().length && !button.closest('[hidden]'));
       const click = (element) => {
         if (!element) throw new Error('Missing element to click');
         element.dispatchEvent(new MouseEvent('click', {
@@ -562,8 +591,12 @@ async function run() {
       const detailsWrapper = document.querySelector('#details-wrapper');
       click(save);
       await delay(80);
-      click(buttonByText('Watch'));
+      click(buttonByText('Trace'));
       await delay(80);
+      click(buttonByText('Watch selected'));
+      await delay(80);
+      click(buttonByText('Capture'));
+      document.querySelector('.element-picker-capture-options summary').click();
       click(buttonByText('Click Through'));
       await delay(80);
       click(document.querySelector('#toggle-details'));
@@ -576,9 +609,10 @@ async function run() {
       }
       click(buttonByText('Break on Load'));
       await delay(80);
+      click(buttonByText('Trace'));
       click(buttonByText('Record'));
       await delay(120);
-      click(buttonByText('Resume'));
+      click(buttonByText('Use page'));
       await delay(120);
 
       click(save);
@@ -595,10 +629,10 @@ async function run() {
       await delay(900);
       click(document.querySelector('#route-button'));
       await delay(300);
-      if (!buttonByText('Resume')) {
+      if (!buttonByText('Use page')) {
         throw new Error('Break on Load should pause the QA Bridge after a route change');
       }
-      click(buttonByText('Resume'));
+      click(buttonByText('Use page'));
       await delay(120);
       click(save);
       await delay(220);
@@ -646,14 +680,101 @@ async function run() {
         throw new Error('Trace panel should show observations without automatic cause labels');
       }
       Array.from(document.querySelectorAll('#__element-picker-toolbar button'))
-        .find((button) => button.textContent.trim() === 'Send to Codex').click();
+        .find((button) => button.textContent.trim() === 'Capture').click();
+      Array.from(document.querySelectorAll('#__element-picker-toolbar button'))
+        .find((button) => button.textContent.trim() === 'Send capture').click();
     })()`);
     await waitForPageCondition(pageClient,
-      'document.body.textContent.includes("Saved QA capture")', 'selected-element capture saved');
+      `document.querySelector('.element-picker-handoff')?.dataset.state === 'success'`, 'selected-element capture saved');
     const bundle = JSON.parse(await readFile(join(inboxRoot, 'latest', 'bundle.json'), 'utf8'));
     assert.equal(bundle.elements.length, 1, 'capture should retain the selected element');
     assert.ok(bundle.traceContext.watchTargetCount >= 1, 'capture should retain observed trace context');
     assert.equal('activeCause' in bundle.traceContext, false, 'capture must not reintroduce inferred causes');
+
+    await capture('qa-capture-sent');
+    await viewport(360, 480);
+    await assertReachable('Send capture');
+    await capture('qa-capture-small');
+    await viewport(1280, 720);
+
+    log('checking persistent send failure and retry without losing selections or notes');
+    await pageClient.evaluate(`document.querySelector('.element-picker-toolbar-comment').value = 'Keep my capture context'`);
+    await inbox.close();
+    await clickButton('Send capture');
+    await waitForPageCondition(pageClient, `document.querySelector('.element-picker-handoff')?.dataset.state === 'error'`, 'persistent capture send error');
+    assert.match(await pageClient.evaluate(`document.querySelector('.element-picker-handoff').textContent`), /failed/i);
+    assert.equal(await pageClient.evaluate(`document.querySelector('.element-picker-toolbar-comment').value`), 'Keep my capture context');
+    await capture('qa-send-error');
+    inbox = await startInboxServer(inboxRoot, inboxPort);
+    await clickButton('Retry send');
+    await waitForPageCondition(pageClient, `document.querySelector('.element-picker-handoff')?.dataset.state === 'success'`, 'capture send recovery');
+    const recoveredBundle = JSON.parse(await readFile(join(inboxRoot, 'latest', 'bundle.json'), 'utf8'));
+    assert.equal(recoveredBundle.elements.length, 1);
+    assert.equal(recoveredBundle.userComment, 'Keep my capture context');
+
+    log('checking trace/tour isolation, target visibility, notes, and missing-target recovery');
+    await clickButton('Trace');
+    await clickButton('Record');
+    const response = await fetch(`http://127.0.0.1:${inboxPort}/tours`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ tour: { title: 'UI review', steps: [
+        { selector: '#filter-input', title: 'Filter feedback', body: 'Review this field with the trace workspace closed.' },
+        { selector: '#recover-tour-target', title: 'Missing target', body: 'Try finding the target again when it appears.' },
+      ] } }),
+    });
+    assert.equal(response.ok, true);
+    await clickButton('Tour');
+    await clickButton('Load tour');
+    await waitForPageCondition(pageClient, `document.querySelector('#__element-picker-tour-panel')?.textContent.includes('Filter feedback')`, 'tour loaded');
+    assert.equal(await pageClient.evaluate(`document.querySelector('#__element-picker-trace-panel').hidden`), true, 'a tour must hide the trace workspace');
+    assert.match(await pageClient.evaluate(`document.querySelector('.element-picker-recording-state').textContent`), /Recording/);
+    await waitForPageCondition(pageClient, `(() => {
+      const panel = document.querySelector('#__element-picker-toolbar').getBoundingClientRect();
+      const target = document.querySelector('#filter-input').getBoundingClientRect();
+      return Math.max(0, Math.min(panel.right, target.right) - Math.max(panel.left, target.left)) *
+        Math.max(0, Math.min(panel.bottom, target.bottom) - Math.max(panel.top, target.top)) === 0;
+    })()`, 'the entire workspace avoiding the tour target');
+    await assertReachable('Next');
+    await capture('qa-tour-recording');
+    await pageClient.evaluate(`(() => {
+      const input = document.querySelector('.element-picker-tour-ask');
+      input.value = 'Keep this step note'; input.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
+    await clickButton('Trace');
+    assert.equal(await pageClient.evaluate(`document.querySelector('#__element-picker-tour-panel').hidden`), true);
+    await viewport(360, 480);
+    await assertReachable('Stop');
+    await capture('qa-trace-small');
+    await viewport(1280, 720);
+    await clickButton('Tour');
+    assert.equal(await pageClient.evaluate(`document.querySelector('.element-picker-tour-ask').value`), 'Keep this step note');
+    await clickButton('Ask Codex');
+    await waitForPageCondition(pageClient, `document.querySelector('.element-picker-handoff')?.dataset.state === 'success'`, 'tour question capture');
+    const tourBundle = JSON.parse(await readFile(join(inboxRoot, 'latest', 'bundle.json'), 'utf8'));
+    assert.equal(tourBundle.tourContext.askText, 'Keep this step note');
+    assert.equal(tourBundle.tourContext.stepIndex, 1);
+    assert.equal(tourBundle.elements.length, 1);
+    await pageClient.evaluate(`(() => {
+      const tab = document.querySelector('[data-workspace="tour"][role="tab"]');
+      tab.focus(); tab.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
+    })()`);
+    assert.equal(await pageClient.evaluate(`document.querySelector('#__element-picker-toolbar').dataset.workspace`), 'trace');
+    await clickButton('Tour');
+    await clickButton('Next');
+    assert.match(await pageClient.evaluate(`document.querySelector('.element-picker-tour-status').textContent`), /Could not find/);
+    await pageClient.evaluate(`(() => {
+      const target = document.createElement('button'); target.id = 'recover-tour-target';
+      target.textContent = 'Recovered target'; document.querySelector('main').prepend(target);
+    })()`);
+    await clickButton('Find target again');
+    assert.match(await pageClient.evaluate(`document.querySelector('.element-picker-tour-status').textContent`), /Highlighting/);
+    await clickButton('Stop recording');
+    await clickButton('Done');
+    assert.equal(await pageClient.evaluate(`document.querySelector('#__element-picker-toolbar').dataset.workspace`), 'capture');
+    const previousCorner = await pageClient.evaluate(`document.querySelector('#__element-picker-toolbar').dataset.position`);
+    await clickButton('Move');
+    assert.notEqual(await pageClient.evaluate(`document.querySelector('#__element-picker-toolbar').dataset.position`), previousCorner, 'Move must advance from the actual corner after a tour ends');
+    await capture('qa-capture-final');
 
     log(`pass: ${latestTrace.manifest.traceId}`);
     log(`artifacts: ${join(inboxRoot, 'traces', 'latest')}`);

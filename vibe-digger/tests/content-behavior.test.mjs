@@ -92,7 +92,7 @@ test('Inspect, Issues, and Net views expose scoped clipboard icons', async () =>
     'Copy this issue',
     'Copy Issues view',
     'Copy this network entry',
-    'Copy Net view',
+    'Copy Network view',
   ]) {
     assert.ok(content.includes(`'${label}'`), `missing clipboard control: ${label}`);
   }

@@ -3,7 +3,7 @@
   "name": "Element Picker QA Bridge",
   "description": "Build QA debug bundles with comments, tour context, and Codex guided review handoffs through a local inbox",
   "version": "1.9",
-  "permissions": ["activeTab", "scripting", "clipboardWrite", "downloads"],
+  "permissions": ["activeTab", "scripting", "clipboardWrite", "downloads", "storage"],
   "host_permissions": ["http://127.0.0.1:43117/*"],
   "action": {
     "default_title": "Pick Element",

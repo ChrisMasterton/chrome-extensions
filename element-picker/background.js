@@ -1,8 +1,110 @@
-// Handle extension icon click
-const pendingToursByTab = new Map();
-const breakOnLoadTabs = new Map();
+const TAB_STATE_PREFIX = 'qaBridgeTab:';
+const tabStateWrites = new Map();
+const tabResumes = new Map();
+
+// EP-7 and EP-6 share a tab lifetime, but keep independent Break on Load and
+// tour state. Only these serialized mutations write the browser-session store.
+function changeTabState(tabId, change) {
+  const key = `${TAB_STATE_PREFIX}${tabId}`;
+  const write = (tabStateWrites.get(tabId) || Promise.resolve()).then(async () => {
+    const saved = await chrome.storage.session.get(key);
+    const current = saved[key] || { breakOnLoadEnabled: false, tour: null, delivery: null };
+    const next = change(current);
+    if (next !== current) {
+      if (next.breakOnLoadEnabled || next.tour) {
+        await chrome.storage.session.set({ [key]: next });
+      } else {
+        await chrome.storage.session.remove(key);
+      }
+    }
+    return next;
+  });
+  const settled = write.catch(() => {});
+  tabStateWrites.set(tabId, settled);
+  settled.then(() => { if (tabStateWrites.get(tabId) === settled) tabStateWrites.delete(tabId); });
+  return write;
+}
+
+function readTabState(tabId) {
+  return changeTabState(tabId, state => state);
+}
+
+function pendingDelivery(expectedUrl = null) {
+  return { token: crypto.randomUUID(), status: 'pending', expectedUrl };
+}
+
+function ownsDocument(state, sender) {
+  return !state.documentId || !sender.documentId || state.documentId === sender.documentId;
+}
+
+async function clearNavigationBadge(tabId) {
+  await chrome.action.setBadgeText({ tabId, text: '' });
+  await chrome.action.setTitle({ tabId, title: 'Pick Element' });
+}
+
+async function failDelivery(tabId, token, error) {
+  let retained = false;
+  await changeTabState(tabId, state => {
+    if (state.delivery?.token !== token) return state;
+    retained = true;
+    return { ...state, delivery: { ...state.delivery, status: 'failed', error: error.message } };
+  });
+  if (!retained) return;
+  await chrome.action.setBadgeText({ tabId, text: '!' });
+  await chrome.action.setBadgeBackgroundColor({ tabId, color: '#dc2626' });
+  await chrome.action.setTitle({ tabId, title: 'QA Bridge could not resume. Click to retry on this page.' });
+}
+
+function resumeTab(tabId, { manual = false } = {}) {
+  const resume = (tabResumes.get(tabId) || Promise.resolve()).then(async () => {
+    let state = await readTabState(tabId);
+    if (!state.breakOnLoadEnabled && !state.tour) return false;
+    const tab = await chrome.tabs.get(tabId);
+    if (tab.status !== 'complete') return false;
+    if (manual || !state.delivery) {
+      state = await changeTabState(tabId, current => current.breakOnLoadEnabled || current.tour
+        ? { ...current, delivery: pendingDelivery() } : current);
+    }
+    if (!state.delivery || (!state.breakOnLoadEnabled && !state.tour)) return false;
+    const token = state.delivery.token;
+    try {
+      if (!manual && state.delivery.expectedUrl && tab.url !== state.delivery.expectedUrl) {
+        throw new Error('The tour destination changed');
+      }
+      const documentId = await injectPicker(tabId);
+      state = await changeTabState(tabId, current => current.delivery?.token === token
+        ? { ...current, documentId } : current);
+      if (state.delivery?.token !== token) return false;
+      const message = state.tour ? {
+        type: 'ELEMENT_PICKER_RESUME_TOUR', ...state.tour,
+        breakOnLoadEnabled: state.breakOnLoadEnabled, resumeToken: token,
+      } : {
+        type: 'ELEMENT_PICKER_BREAK_ON_LOAD_RESUME', breakOnLoadEnabled: true,
+        reason: 'page-load', resumeToken: token,
+      };
+      const acknowledgement = await chrome.tabs.sendMessage(tabId, message,
+        documentId ? { documentId } : { frameId: 0 });
+      if (!acknowledgement?.ok || acknowledgement.resumeToken !== token) {
+        throw new Error('The page did not acknowledge QA Bridge restoration');
+      }
+      const delivered = await changeTabState(tabId, current => current.delivery?.token === token
+        ? { ...current, delivery: { token, status: 'active' } } : current);
+      if (delivered.delivery?.token !== token || delivered.delivery.status !== 'active') return false;
+      await clearNavigationBadge(tabId);
+      return true;
+    } catch (error) {
+      await failDelivery(tabId, token, error);
+      return false;
+    }
+  }).catch(error => { console.warn('Unable to restore QA Bridge tab state:', error); return false; });
+  tabResumes.set(tabId, resume);
+  resume.then(() => { if (tabResumes.get(tabId) === resume) tabResumes.delete(tabId); });
+  return resume;
+}
 
 async function injectPicker(tabId) {
+  // A CSS failure must not leave an apparently live but unfinished session.
+  await chrome.scripting.insertCSS({ target: { tabId }, files: ['picker.css'] });
   try {
     await chrome.scripting.executeScript({
       target: { tabId },
@@ -13,15 +115,12 @@ async function injectPicker(tabId) {
     console.warn('Unable to inject Vibe Debugger page probe:', error);
   }
 
-  await chrome.scripting.executeScript({
+  const injected = await chrome.scripting.executeScript({
     target: { tabId },
     files: ['picker.js']
   });
 
-  await chrome.scripting.insertCSS({
-    target: { tabId },
-    files: ['picker.css']
-  });
+  return injected?.find(result => result.frameId === 0)?.documentId || null;
 }
 
 // Ask an already-running QA Bridge in this tab to close itself. Returns true
@@ -60,18 +159,23 @@ function flashRestrictedPageBadge(tabId) {
   }
 }
 
-chrome.action.onClicked.addListener(async (tab) => {
+async function handleActionClick(tab) {
   if (!tab?.id) return;
-
-  if (await closeExistingSession(tab.id)) return;
-
   try {
-    await injectPicker(tab.id);
+    const state = await readTabState(tab.id);
+    if (state.delivery && state.delivery.status !== 'active') {
+      await resumeTab(tab.id, { manual: true });
+      return;
+    }
+    if (await closeExistingSession(tab.id)) return;
+    if (state.breakOnLoadEnabled || state.tour) await resumeTab(tab.id, { manual: true });
+    else await injectPicker(tab.id);
   } catch (error) {
     console.warn('Unable to start QA Bridge on this page:', error);
     flashRestrictedPageBadge(tab.id);
   }
-});
+}
+chrome.action.onClicked.addListener(handleActionClick);
 
 function downloadDataUrl(dataUrl, filename) {
   return new Promise((resolve) => {
@@ -196,43 +300,18 @@ async function getLatestTour(tourUrl) {
 }
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-  if (changeInfo.status !== 'complete') {
-    return;
+  if (changeInfo.status === 'loading') {
+    changeTabState(tabId, state => state.breakOnLoadEnabled || state.tour
+      ? { ...state, delivery: pendingDelivery(state.delivery?.status === 'pending' ? state.delivery.expectedUrl : null) }
+      : state).catch(error => console.warn('Unable to retain QA Bridge navigation:', error));
+  } else if (changeInfo.status === 'complete') {
+    resumeTab(tabId);
   }
-
-  if (pendingToursByTab.has(tabId)) {
-    const pendingTour = pendingToursByTab.get(tabId);
-    pendingToursByTab.delete(tabId);
-
-    injectPicker(tabId)
-      .then(() => chrome.tabs.sendMessage(tabId, {
-        type: 'ELEMENT_PICKER_RESUME_TOUR',
-        tour: pendingTour.tour,
-        stepIndex: pendingTour.stepIndex,
-      }))
-      .catch((error) => {
-        console.warn('Unable to continue guided review after navigation:', error);
-      });
-    return;
-  }
-
-  if (!breakOnLoadTabs.has(tabId)) {
-    return;
-  }
-
-  injectPicker(tabId)
-    .then(() => chrome.tabs.sendMessage(tabId, {
-      type: 'ELEMENT_PICKER_BREAK_ON_LOAD_RESUME',
-      reason: 'page-load',
-    }))
-    .catch((error) => {
-      console.warn('Unable to pause QA Bridge after page load:', error);
-    });
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
-  pendingToursByTab.delete(tabId);
-  breakOnLoadTabs.delete(tabId);
+  changeTabState(tabId, () => ({ breakOnLoadEnabled: false, tour: null }))
+    .catch(error => console.warn('Unable to remove closed QA Bridge tab:', error));
 });
 
 // Capture the visible tab so the content script can build element crops.
@@ -309,17 +388,54 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return;
     }
 
-    if (message.enabled) {
-      breakOnLoadTabs.set(tabId, {
-        enabledAt: new Date().toISOString(),
-        url: sender?.tab?.url || null,
-      });
-    } else {
-      breakOnLoadTabs.delete(tabId);
-    }
+    changeTabState(tabId, state => ({
+      ...state, breakOnLoadEnabled: !!message.enabled,
+      delivery: state.delivery || { token: crypto.randomUUID(), status: 'active' },
+    })).then(async state => {
+      if (!state.breakOnLoadEnabled && !state.tour) await clearNavigationBadge(tabId);
+      sendResponse({ ok: true, enabled: state.breakOnLoadEnabled });
+    })
+      .catch(error => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
 
-    sendResponse({ ok: true, enabled: breakOnLoadTabs.has(tabId) });
-    return;
+  if (message.type === 'ELEMENT_PICKER_SAVE_TOUR') {
+    const tabId = sender?.tab?.id;
+    if (!tabId || !message.tour?.steps?.length || !message.sessionId) {
+      sendResponse({ ok: false, error: 'Missing tour checkpoint' });
+      return;
+    }
+    changeTabState(tabId, state => {
+      if (!message.newTour && (state.tour?.sessionId !== message.sessionId ||
+          !ownsDocument(state, sender) || state.delivery?.status !== 'active')) return state;
+      return { ...state, documentId: sender.documentId,
+        tour: { tour: message.tour, sessionId: message.sessionId,
+          stepIndex: message.stepIndex || 0, askNotes: message.askNotes || [] },
+        delivery: { token: crypto.randomUUID(), status: 'active' },
+      };
+    }).then(() => sendResponse({ ok: true }))
+      .catch(error => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === 'ELEMENT_PICKER_CLEAR_TOUR' || message.type === 'ELEMENT_PICKER_CLEAR_SESSION') {
+    const tabId = sender?.tab?.id;
+    if (!tabId) { sendResponse({ ok: false, error: 'Missing QA Bridge tab' }); return; }
+    let cleared = false;
+    changeTabState(tabId, state => {
+      if (!ownsDocument(state, sender)) return state;
+      if (message.type === 'ELEMENT_PICKER_CLEAR_TOUR' && state.tour?.sessionId !== message.sessionId) return state;
+      cleared = true;
+      return { breakOnLoadEnabled: message.type === 'ELEMENT_PICKER_CLEAR_SESSION' ? false : state.breakOnLoadEnabled,
+        tour: null, delivery: { token: crypto.randomUUID(), status: 'active' }, documentId: sender.documentId };
+    }).then(async () => {
+      if (cleared && message.sessionId) {
+        await chrome.tabs.sendMessage(tabId, { type: 'ELEMENT_PICKER_TOUR_ENDED', sessionId: message.sessionId }).catch(() => {});
+      }
+      if (cleared) await clearNavigationBadge(tabId);
+      sendResponse({ ok: true, cleared });
+    }).catch(error => sendResponse({ ok: false, error: error.message }));
+    return true;
   }
 
   if (message.type === 'ELEMENT_PICKER_OPEN_TOUR_STEP') {
@@ -329,22 +445,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return;
     }
 
-    pendingToursByTab.set(tabId, {
-      tour: message.tour || null,
-      stepIndex: message.stepIndex || 0,
-    });
-
-    chrome.tabs.update(tabId, { url: message.url }, () => {
-      if (chrome.runtime.lastError) {
-        pendingToursByTab.delete(tabId);
-        sendResponse({
-          ok: false,
-          error: chrome.runtime.lastError.message || 'Unable to open tour step',
-        });
-        return;
-      }
-
+    let token;
+    changeTabState(tabId, state => {
+      if (!message.tour?.steps?.length || !ownsDocument(state, sender) ||
+          (state.tour && state.tour.sessionId !== message.sessionId)) throw new Error('This tour is no longer active');
+      const delivery = pendingDelivery(message.url);
+      token = delivery.token;
+      return { ...state, delivery, documentId: sender.documentId,
+        tour: { tour: message.tour, stepIndex: message.stepIndex || 0,
+          sessionId: message.sessionId || crypto.randomUUID(), askNotes: message.askNotes || [] },
+      };
+    }).then(async () => {
+      if ((await readTabState(tabId)).delivery?.token !== token) throw new Error('Tour navigation was cancelled');
+      await chrome.tabs.update(tabId, { url: message.url });
       sendResponse({ ok: true });
+    }).catch(async error => {
+      if (token) await failDelivery(tabId, token, error).catch(saveError => console.warn('Unable to retain tour failure:', saveError));
+      sendResponse({ ok: false, error: error.message });
     });
     return true;
   }

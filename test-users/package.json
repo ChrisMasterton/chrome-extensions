@@ -6,6 +6,7 @@
     "demo": "node demo/server.mjs",
     "test": "node --test tests/*.test.cjs",
     "test:e2e": "node tests/browser-smoke.mjs",
+    "test:provisioning": "node tests/browser-smoke.mjs --provisioning-only",
     "check": "node --check background.js && node --check core.js && node --check content.js && node --check demo/server.mjs",
     "verify": "npm run check && npm test && npm run test:e2e"
   }

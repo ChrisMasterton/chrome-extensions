@@ -75,6 +75,12 @@
   let clickThroughArmed = false;
   let hiddenPickerUiSnapshot = [];
   let activeTour = null;
+  let activeTourSessionId = null;
+  let tourLoadGeneration = 0;
+  let tourNavigationInProgress = false;
+  let lastResumeToken = null;
+  let breakOnLoadSaveGeneration = 0;
+  const cancelledTourSessions = new Set();
   let activeTourStepIndex = 0;
   let activeTourElement = null;
   let tourPanel = null;
@@ -585,11 +591,19 @@
     return tourPanel;
   }
 
-  function clearTour() {
+  function clearTour({ persist = true } = {}) {
+    const sessionId = activeTourSessionId;
+    tourLoadGeneration += 1;
+    if (sessionId) cancelledTourSessions.add(sessionId);
+    if (persist && sessionId) {
+      sendNavigationMessage({ type: 'ELEMENT_PICKER_CLEAR_TOUR', sessionId })
+        .catch(error => console.warn('Unable to end saved tour:', error));
+    }
     if (tourPanel) tourPanel.remove();
     if (tourHighlight) tourHighlight.remove();
 
     activeTour = null;
+    activeTourSessionId = null;
     activeWorkspace = 'capture';
     activeTourStepIndex = 0;
     activeTourElement = null;
@@ -621,7 +635,28 @@
     const key = getTourStepKey(step, stepIndex);
     if (key) {
       tourAskNotes.set(key, value || '');
+      persistTourCheckpoint().catch(showTourPersistenceError);
     }
+  }
+
+  async function persistTourCheckpoint({ newTour = false } = {}) {
+    if (!activeTour || !activeTourSessionId) return;
+    const response = await chrome.runtime.sendMessage({
+      type: 'ELEMENT_PICKER_SAVE_TOUR', newTour, sessionId: activeTourSessionId,
+      tour: activeTour, stepIndex: activeTourStepIndex, askNotes: [...tourAskNotes],
+    });
+    if (!response?.ok) throw new Error(response?.error || 'Unable to save guided review progress');
+  }
+
+  async function sendNavigationMessage(message) {
+    const response = await chrome.runtime.sendMessage(message);
+    if (!response?.ok) throw new Error(response?.error || 'Unable to update QA Bridge navigation state');
+    return response;
+  }
+
+  function showTourPersistenceError(error) {
+    if (!window.__elementPickerActive) return;
+    setHandoff('tour', { state: 'error', message: `Tour progress could not be saved: ${error.message}` });
   }
 
   function getTourAskText(step = getActiveTourStep(), stepIndex = activeTourStepIndex) {
@@ -675,7 +710,9 @@
   }
 
   async function navigateToTourStep(step, stepIndex = activeTourStepIndex) {
-    if (!step?.url) return;
+    if (!step?.url || tourNavigationInProgress) return;
+    tourNavigationInProgress = true;
+    renderTourStep({ persist: false });
 
     try {
       const response = await chrome.runtime.sendMessage({
@@ -683,14 +720,17 @@
         url: step.url,
         tour: activeTour,
         stepIndex,
+        sessionId: activeTourSessionId,
+        askNotes: [...tourAskNotes],
       });
 
-      if (response?.ok) return;
-    } catch {
-      // Fall back to normal navigation below.
+      if (!response?.ok) throw new Error(response?.error || 'Unable to open the tour page');
+    } catch (error) {
+      setHandoff('tour', { state: 'error', message: `Tour navigation failed: ${error.message}. Use Open Step to retry.` });
+    } finally {
+      tourNavigationInProgress = false;
+      if (window.__elementPickerActive && activeTour) renderTourStep({ persist: false });
     }
-
-    window.location.href = step.url;
   }
 
   async function askCodexAboutTourStep() {
@@ -713,7 +753,7 @@
     });
   }
 
-  function renderTourStep() {
+  function renderTourStep({ persist = true } = {}) {
     const step = getActiveTourStep();
     if (!step) {
       clearTour();
@@ -763,7 +803,7 @@
       activeTourStepIndex = Math.max(0, activeTourStepIndex - 1);
       renderTourStep();
     });
-    backButton.disabled = activeTourStepIndex === 0;
+    backButton.disabled = activeTourStepIndex === 0 || tourNavigationInProgress;
 
     const closeButton = createTourPanelButton('End tour', () => {
       clearTour();
@@ -779,7 +819,7 @@
     const askButton = createTourPanelButton('Ask Codex', () => {
       askCodexAboutTourStep();
     }, 'secondary');
-    askButton.disabled = !activeTourElement;
+    askButton.disabled = !activeTourElement || tourNavigationInProgress;
 
     const nextButton = createTourPanelButton(activeTourStepIndex === total - 1 ? 'Done' : 'Next', () => {
       if (activeTourStepIndex >= total - 1) {
@@ -798,6 +838,7 @@
       }
       renderTourStep();
     }, 'primary');
+    nextButton.disabled = tourNavigationInProgress;
 
     controls.append(backButton, moveButton);
     if (!onCurrentUrl && step.url) {
@@ -818,9 +859,11 @@
 
     queueTourPanelPlacement();
     updateToolbarState();
+    if (persist && !tourNavigationInProgress) persistTourCheckpoint().catch(showTourPersistenceError);
   }
 
   async function loadLatestTour() {
+    const generation = ++tourLoadGeneration;
     try {
       setHandoff('tour', { state: 'pending', message: 'Loading guided review…' });
       const response = await chrome.runtime.sendMessage({
@@ -831,14 +874,19 @@
       if (!response?.ok || !response.tour) {
         throw new Error(response?.error || 'No guided review is available');
       }
+      if (generation !== tourLoadGeneration || !window.__elementPickerActive) return;
 
       activeWorkspace = 'tour';
       activeTour = response.tour;
+      activeTourSessionId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
       activeTourStepIndex = 0;
+      tourAskNotes.clear();
+      await persistTourCheckpoint({ newTour: true });
+      if (generation !== tourLoadGeneration || !window.__elementPickerActive) return;
       tourPanelPositionLocked = false;
       clearSelections();
       isPaused = true;
-      renderTourStep();
+      renderTourStep({ persist: false });
       updateToolbarState();
       setInboxHealth('online');
       handoffs.tour = null;
@@ -857,20 +905,41 @@
       return;
     }
 
+    if (message?.type === 'ELEMENT_PICKER_TOUR_ENDED') {
+      cancelledTourSessions.add(message.sessionId);
+      if (activeTourSessionId === message.sessionId) clearTour({ persist: false });
+      sendResponse({ ok: true });
+      return;
+    }
+
+    if (message?.resumeToken && message.resumeToken === lastResumeToken) {
+      sendResponse({ ok: true, resumeToken: message.resumeToken });
+      return;
+    }
+
     if (message?.type === 'ELEMENT_PICKER_BREAK_ON_LOAD_RESUME') {
       setBreakOnLoadEnabled(true, { persist: false });
       isPaused = true;
       updateToolbarState();
       showToast('Break on Load paused this page. Pick a target, then click Watch.', 3000);
+      lastResumeToken = message.resumeToken;
+      sendResponse({ ok: true, resumeToken: message.resumeToken });
       return;
     }
 
     if (message?.type !== 'ELEMENT_PICKER_RESUME_TOUR' || !message.tour) {
       return;
     }
+    if (cancelledTourSessions.has(message.sessionId)) {
+      sendResponse({ ok: false, error: 'This tour was ended' });
+      return;
+    }
 
+    setBreakOnLoadEnabled(message.breakOnLoadEnabled, { persist: false });
     activeWorkspace = 'tour';
     activeTour = message.tour;
+    activeTourSessionId = message.sessionId;
+    tourAskNotes = new Map(message.askNotes || []);
     activeTourStepIndex = Math.max(0, Math.min(
       Number.parseInt(message.stepIndex || 0, 10),
       activeTour.steps.length - 1
@@ -878,9 +947,11 @@
     tourPanelPositionLocked = false;
     clearSelections();
     isPaused = true;
-    renderTourStep();
+    renderTourStep({ persist: false });
     updateToolbarState();
     showToast(`Continuing guided review: ${activeTour.title}`, 2400);
+    lastResumeToken = message.resumeToken;
+    sendResponse({ ok: true, resumeToken: message.resumeToken });
   }
 
   function createToolbarButton(label, title, onClick, variant = 'secondary') {
@@ -1135,18 +1206,21 @@
     }
   }
 
-  function persistBreakOnLoadState() {
+  async function persistBreakOnLoadState() {
+    const generation = ++breakOnLoadSaveGeneration;
+    const enabled = breakOnLoadEnabled;
     try {
-      chrome.runtime.sendMessage({
+      const response = await chrome.runtime.sendMessage({
         type: 'ELEMENT_PICKER_SET_BREAK_ON_LOAD',
-        enabled: breakOnLoadEnabled,
-      }, () => {
-        if (chrome.runtime.lastError) {
-          console.warn('Unable to persist Break on Load state:', chrome.runtime.lastError.message);
-        }
+        enabled,
       });
+      if (!response?.ok) throw new Error(response?.error || 'Unable to save Break on Load');
     } catch (error) {
       console.warn('Unable to persist Break on Load state:', error);
+      if (generation === breakOnLoadSaveGeneration && window.__elementPickerActive) {
+        setBreakOnLoadEnabled(!enabled, { persist: false });
+        showToast('Break on Load could not be saved. Try enabling it again.', 3000);
+      }
     }
   }
 
@@ -4753,7 +4827,9 @@
 
   function cleanup() {
     clearTimeout(noticeTimer);
-    setBreakOnLoadEnabled(false);
+    sendNavigationMessage({ type: 'ELEMENT_PICKER_CLEAR_SESSION', sessionId: activeTourSessionId })
+      .catch(error => console.warn('Unable to clear QA Bridge session:', error));
+    setBreakOnLoadEnabled(false, { persist: false });
     stopTraceRecording({ silent: true });
     window.postMessage({ source: 'element-picker-vibe-probe-control', command: 'stop' }, '*');
     document.removeEventListener('mousemove', onMouseMove, true);
@@ -4775,7 +4851,7 @@
     if (badgeLayer) badgeLayer.remove();
     if (toolbar) toolbar.remove();
     if (tracePanel) tracePanel.remove();
-    clearTour();
+    clearTour({ persist: false });
 
     overlay = null;
     badgeLayer = null;

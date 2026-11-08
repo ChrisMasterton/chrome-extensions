@@ -67,11 +67,7 @@
     pendingDeleteSiteKey: null,
     snapshotDraft: null,
     pendingDeleteSnapshotId: null,
-    adapter: {
-      status: 'disabled',
-      capabilities: null,
-      error: '',
-    },
+    adapter: Core.transitionAdapterConnection(null, { type: 'disable' }),
     toast: null,
   };
 
@@ -79,6 +75,8 @@
   let currentIdentity = null;
   let toastTimer = null;
   let demoState = createDemoState();
+  let adapterLoad = null;
+  let adapterDisposed = false;
 
   function assetUrl(path) {
     return isExtensionRuntime ? chrome.runtime.getURL(path) : `../${path}`;
@@ -174,6 +172,9 @@
       const applied = Core.applyStoredMutation(storedState, mutation);
       storedState = applied.state;
       demoState = storedState;
+      resolveCurrentIdentity();
+      reconcileUserOperations();
+      syncAdapterConnection();
       return applied.result;
     }
 
@@ -183,6 +184,8 @@
     // A newer storage event may already have arrived while awaiting this reply.
     if (storedState === observedState) storedState = Core.normalizeStoredState(response.state);
     resolveCurrentIdentity();
+    reconcileUserOperations();
+    syncAdapterConnection();
     return response.result;
   }
 
@@ -213,7 +216,8 @@
   }
 
   function adapterIsReady() {
-    return appState.adapter.status === 'ready' && Boolean(appState.adapter.capabilities);
+    return appState.adapter.status === 'ready' && Boolean(appState.adapter.capabilities) &&
+      appState.adapter.contextKey === getAdapterContext().key;
   }
 
   function adapterAppliesToUser(user) {
@@ -559,16 +563,19 @@
   }
 
   function getProvisioningStatus(user) {
-    const provisioning = user?.provisioning;
-    if (!provisioning?.status) return 'unprovisioned';
-    if (
-      provisioning.status === 'ready' &&
-      (provisioning.adapterUrl !== (storedState.origins[user.origin]?.adapterUrl || '') ||
-        (provisioning.expiresAt && new Date(provisioning.expiresAt).getTime() <= Date.now()))
-    ) {
-      return 'stale';
+    return Core.getProvisioningStatus(user, storedState);
+  }
+
+  function reconcileUserOperations() {
+    for (const [id, operation] of Object.entries(appState.userOperations)) {
+      if (!operation.started || !operation.requestId) continue;
+      const provisioning = storedState.users.find((user) => user.id === id)?.provisioning;
+      if (provisioning?.requestId !== operation.requestId ||
+          !['provisioning', 'resetting'].includes(provisioning.status)) {
+        // The request can still finish, but no longer owns this account's UI.
+        delete appState.userOperations[id];
+      }
     }
-    return provisioning.status;
   }
 
   function renderProvisioningBadge(user) {
@@ -579,6 +586,8 @@
       ready: 'Ready',
       stale: 'Needs reprovisioning',
       failed: 'Provisioning failed',
+      provisioning: 'Provisioning pending',
+      resetting: 'Reset pending',
     };
     const title = status === 'failed'
       ? user.provisioning.error || 'The last provisioning request failed'
@@ -608,13 +617,13 @@
     const showProject = appState.activeTab === 'all';
     const status = getProvisioningStatus(user);
     const canProvision = adapterAppliesToUser(user);
-    const operation = appState.userOperations[user.id];
+    const operation = appState.userOperations[user.id]?.kind;
     const isProvisioning = Boolean(operation);
     const action = canProvision && status !== 'ready' ? 'provision-user' : 'fill';
     const actionLabel = isProvisioning
       ? operation === 'reset' ? 'Resetting…' : operation === 'fill' ? 'Filling…' : 'Provisioning…'
       : action === 'provision-user'
-        ? status === 'stale' ? 'Reprovision & fill' : status === 'failed' ? 'Retry provision & fill' : 'Provision & fill'
+        ? status === 'stale' ? 'Reprovision & fill' : ['failed', 'provisioning', 'resetting'].includes(status) ? 'Retry provision & fill' : 'Provision & fill'
         : 'Fill login';
     const canReset = Boolean(
       canProvision &&
@@ -1840,6 +1849,7 @@
     const siteName = Core.normalizeWhitespace(data.get('siteName'));
     const base = form.__testUsersBaseSettings;
     // An untouched name belongs to the source site; linking must not rename the destination.
+    const adapterBeforeSave = appState.adapter;
     const saved = await mutateStoredState({
       type: 'save-settings', origin: currentIdentity.origin, linkedSiteId,
       siteName: siteName !== base.siteName ? siteName : '',
@@ -1847,11 +1857,14 @@
     });
     resolveCurrentIdentity();
     appState.activeEnvironment = saved.environment;
-    appState.adapter = { status: saved.adapterUrl ? 'loading' : 'disabled', capabilities: null, error: '' };
     appState.screen = 'users';
+    // A storage notification may have already started this saved revision's
+    // check. Otherwise Save & check explicitly replaces even a pending attempt.
+    if (appState.adapter === adapterBeforeSave) cancelAdapterLoad();
+    const checking = appState.adapter === adapterBeforeSave ? loadAdapterCapabilities() : syncAdapterConnection();
     render();
     showToast(saved.adapterUrl ? 'Saved · checking provisioning adapter' : 'Saved');
-    if (saved.adapterUrl) await loadAdapterCapabilities();
+    await checking;
   }
 
   async function readAdapterJson(response) {
@@ -1864,53 +1877,83 @@
     }
   }
 
-  async function loadAdapterCapabilities(options = {}) {
+  function getAdapterContext() {
+    const origin = currentIdentity.origin;
+    const environment = currentIdentity.environment;
     const adapterUrl = getConfiguredAdapterUrl();
-    if (!adapterUrl) {
-      appState.adapter = { status: 'disabled', capabilities: null, error: '' };
-      if (options.renderLoading) render();
-      return null;
+    return { origin, environment, adapterUrl,
+      key: JSON.stringify([origin, environment, adapterUrl, getCurrentOriginRecord().updatedAt || '']) };
+  }
+
+  function renderAdapterUpdate() {
+    if (adapterDisposed) return;
+    if (appState.screen === 'settings') {
+      // Checking saved settings must not overwrite an unsaved URL or its merge
+      // base when a response arrives while the user is editing this form.
+      const status = shadow.querySelector('.tu-adapter-status');
+      const markup = renderAdapterConnectionStatus();
+      if (status) status.outerHTML = markup;
+      else if (markup) shadow.querySelector('[data-form="settings"] .tu-form-actions')
+        ?.insertAdjacentHTML('beforebegin', markup);
+    } else if (appState.screen === 'users' || appState.screen === 'editor') render();
+  }
+
+  function cancelAdapterLoad() {
+    adapterLoad?.controller.abort();
+    adapterLoad = null;
+  }
+
+  function syncAdapterConnection() {
+    if (adapterDisposed) return Promise.resolve(null);
+    if (appState.adapter.contextKey === getAdapterContext().key) {
+      return adapterLoad?.promise || Promise.resolve(appState.adapter.capabilities);
     }
+    return loadAdapterCapabilities();
+  }
 
-    try {
-      const validatedUrl = Core.normalizeAdapterUrl(
-        adapterUrl,
-        currentIdentity.origin,
-        currentIdentity.environment
-      );
-      appState.adapter = { status: 'loading', capabilities: null, error: '' };
-      if (options.renderLoading) render();
+  function settleAdapterConnection(task, event) {
+    if (adapterDisposed || task.contextKey !== getAdapterContext().key) return false;
+    const next = Core.transitionAdapterConnection(appState.adapter, {
+      ...event, contextKey: task.contextKey, requestId: task.requestId,
+    });
+    if (next === appState.adapter) return false;
+    appState.adapter = next;
+    renderAdapterUpdate();
+    return true;
+  }
 
-      const response = await fetch(validatedUrl, {
-        method: 'GET',
-        credentials: 'same-origin',
-        cache: 'no-store',
-        headers: {
-          accept: 'application/json',
-          'x-test-users-adapter': 'capabilities',
-        },
-      });
-      if (!response.ok) {
-        throw new Error(`Provisioning adapter returned HTTP ${response.status}`);
+  function loadAdapterCapabilities() {
+    if (adapterDisposed) return Promise.resolve(null);
+    const context = getAdapterContext();
+    if (adapterLoad?.contextKey === context.key) return adapterLoad.promise;
+    cancelAdapterLoad();
+    if (!context.adapterUrl) {
+      appState.adapter = Core.transitionAdapterConnection(appState.adapter, { type: 'disable', contextKey: context.key });
+      renderAdapterUpdate();
+      return Promise.resolve(null);
+    }
+    const task = { contextKey: context.key, requestId: createId(), controller: new AbortController(), promise: null };
+    adapterLoad = task;
+    appState.adapter = Core.transitionAdapterConnection(appState.adapter, { type: 'start', contextKey: context.key, requestId: task.requestId });
+    renderAdapterUpdate();
+    task.promise = (async () => {
+      try {
+        const validatedUrl = Core.normalizeAdapterUrl(context.adapterUrl, context.origin, context.environment);
+        const response = await fetch(validatedUrl, {
+          method: 'GET', credentials: 'same-origin', cache: 'no-store', signal: task.controller.signal,
+          headers: { accept: 'application/json', 'x-test-users-adapter': 'capabilities' },
+        });
+        if (!response.ok) throw new Error(`Provisioning adapter returned HTTP ${response.status}`);
+        if (!settleAdapterConnection(task, { type: 'succeed', capabilities: await readAdapterJson(response) })) return null;
+        return appState.adapter.capabilities;
+      } catch (error) {
+        settleAdapterConnection(task, { type: 'fail', error: error?.message });
+        return null;
+      } finally {
+        if (adapterLoad === task) adapterLoad = null;
       }
-
-      const capabilities = Core.normalizeAdapterCapabilities(await readAdapterJson(response));
-      appState.adapter = { status: 'ready', capabilities, error: '' };
-      render();
-      return capabilities;
-    } catch (error) {
-      appState.adapter = {
-        status: 'error',
-        capabilities: null,
-        error: Core.normalizeWhitespace(error?.message || 'Unable to reach provisioning adapter').slice(
-          0,
-          180
-        ),
-      };
-      render();
-      if (options.renderLoading) showToast(appState.adapter.error, 'error');
-      return null;
-    }
+    })();
+    return task.promise;
   }
 
   async function activateUser(user) {
@@ -1922,32 +1965,34 @@
 
   async function provisionUser(user, operation) {
     if (appState.userOperations[user.id]) return false;
-    if (!adapterIsReady()) await loadAdapterCapabilities();
-    if (!adapterAppliesToUser(user)) {
-      showToast('Provisioning adapter is not ready for this site', 'error');
-      return false;
-    }
-    if (operation === 'reset' && !appState.adapter.capabilities.canReset) {
-      showToast('This project adapter does not support reset', 'error');
-      return false;
-    }
-    if (operation === 'reset' && !user.provisioning?.accountRef) {
-      showToast('Provision this account before resetting it', 'error');
-      return false;
-    }
-
-    const adapterUrl = getConfiguredAdapterUrl();
-    appState.userOperations[user.id] = operation;
+    const attempt = { kind: operation, requestId: createId(), started: false };
+    appState.userOperations[user.id] = attempt;
     delete appState.userResults[user.id];
     render();
 
     try {
-      const validatedUrl = Core.normalizeAdapterUrl(
-        adapterUrl,
-        currentIdentity.origin,
-        currentIdentity.environment
-      );
-      const response = await fetch(validatedUrl, {
+      if (!adapterIsReady()) await loadAdapterCapabilities();
+      if (!adapterAppliesToUser(user)) {
+        throw new Error('Provisioning adapter is not ready for this site');
+      }
+      if (operation === 'reset' && !appState.adapter.capabilities.canReset) {
+        throw new Error('This project adapter does not support reset');
+      }
+
+      // Start and settlement both pass through the serialized storage owner.
+      // Its returned user is authoritative even when another tab just edited it.
+      const started = await mutateStoredState({
+        type: 'start-provisioning', id: user.id, origin: currentIdentity.origin,
+        operation, requestId: attempt.requestId, adapterUrl: getConfiguredAdapterUrl(),
+        environment: currentIdentity.environment,
+      });
+      attempt.started = true;
+      reconcileUserOperations();
+      if (storedState.users.find((candidate) => candidate.id === user.id)?.provisioning?.requestId !== attempt.requestId) {
+        showOutdatedProvisioning(user.id);
+        return false;
+      }
+      const response = await fetch(started.adapterUrl, {
         method: 'POST',
         credentials: 'same-origin',
         cache: 'no-store',
@@ -1956,31 +2001,26 @@
           'content-type': 'application/json',
           'x-test-users-adapter': operation,
         },
-        body: JSON.stringify(Core.buildAdapterRequest(user, operation)),
+        body: JSON.stringify(Core.buildAdapterRequest(started.user, operation)),
       });
       if (!response.ok) {
         throw new Error(`Provisioning adapter returned HTTP ${response.status}`);
       }
 
-      const result = Core.normalizeAdapterResult(
-        await readAdapterJson(response),
-        user.provisioning?.accountRef
-      );
-      const now = new Date().toISOString();
-      const provisioning = {
-        ...result,
-        adapterUrl,
-        roleId: user.roleId || user.role,
-        scenarioId: user.scenarioId || '',
-        provisionedAt: now,
-        error: '',
-      };
-      const updatedUser = { ...user, provisioning, updatedAt: now };
-      await mutateStoredState({ type: 'set-provisioning', id: user.id, provisioning, updatedAt: now });
-      delete appState.userOperations[user.id];
+      const completed = await mutateStoredState({
+        type: 'complete-provisioning', id: user.id, requestId: attempt.requestId,
+        result: await readAdapterJson(response),
+      });
+      if (!completed.accepted ||
+          storedState.users.find((candidate) => candidate.id === user.id)?.provisioning?.requestId !== attempt.requestId) {
+        showOutdatedProvisioning(user.id);
+        return false;
+      }
+      if (appState.userOperations[user.id] === attempt) delete appState.userOperations[user.id];
       render();
 
-      const filled = await fillCredentials(updatedUser, { quiet: true });
+      const filled = await fillCredentials(completed.user, { quiet: true });
+      const result = completed.user.provisioning;
       const verb = operation === 'reset' ? 'Reset' : 'Provisioned';
       showToast(
         filled
@@ -1993,25 +2033,37 @@
       const message = Core.normalizeWhitespace(
         error?.message || 'Provisioning request failed'
       ).slice(0, 180);
-      const failedUser = {
-        ...user,
-        provisioning: {
-          ...user.provisioning,
-          adapterUrl,
-          status: 'failed',
-          error: message,
-        },
-        updatedAt: new Date().toISOString(),
-      };
-      await mutateStoredState({
-        type: 'set-provisioning', id: user.id,
-        provisioning: failedUser.provisioning, updatedAt: failedUser.updatedAt,
-      });
-      delete appState.userOperations[user.id];
-      render();
+      if (attempt.started) {
+        try {
+          const failed = await mutateStoredState({
+            type: 'fail-provisioning', id: user.id, requestId: attempt.requestId, error: message,
+          });
+          // Storage may expose Retry before this acknowledgement arrives.
+          // A newer attempt also owns the feedback once it owns the account.
+          if (!failed.accepted ||
+              storedState.users.find((candidate) => candidate.id === user.id)?.provisioning?.requestId !== attempt.requestId) {
+            showOutdatedProvisioning(user.id);
+            return false;
+          }
+        } catch (saveError) {
+          showActionError(saveError);
+          return false;
+        }
+      }
       showToast(message, 'error');
       return false;
+    } finally {
+      if (appState.userOperations[user.id] === attempt) delete appState.userOperations[user.id];
+      render();
     }
+  }
+
+  function showOutdatedProvisioning(userId) {
+    const user = storedState.users.find((candidate) => candidate.id === userId);
+    if (!user || getProvisioningStatus(user) !== 'stale' || appState.userOperations[userId]) return;
+    const message = 'Previous provisioning response ignored because the account or settings changed.';
+    setActionResult('user', userId, { message, type: 'warning' });
+    showToast(message, 'error');
   }
 
   async function startNewSnapshot() {
@@ -2355,7 +2407,8 @@
 
   async function fillCredentials(user, options = {}) {
     if (appState.userOperations[user.id]) return false;
-    appState.userOperations[user.id] = 'fill';
+    const operation = { kind: 'fill' };
+    appState.userOperations[user.id] = operation;
     render();
     try {
       const framePurposes = await fillEveryFrame(user);
@@ -2371,7 +2424,7 @@
       if (!options.quiet) showActionError(error);
       return false;
     } finally {
-      delete appState.userOperations[user.id];
+      if (appState.userOperations[user.id] === operation) delete appState.userOperations[user.id];
       render();
     }
   }
@@ -2407,6 +2460,9 @@
   }
 
   function destroy() {
+    adapterDisposed = true;
+    cancelAdapterLoad();
+    appState.adapter = Core.transitionAdapterConnection(appState.adapter, { type: 'disable' });
     clearTimeout(toastTimer);
     host.remove();
   }
@@ -2430,6 +2486,8 @@
       if (areaName !== 'local' || !changes[STORAGE_KEY]) return;
       storedState = Core.normalizeStoredState(changes[STORAGE_KEY].newValue);
       resolveCurrentIdentity();
+      reconcileUserOperations();
+      syncAdapterConnection();
       // Editors own unsaved input; only the list can be safely redrawn here.
       if (appState.screen === 'users') render();
     });
@@ -2447,7 +2505,7 @@
     resolveCurrentIdentity();
     appState.activeEnvironment = currentIdentity.environment;
     render();
-    if (getConfiguredAdapterUrl()) await loadAdapterCapabilities();
+    await loadAdapterCapabilities();
 
     if (!isExtensionRuntime) {
       setTimeout(() => {

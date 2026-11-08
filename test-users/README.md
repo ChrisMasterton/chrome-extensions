@@ -78,6 +78,43 @@ Capability responses containing account, user, name, email, username, password, 
 
 The opaque `accountRef` is stored with the local test-user card. **Reset** sends that reference, role, and scenario, but no name, email, username, or password. Projects should treat the provisioning request as idempotent and reject any non-test identity server-side.
 
+### TU-3 provisioning lifecycle
+
+The serialized storage writer owns provisioning transitions. Each attempt gets a unique request token and starts from the latest saved account. The panel's busy indicator tracks its local request; it does not decide whether a fixture is ready.
+
+| Current state | Trigger and guard | Next state |
+| --- | --- | --- |
+| Unprovisioned, stale, failed, or pending | Provision/retry with the current same-origin adapter settings | Provisioning, with a new request token |
+| Ready | Reset with an unexpired fixture and account reference | Resetting, with a new request token |
+| Provisioning or resetting | Success/failure carrying the current token | Ready/failed |
+| Any saved provisioning state | Identity, role, scenario, account environment, adapter URL, or adapter environment changes | Stale; pending token revoked |
+| Deleted account, superseded attempt, or already settled attempt | Late or duplicate response | No change and no automatic fill |
+
+Notes-only edits preserve the request. Changing relevant values back does not restore a revoked token. A retry from another tab or after a page reload replaces a pending attempt; its older response cannot overwrite the retry. Pending state does not permanently lock the account. A fill miss leaves successful provisioning ready.
+
+Failure acknowledgements can arrive after the storage notification has already exposed Retry. A delayed acknowledgement must still match the current account's request token before showing its error; otherwise it could replace a newer retry's success feedback. The browser regression holds that acknowledgement until the retry finishes and then verifies the old error stays retired.
+
+These guards control local readiness and autofill. They cannot undo work an adapter already performed; adapter requests remain idempotent under the account's stable idempotency key.
+
+### TU-6 adapter connection lifecycle
+
+Each overlay owns a transient connection for the current origin, effective environment, adapter URL, and saved settings revision. `transitionAdapterConnection` controls disabled/loading/ready/error states. Each check has a unique request token; only the pending check for the current saved configuration can install capabilities or report failure. Reloading discovers capabilities again from saved settings.
+
+| Current state | Trigger and guard | Next state and behavior |
+| --- | --- | --- |
+| Initializing or any state | Startup or saved settings change with no adapter URL | Disabled; abort a superseded check and discard capabilities. |
+| Initializing or any state | Startup, saved settings change, or **Save & check** with an adapter URL | Loading; clear previous capabilities and validate the saved endpoint before fetching metadata. Callers observing the same pending saved revision share its check. |
+| Loading | Same-origin/environment validation fails | Error without issuing a capability request. Production remains blocked. |
+| Loading | HTTP success, valid JSON, and valid credential-free metadata with the current token and configuration | Ready; advertise the returned roles, scenarios, provision support, and reset support. |
+| Loading | HTTP, transport, JSON, size, or metadata validation fails for the current check | Error with no capabilities. The error stays visible in the panel and settings. |
+| Ready, error, or loading | Save & check saves settings again | Check the saved revision, sharing a check already started by its storage notification. A replacement check retires the previous request. |
+| Any state | Saved settings change in another tab | Reconcile the connection, discard the previous configuration's capabilities, and discover the current endpoint. |
+| Disabled, superseded, settled, or destroyed owner | Late success or failure | Ignore it; it cannot restore retired capabilities or overwrite a newer result. |
+
+Typing settings does not start discovery. **Save & check** persists the form before checking its saved URL. Capability responses update the connection status without replacing unsaved settings input or its conflict-detection base. Provisioning may await the current connection check, while TU-3 independently owns account readiness and rejects outdated provisioning responses.
+
+The obsolete private `renderLoading` option and its loading/toast branches from the retired standalone Check action have been removed. Connection loading and settlement now use the same transition and rendering paths for startup, settings saves, and provisioning callers.
+
 ## Install
 
 1. Open `chrome://extensions`.
@@ -104,6 +141,17 @@ Then open [http://127.0.0.1:4173/demo/login.html](http://127.0.0.1:4173/demo/log
 npm run verify
 ```
 
+For focused repeated provisioning, reset, and retry verification:
+
+```sh
+npm run test:provisioning
+TEST_USERS_E2E_PROVISIONING_ROUNDS=10 npm run test:provisioning
+```
+
+The focused lane runs three rounds by default (configurable from 1 to 100), alternating reset and provisioning failures. Every round sends a successful provision, successful reset, forced failure, and retry, checking native requests, stable account references, readiness, and top-frame/iframe autofill. Fixture-only controls delay mutation replies while allowing storage events and newer actions to proceed. Tests await the real click handlers, reject unavailable action buttons, and include card state in timeout diagnostics.
+
+The original audit's retry timeout was reproduced against its source revision by delaying a failed write's acknowledgement: the error was visible while Retry remained disabled, so the test's click was ignored. The enabled-action wait covers that timing window; delayed-reply coverage additionally protects the current implementation from obsolete failure feedback. Chrome profile cleanup uses bounded retries for transient directory-removal races.
+
 The interface uses MIT-licensed Tabler Icons vendored into `icons/`. No dependency installation or build step is needed.
 
-`npm run test:e2e` launches an isolated temporary Chrome profile, loads the unpacked extension, and verifies site recognition, credential generation, local persistence, and login autofill. It does not modify your normal Chrome profile.
+`npm run test:e2e` launches an isolated temporary Chrome profile, loads the unpacked extension, and verifies site recognition, credential generation, local persistence, and login autofill. Adapter checks cover startup loading, preserving unsaved settings, Save & check using the saved URL, HTTP/JSON/metadata failure recovery, and changing/disabling/blocking an adapter while discovery is pending. The suite also covers provision/reset/retry, stale provisioning responses, form snapshots, site linking, and concurrent saves. It does not modify your normal Chrome profile.

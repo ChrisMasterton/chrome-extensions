@@ -34,13 +34,13 @@ Expected trace files:
 
 ## Workflow
 
-1. Read `~/CodexInbox/web-qa/latest/manifest.json` first.
-2. Read `bundle.md` for a compact summary.
-3. Read `bundle.json` when exact selectors, user comments, tour context, styles, React hints, scroll diagnostics, or screenshot file paths matter.
-4. Use `view_image` for `images/highlighted-viewport.*` and relevant `images/element-XX.*` files when present.
+1. Read `~/CodexInbox/web-qa/latest/manifest.json` once and keep that manifest for the review. `latest` can move when another capture arrives.
+2. Read the manifest's `files.markdown` path for a compact summary.
+3. Read its `files.bundle` path when exact selectors, user comments, tour context, styles, React hints, scroll diagnostics, or screenshot file paths matter. Follow these immutable history paths instead of reopening files through `latest`.
+4. Use `view_image` for the manifest's `files.images` paths and relevant image paths in the pinned bundle when present.
 5. Treat `userComment` as the user's live observation or question about the selected elements, and answer it directly before branching into broader analysis.
 6. If `tourContext` is present, treat it as the active guided-review step. Read `tourContext.askText`, the tour title/summary, the step index, step title/body, URL, selector/text target, and target-found flags before analyzing broader page state.
-7. If `traceContext` is present, check whether `latestTrace.latestDir` exists and inspect the related trace when the user's question is about changes over time.
+7. If `traceContext` is present, prefer `latestTrace.traceDir` to inspect the exact related trace when the user's question is about changes over time. If only `latestTrace.latestDir` is available, pin its manifest before reading other files.
 8. Explain what the selected UI appears to be, what state it is in, and what evidence supports that interpretation.
 9. If the user wants a fix, map the capture back to the likely owning repo/code path from the URL, locators, text, React component chain, and nearby DOM context, then inspect the real repo before editing.
 
@@ -48,9 +48,9 @@ Expected trace files:
 
 Use this workflow when the user says `look at latest trace`, asks why a UI became hidden/disabled/empty/stale, or asks what changed over time.
 
-1. Read `~/CodexInbox/web-qa/traces/latest/manifest.json` first.
-2. Read `trace.md` for a compact timeline and explanation summary.
-3. Read `trace.json` when exact paths, values, timestamps, app probe values, network status, or mutation details matter.
+1. Read `~/CodexInbox/web-qa/traces/latest/manifest.json` once and keep that manifest for the review.
+2. Read its `files.markdown` path for a compact timeline and explanation summary.
+3. Read its `files.trace` path when exact paths, values, timestamps, app probe values, network status, or mutation details matter. These history paths remain fixed while another send updates `latest`.
 4. Lead with the strongest confirmed before/after diff. Include the watch target, changed path, old value, new value, and time offset.
 5. Compare the event timeline with the diffs, but establish causes from app probes and source code. A nearby event is only a lead. Older traces may contain automatic `cause` and `confidence` labels; those were timing heuristics, not proof of causation.
 6. Use `summaries` for quick hidden/disabled/empty/stale explanations, but verify important claims against `samples`.
@@ -104,13 +104,15 @@ curl -sS http://127.0.0.1:43117/tours \
 ## Useful Commands
 
 ```sh
-ls -la ~/CodexInbox/web-qa/latest
-jq '.captureId, .page, .totalElements, .files' ~/CodexInbox/web-qa/latest/manifest.json
-jq '{userComment, tourContext}' ~/CodexInbox/web-qa/latest/bundle.json
-jq '.elements[] | {index, tag, text, primaryLocator, reactComponents, styles, formState, scrollDiagnostics}' ~/CodexInbox/web-qa/latest/bundle.json
-ls -la ~/CodexInbox/web-qa/traces/latest
-jq '.traceId, .page, .totalWatchTargets, .totalEvents, .totalSamples, .files' ~/CodexInbox/web-qa/traces/latest/manifest.json
-jq '.summaries, .samples[-10:] | .' ~/CodexInbox/web-qa/traces/latest/trace.json
+capture_manifest="$(cat ~/CodexInbox/web-qa/latest/manifest.json)"
+capture_bundle="$(printf '%s' "$capture_manifest" | jq -r '.files.bundle')"
+printf '%s' "$capture_manifest" | jq '.captureId, .page, .totalElements, .files'
+jq '{userComment, tourContext}' "$capture_bundle"
+jq '.elements[] | {index, tag, text, primaryLocator, reactComponents, styles, formState, scrollDiagnostics}' "$capture_bundle"
+trace_manifest="$(cat ~/CodexInbox/web-qa/traces/latest/manifest.json)"
+trace_json="$(printf '%s' "$trace_manifest" | jq -r '.files.trace')"
+printf '%s' "$trace_manifest" | jq '.traceId, .page, .totalWatchTargets, .totalEvents, .totalSamples, .files'
+jq '.summaries, .samples[-10:] | .' "$trace_json"
 curl -sS http://127.0.0.1:43117/tours/latest | jq '{title: .tour.title, steps: [.tour.steps[] | {title, url, selector, text}]}'
 curl -sS http://127.0.0.1:43117/traces/latest | jq '{traceId: .trace.traceId, events: (.trace.events | length), samples: (.trace.samples | length)}'
 ```

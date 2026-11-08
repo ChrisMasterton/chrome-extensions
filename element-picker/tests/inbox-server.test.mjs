@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { cp, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -86,22 +86,30 @@ async function withInboxServer(callback) {
   const baseUrl = `http://127.0.0.1:${port}`;
   const output = [];
 
-  const child = spawn(process.execPath, [SERVER_PATH], {
-    cwd: PROJECT_DIR,
-    env: {
-      ...process.env,
-      CODEX_QA_INBOX_PORT: String(port),
-      CODEX_QA_INBOX_DIR: root,
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-
-  child.stdout.on('data', (chunk) => output.push(chunk.toString()));
-  child.stderr.on('data', (chunk) => output.push(chunk.toString()));
+  const launchServer = () => {
+    const child = spawn(process.execPath, [SERVER_PATH], {
+      cwd: PROJECT_DIR,
+      env: {
+        ...process.env,
+        CODEX_QA_INBOX_PORT: String(port),
+        CODEX_QA_INBOX_DIR: root,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    child.stdout.on('data', (chunk) => output.push(chunk.toString()));
+    child.stderr.on('data', (chunk) => output.push(chunk.toString()));
+    return child;
+  };
+  let child = launchServer();
 
   try {
     await waitForHealth(baseUrl, child);
-    return await callback({ baseUrl, root });
+    return await callback({ baseUrl, root, restart: async (prepare) => {
+      await stopServer(child);
+      if (prepare) await prepare();
+      child = launchServer();
+      await waitForHealth(baseUrl, child);
+    } });
   } catch (error) {
     error.message = `${error.message}\nServer output:\n${output.join('')}`;
     throw error;
@@ -351,5 +359,165 @@ test('invalid payloads return useful HTTP errors', async () => {
     const missingTrace = await postJson(`${baseUrl}/traces`, []);
     assert.equal(missingTrace.response.status, 400);
     assert.match(missingTrace.body.error, /Missing JSON object field: trace/);
+  });
+});
+
+function submission(kind, marker) {
+  const source = { testMarker: marker };
+  const page = { url: 'http://localhost:5173/concurrent', title: marker };
+  if (kind === 'captures') {
+    return {
+      source, markdown: `# ${marker}\n`,
+      bundle: {
+        page, totalElements: 1,
+        elements: [{ index: 1, text: 'x'.repeat(100000), screenshotCrop: {
+          imageDataUrl: `data:image/png;base64,${Buffer.from(marker).toString('base64')}`,
+        } }],
+      },
+    };
+  }
+  if (kind === 'tours') {
+    return { source, tour: {
+      id: 'shared-tour', title: marker,
+      steps: [{ selector: '#target', title: marker, body: 'x'.repeat(100000) }],
+    } };
+  }
+  return { source, markdown: `# ${marker}\n`, trace: {
+    traceId: 'shared-trace', page,
+    events: [{ kind: 'test', label: marker, details: 'x'.repeat(100000) }],
+  } };
+}
+
+async function assertArtifactSet(kind, manifest, marker = kind === 'tours' ? manifest.title : manifest.page.title) {
+  if (kind === 'captures') {
+    const bundle = await readJson(manifest.files.bundle);
+    assert.equal(manifest.page.title, marker);
+    assert.equal(bundle.page.title, marker);
+    assert.equal((await readFile(manifest.files.markdown, 'utf8')).trimEnd(), `# ${marker}`);
+    assert.equal(await readFile(bundle.elements[0].screenshotCrop.imageLocalFile, 'utf8'), marker);
+  } else if (kind === 'tours') {
+    const tour = await readJson(manifest.files.tour);
+    assert.equal(manifest.title, marker);
+    assert.equal(tour.title, marker);
+    assert.equal(tour.id, manifest.tourId);
+  } else {
+    const trace = await readJson(manifest.files.trace);
+    assert.equal(manifest.page.title, marker);
+    assert.equal(trace.page.title, marker);
+    assert.equal(trace.traceId, manifest.traceId);
+    assert.equal(await readFile(manifest.files.markdown, 'utf8'), `# ${marker}\n`);
+  }
+}
+
+for (const kind of ['captures', 'tours', 'traces']) {
+  test(`${kind}: concurrent submissions keep latest and acknowledged history consistent`, { timeout: 15000 }, async () => {
+    await withInboxServer(async ({ baseUrl, root }) => {
+      const latestDir = kind === 'captures' ? join(root, 'latest') : join(root, kind, 'latest');
+      const seed = await postJson(`${baseUrl}/${kind}`, submission(kind, 'seed'));
+      assert.equal(seed.response.status, 200);
+
+      async function checkLatest() {
+        // File consumers pin the manifest, then follow its immutable artifact paths.
+        const manifest = await readJson(join(await realpath(latestDir), 'manifest.json'));
+        await assertArtifactSet(kind, manifest);
+        if (kind !== 'captures') {
+          const response = await fetch(`${baseUrl}/${kind}/latest`);
+          assert.equal(response.status, 200, 'published latest must remain available');
+          const snapshot = await response.json();
+          const marker = kind === 'tours' ? snapshot.manifest.title : snapshot.manifest.page.title;
+          if (kind === 'tours') {
+            assert.equal(snapshot.tour.title, marker);
+            assert.equal(snapshot.tour.id, snapshot.manifest.tourId);
+          } else {
+            assert.equal(snapshot.trace.page.title, marker);
+            assert.equal(snapshot.markdown, `# ${marker}\n`);
+          }
+        }
+      }
+
+      const readErrors = [];
+      let pending = true;
+      const markers = Array.from({ length: 12 }, (_, index) => `${kind}-${index}`);
+      const sending = Promise.all(markers.map(marker => postJson(`${baseUrl}/${kind}`, submission(kind, marker))))
+        .finally(() => { pending = false; });
+      while (pending) {
+        try { await checkLatest(); } catch (error) { readErrors.push(error.message); }
+      }
+      const results = await sending;
+      assert.deepEqual(results.map(result => result.response.status), markers.map(() => 200),
+        'every concurrent submission must succeed');
+      assert.deepEqual(readErrors, [], 'readers must never see missing, partial, or mixed artifacts');
+      const directoryKey = kind === 'captures' ? 'captureDir' : kind === 'tours' ? 'tourDir' : 'traceDir';
+      assert.equal(new Set(results.map(result => result.body[directoryKey])).size, markers.length,
+        'each submission needs immutable history even when IDs repeat');
+      for (const [index, result] of results.entries()) {
+        await assertArtifactSet(kind, await readJson(join(result.body[directoryKey], 'manifest.json')), markers[index]);
+      }
+      await checkLatest();
+    });
+  });
+}
+
+test('failed submissions preserve the previous publication and allow retry for every stream', async () => {
+  await withInboxServer(async ({ baseUrl, root }) => {
+    for (const kind of ['captures', 'tours', 'traces']) {
+      await postJson(`${baseUrl}/${kind}`, submission(kind, 'previous'));
+      const latestDir = kind === 'captures' ? join(root, 'latest') : join(root, kind, 'latest');
+      const previous = await realpath(latestDir);
+      const historyDir = join(kind === 'captures' ? root : join(root, kind), 'history');
+      const history = await readdir(historyDir);
+      const invalid = submission(kind, 'failed');
+      if (kind === 'captures') {
+        invalid.bundle.screenshot = { highlightedViewportImageDataUrl: 'data:image/png,%invalid' };
+      } else if (kind === 'tours') {
+        invalid.tour.steps = [];
+      } else {
+        invalid.markdown = { invalid: true };
+      }
+      assert.equal((await postJson(`${baseUrl}/${kind}`, invalid)).response.status, 500);
+      assert.equal(await realpath(latestDir), previous);
+      assert.deepEqual(await readdir(historyDir), history, 'failed preparation must clean its unpublished directory');
+      await assertArtifactSet(kind, await readJson(join(previous, 'manifest.json')), 'previous');
+
+      const retried = await postJson(`${baseUrl}/${kind}`, submission(kind, 'retry'));
+      assert.equal(retried.response.status, 200);
+      await assertArtifactSet(kind, await readJson(join(latestDir, 'manifest.json')), 'retry');
+      await assertArtifactSet(kind, await readJson(join(previous, 'manifest.json')), 'previous');
+    }
+  });
+});
+
+test('startup preserves legacy latest directories and published snapshots survive restart', async () => {
+  await withInboxServer(async ({ baseUrl, root, restart }) => {
+    const directories = ['captures', 'tours', 'traces'].map(kind => ({
+      kind, latestDir: kind === 'captures' ? join(root, 'latest') : join(root, kind, 'latest'),
+    }));
+    for (const { kind } of directories) {
+      assert.equal((await postJson(`${baseUrl}/${kind}`, submission(kind, 'legacy'))).response.status, 200);
+    }
+    await restart(async () => {
+      for (const { latestDir } of directories) {
+        const directory = await realpath(latestDir);
+        await unlink(latestDir);
+        await cp(directory, latestDir, { recursive: true });
+      }
+    });
+    const publications = [];
+    for (const { kind, latestDir } of directories) {
+      assert.equal((await lstat(latestDir)).isSymbolicLink(), true);
+      const legacy = await realpath(latestDir);
+      await assertArtifactSet(kind, await readJson(join(legacy, 'manifest.json')), 'legacy');
+      if (kind !== 'captures') {
+        assert.equal((await fetch(`${baseUrl}/${kind}/latest`)).status, 200);
+      }
+      assert.equal((await postJson(`${baseUrl}/${kind}`, submission(kind, 'new'))).response.status, 200);
+      publications.push(await realpath(latestDir));
+      await assertArtifactSet(kind, await readJson(join(legacy, 'manifest.json')), 'legacy');
+    }
+    await restart();
+    for (const [index, { kind, latestDir }] of directories.entries()) {
+      assert.equal(await realpath(latestDir), publications[index]);
+      await assertArtifactSet(kind, await readJson(join(latestDir, 'manifest.json')), 'new');
+    }
   });
 });

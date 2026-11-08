@@ -8,7 +8,10 @@ function enqueueStoredMutation(mutation) {
   const write = stateWriteQueue.then(async () => {
     const saved = await chrome.storage.local.get(STORAGE_KEY);
     const applied = TestUsersCore.applyStoredMutation(saved[STORAGE_KEY], mutation);
-    await chrome.storage.local.set({ [STORAGE_KEY]: applied.state });
+    // Obsolete responses are no-ops, including for storage change listeners.
+    if (applied.result.accepted !== false) {
+      await chrome.storage.local.set({ [STORAGE_KEY]: applied.state });
+    }
     return applied;
   });
   // A rejected write must not block the next independent save.

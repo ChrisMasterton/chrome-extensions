@@ -1,13 +1,33 @@
 // Vibe Debugger page-world probe.
 (function() {
   if (window.__elementPickerVibeProbeInstalled) return;
-  window.__elementPickerVibeProbeInstalled = true;
 
   const SOURCE = 'element-picker-vibe-probe';
   const CONTROL_SOURCE = 'element-picker-vibe-probe-control';
-  const originals = {};
+  const owner = { active: true };
+  const patches = [];
   const listeners = {};
   let nextId = 1;
+
+  function installOwnedValue(target, key, value) {
+    const descriptor = Object.getOwnPropertyDescriptor(target, key);
+    target[key] = value;
+    if (target[key] === value) patches.push({ target, key, value, descriptor });
+  }
+
+  function patchMethod(target, key, observe) {
+    const original = target[key];
+    if (typeof original !== 'function') return;
+    const observed = observe(original);
+    const wrapper = function () {
+      // Other tools can retain this function inside their own wrappers. Once
+      // stopped, forward directly without observing or adding promise callbacks.
+      return (owner.active ? observed : original).apply(this, arguments);
+    };
+    installOwnedValue(target, key, wrapper);
+  }
+
+  installOwnedValue(window, '__elementPickerVibeProbeInstalled', owner);
 
   function now() {
     return Math.round(performance.now() * 100) / 100;
@@ -80,6 +100,7 @@
   }
 
   function post(kind, details = {}) {
+    if (!owner.active && kind !== 'probe.stopped') return;
     try {
       window.postMessage({
         source: SOURCE,
@@ -94,16 +115,13 @@
   }
 
   function patchFetch() {
-    if (typeof window.fetch !== 'function') return;
-    originals.fetch = window.fetch;
-
-    window.fetch = function patchedFetch(input, init) {
+    patchMethod(window, 'fetch', originalFetch => function patchedFetch(input, init) {
       const details = getFetchDetails(input, init);
       const requestId = `fetch-${nextId++}`;
       const startedAt = now();
       post('network.fetch.start', { requestId, ...details });
 
-      return originals.fetch.apply(this, arguments)
+      return originalFetch.apply(this, arguments)
         .then((response) => {
           post('network.fetch.end', {
             requestId,
@@ -124,25 +142,22 @@
           });
           throw error;
         });
-    };
+    });
   }
 
   function patchXhr() {
     if (typeof window.XMLHttpRequest !== 'function') return;
 
-    originals.xhrOpen = window.XMLHttpRequest.prototype.open;
-    originals.xhrSend = window.XMLHttpRequest.prototype.send;
-
-    window.XMLHttpRequest.prototype.open = function patchedOpen(method, url) {
+    patchMethod(window.XMLHttpRequest.prototype, 'open', originalOpen => function patchedOpen(method, url) {
       this.__elementPickerVibeXhr = {
         requestId: `xhr-${nextId++}`,
         method: String(method || 'GET').toUpperCase(),
         url: truncate(url || '', 500),
       };
-      return originals.xhrOpen.apply(this, arguments);
-    };
+      return originalOpen.apply(this, arguments);
+    });
 
-    window.XMLHttpRequest.prototype.send = function patchedSend() {
+    patchMethod(window.XMLHttpRequest.prototype, 'send', originalSend => function patchedSend() {
       const details = this.__elementPickerVibeXhr || {
         requestId: `xhr-${nextId++}`,
         method: 'GET',
@@ -163,27 +178,24 @@
       this.addEventListener('error', () => finish('network.xhr.error'), { once: true });
       this.addEventListener('abort', () => finish('network.xhr.abort'), { once: true });
 
-      return originals.xhrSend.apply(this, arguments);
-    };
+      return originalSend.apply(this, arguments);
+    });
   }
 
   function patchHistory() {
-    originals.pushState = history.pushState;
-    originals.replaceState = history.replaceState;
-
-    history.pushState = function patchedPushState() {
+    patchMethod(history, 'pushState', originalPushState => function patchedPushState() {
       const from = location.href;
-      const result = originals.pushState.apply(this, arguments);
+      const result = originalPushState.apply(this, arguments);
       post('route.pushState', { from, to: location.href });
       return result;
-    };
+    });
 
-    history.replaceState = function patchedReplaceState() {
+    patchMethod(history, 'replaceState', originalReplaceState => function patchedReplaceState() {
       const from = location.href;
-      const result = originals.replaceState.apply(this, arguments);
+      const result = originalReplaceState.apply(this, arguments);
       post('route.replaceState', { from, to: location.href });
       return result;
-    };
+    });
 
     listeners.popstate = () => post('route.popstate', { to: location.href });
     listeners.hashchange = () => post('route.hashchange', { to: location.href });
@@ -192,52 +204,44 @@
   }
 
   function patchStorage() {
-    originals.localStorageSetItem = Storage.prototype.setItem;
-    originals.localStorageRemoveItem = Storage.prototype.removeItem;
-    originals.localStorageClear = Storage.prototype.clear;
-
-    Storage.prototype.setItem = function patchedSetItem(key, value) {
+    patchMethod(Storage.prototype, 'setItem', originalSetItem => function patchedSetItem(key, value) {
       post('storage.setItem', {
         storage: this === window.localStorage ? 'localStorage' : 'sessionStorage',
         key: shouldRedactKey(key) ? '[redacted]' : truncate(key, 160),
         value: shouldRedactKey(key) ? '[redacted]' : truncate(value, 240),
       });
-      return originals.localStorageSetItem.apply(this, arguments);
-    };
+      return originalSetItem.apply(this, arguments);
+    });
 
-    Storage.prototype.removeItem = function patchedRemoveItem(key) {
+    patchMethod(Storage.prototype, 'removeItem', originalRemoveItem => function patchedRemoveItem(key) {
       post('storage.removeItem', {
         storage: this === window.localStorage ? 'localStorage' : 'sessionStorage',
         key: shouldRedactKey(key) ? '[redacted]' : truncate(key, 160),
       });
-      return originals.localStorageRemoveItem.apply(this, arguments);
-    };
+      return originalRemoveItem.apply(this, arguments);
+    });
 
-    Storage.prototype.clear = function patchedClear() {
+    patchMethod(Storage.prototype, 'clear', originalClear => function patchedClear() {
       post('storage.clear', {
         storage: this === window.localStorage ? 'localStorage' : 'sessionStorage',
       });
-      return originals.localStorageClear.apply(this, arguments);
-    };
+      return originalClear.apply(this, arguments);
+    });
   }
 
   function patchConsole() {
-    originals.consoleWarn = console.warn;
-    originals.consoleError = console.error;
-
-    console.warn = function patchedWarn() {
+    patchMethod(console, 'warn', originalWarn => function patchedWarn() {
       post('console.warn', { args: Array.from(arguments).slice(0, 6).map((arg) => sanitizeValue(arg)) });
-      return originals.consoleWarn.apply(this, arguments);
-    };
+      return originalWarn.apply(this, arguments);
+    });
 
-    console.error = function patchedError() {
+    patchMethod(console, 'error', originalError => function patchedError() {
       post('console.error', { args: Array.from(arguments).slice(0, 6).map((arg) => sanitizeValue(arg)) });
-      return originals.consoleError.apply(this, arguments);
-    };
+      return originalError.apply(this, arguments);
+    });
   }
 
   function installAppApi() {
-    const existing = window.__VIBE_DEBUGGER__;
     const api = {
       trace(name, payload) {
         post('app.trace', { name: truncate(name, 160), payload: sanitizeValue(payload) });
@@ -257,33 +261,25 @@
       },
     };
 
-    if (existing && typeof existing === 'object') {
-      window.__VIBE_DEBUGGER_PREVIOUS__ = existing;
-    }
-    window.__VIBE_DEBUGGER__ = api;
+    installOwnedValue(window, '__VIBE_DEBUGGER__', api);
   }
 
   function restore() {
-    if (originals.fetch) window.fetch = originals.fetch;
-    if (originals.xhrOpen) window.XMLHttpRequest.prototype.open = originals.xhrOpen;
-    if (originals.xhrSend) window.XMLHttpRequest.prototype.send = originals.xhrSend;
-    if (originals.pushState) history.pushState = originals.pushState;
-    if (originals.replaceState) history.replaceState = originals.replaceState;
-    if (originals.localStorageSetItem) Storage.prototype.setItem = originals.localStorageSetItem;
-    if (originals.localStorageRemoveItem) Storage.prototype.removeItem = originals.localStorageRemoveItem;
-    if (originals.localStorageClear) Storage.prototype.clear = originals.localStorageClear;
-    if (originals.consoleWarn) console.warn = originals.consoleWarn;
-    if (originals.consoleError) console.error = originals.consoleError;
+    if (!owner.active) return;
+    owner.active = false;
     if (listeners.popstate) window.removeEventListener('popstate', listeners.popstate, true);
     if (listeners.hashchange) window.removeEventListener('hashchange', listeners.hashchange, true);
     if (listeners.message) window.removeEventListener('message', listeners.message);
-    if (window.__VIBE_DEBUGGER_PREVIOUS__) {
-      window.__VIBE_DEBUGGER__ = window.__VIBE_DEBUGGER_PREVIOUS__;
-      delete window.__VIBE_DEBUGGER_PREVIOUS__;
-    } else {
-      delete window.__VIBE_DEBUGGER__;
+    for (const { target, key, value, descriptor } of patches.reverse()) {
+      if (target[key] !== value) continue;
+      try {
+        if (descriptor) Object.defineProperty(target, key, descriptor);
+        else delete target[key];
+      } catch {
+        // A page can freeze an API after installation. The stopped wrapper is
+        // still a pass-through even when its property can no longer be restored.
+      }
     }
-    window.__elementPickerVibeProbeInstalled = false;
     post('probe.stopped', {});
   }
 

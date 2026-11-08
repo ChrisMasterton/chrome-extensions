@@ -94,10 +94,17 @@ function getContentType(pathname) {
 
 async function startStaticServer(rootDir) {
   const port = await getFreePort();
+  let heldNavigation = null;
   const server = createHttpServer(async (request, response) => {
     try {
       const url = new URL(request.url || '/', `http://127.0.0.1:${port}`);
-      const pathname = url.pathname === '/' ? SMOKE_PATH : url.pathname;
+      if (url.searchParams.has('hold-tour') && heldNavigation) {
+        const hold = heldNavigation;
+        heldNavigation = null;
+        hold.started = true;
+        await hold.wait;
+      }
+      const pathname = ['/', '/tour-page-two'].includes(url.pathname) ? SMOKE_PATH : url.pathname;
       const requestedPath = resolve(rootDir, `.${decodeURIComponent(pathname)}`);
 
       if (!requestedPath.startsWith(rootDir)) {
@@ -122,6 +129,12 @@ async function startStaticServer(rootDir) {
   return {
     port,
     baseUrl: `http://127.0.0.1:${port}`,
+    holdNavigation: () => {
+      let release;
+      const hold = { started: false, wait: new Promise(resolveHold => { release = resolveHold; }), release: () => release() };
+      heldNavigation = hold;
+      return hold;
+    },
     close: () => new Promise((resolveClose) => {
       server.close(resolveClose);
     }),
@@ -383,7 +396,7 @@ class PipeCdpClient {
     }, sessionId);
 
     if (result.exceptionDetails) {
-      throw new Error(result.exceptionDetails.text || 'Runtime evaluation failed');
+      throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text || 'Runtime evaluation failed');
     }
 
     return result.result?.value;
@@ -440,12 +453,16 @@ function jsString(value) {
 }
 
 async function waitForPageCondition(pageClient, expression, label, timeoutMs = 10000) {
+  return waitForCondition(() => pageClient.evaluate(expression), label, timeoutMs);
+}
+
+async function waitForCondition(check, label, timeoutMs = 10000) {
   const startedAt = Date.now();
   let lastError = null;
 
   while (Date.now() - startedAt < timeoutMs) {
     try {
-      const value = await pageClient.evaluate(expression);
+      const value = await check();
       if (value) return value;
     } catch (error) {
       lastError = error;
@@ -472,6 +489,8 @@ async function run() {
   let chrome = null;
   let pageClient = null;
   let serviceWorkerClient = null;
+  let diggerWorkerClient = null;
+  let navigationHold = null;
 
   try {
     await copyExtensionForPort(PROJECT_DIR, extensionDir, inboxPort, staticServer.port);
@@ -776,11 +795,228 @@ async function run() {
     assert.notEqual(await pageClient.evaluate(`document.querySelector('#__element-picker-toolbar').dataset.position`), previousCorner, 'Move must advance from the actual corner after a tour ends');
     await capture('qa-capture-final');
 
+    async function stopBackground() {
+      await pageClient.send('ServiceWorker.enable');
+      if (serviceWorkerClient) {
+        await chrome.cdp.send('Target.detachFromTarget', { sessionId: serviceWorkerClient.sessionId });
+        serviceWorkerClient = null;
+      }
+      await pageClient.send('ServiceWorker.stopAllWorkers');
+      await waitForCondition(async () => !(await listTargets(chrome.cdp, [{ type: 'service_worker', exclude: false }]))
+        .some(target => target.url === `chrome-extension://${extensionLoad.id}/background.js`), 'background worker stopping');
+    }
+
+    async function attachBackground({ start = false } = {}) {
+      if (start) {
+        await pageClient.send('ServiceWorker.startWorker', { scopeURL: `chrome-extension://${extensionLoad.id}/` });
+      }
+      serviceWorkerClient = await attachTarget(chrome.cdp, await waitForExtensionWorker(chrome.cdp, extensionLoad.id));
+    }
+
+    async function reloadPage() {
+      await pageClient.evaluate('window.beforeNavigationReload = true');
+      await pageClient.send('Page.reload');
+      await waitForPageCondition(pageClient, `document.readyState === 'complete' && !window.beforeNavigationReload`, 'a fresh document after reload');
+    }
+
+    const tabId = injectionResult.tabId;
+    log('stopping the background worker and reloading with Break on Load enabled');
+    await waitForPageCondition(serviceWorkerClient, `readTabState(${tabId}).then(state => state.breakOnLoadEnabled)`, 'persisted Break on Load');
+    await stopBackground();
+    await reloadPage();
+    await waitForPageCondition(pageClient, `document.querySelector('.element-picker-workspace-mode > span')?.textContent.includes('Picking')`, 'Break on Load after a background restart');
+    await attachBackground();
+    assert.match(await pageClient.evaluate(`document.querySelector('.element-picker-capture-options summary').textContent`), /break on load/);
+
+    log('continuing a cross-page tour after stopping the worker during navigation');
+    const firstUrl = await pageClient.evaluate('location.href');
+    const secondUrl = `${staticServer.baseUrl}/tour-page-two?hold-tour=second`;
+    const navigationTour = await fetch(`http://127.0.0.1:${inboxPort}/tours`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ tour: { title: 'Navigation review', steps: [
+        { id: 'page-one', url: firstUrl, selector: '#filter-input', title: 'Page one' },
+        { id: 'page-two', url: secondUrl, selector: '#save-button', title: 'Page two' },
+      ] } }),
+    });
+    assert.equal(navigationTour.status, 200);
+    await clickButton('Tour');
+    await clickButton('Load tour');
+    await waitForPageCondition(pageClient, `document.querySelector('.element-picker-tour-title')?.textContent === 'Page one'`, 'navigation tour starting');
+    await pageClient.evaluate(`(() => {
+      const input = document.querySelector('.element-picker-tour-ask');
+      input.value = 'Keep the first page note'; input.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
+    navigationHold = staticServer.holdNavigation();
+    await clickButton('Next');
+    await waitForCondition(() => navigationHold.started, 'the second tour page request being held');
+    await waitForPageCondition(serviceWorkerClient, `readTabState(${tabId}).then(state => state.delivery?.status === 'pending' && state.tour?.stepIndex === 1)`, 'persisted pending tour');
+    await stopBackground();
+    navigationHold.release();
+    navigationHold = null;
+    await waitForPageCondition(pageClient, `location.href === ${jsString(secondUrl)} && document.querySelector('.element-picker-tour-title')?.textContent === 'Page two'`, 'cross-page continuation after a cold worker start');
+    await attachBackground();
+    assert.match(await pageClient.evaluate(`document.querySelector('.element-picker-tour-status').textContent`), /Highlighting/);
+    assert.match(await pageClient.evaluate(`document.querySelector('.element-picker-capture-options summary').textContent`), /break on load/);
+    await pageClient.evaluate(`(() => {
+      const input = document.querySelector('.element-picker-tour-ask');
+      input.value = 'Keep the second page note'; input.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
+    await waitForPageCondition(serviceWorkerClient, `readTabState(${tabId}).then(state => state.tour.askNotes.some(entry => entry[1] === 'Keep the second page note'))`, 'saved second-page note');
+
+    log('retaining a failed tour reinjection, restarting, and retrying through the action handler');
+    await serviceWorkerClient.evaluate(`(() => {
+      const execute = chrome.scripting.executeScript.bind(chrome.scripting);
+      chrome.scripting.executeScript = options => options.files?.includes('picker.js')
+        ? Promise.reject(new Error('Controlled reinjection failure')) : execute(options);
+    })()`);
+    await reloadPage();
+    await waitForPageCondition(serviceWorkerClient, `readTabState(${tabId}).then(state => state.delivery?.status === 'failed')`, 'durable reinjection failure');
+    assert.equal(await pageClient.evaluate(`!!document.querySelector('#__element-picker-toolbar')`), false);
+    assert.equal(await serviceWorkerClient.evaluate(`chrome.action.getBadgeText({tabId:${tabId}})`), '!');
+    await stopBackground();
+    await attachBackground({ start: true });
+    await serviceWorkerClient.evaluate(`(async () => handleActionClick(await chrome.tabs.get(${tabId})))()`);
+    await waitForPageCondition(pageClient, `document.querySelector('.element-picker-tour-title')?.textContent === 'Page two'`, 'manual reinjection retry restoring the tour');
+    assert.equal(await pageClient.evaluate(`document.querySelector('.element-picker-tour-ask').value`), 'Keep the second page note');
+    assert.equal(await serviceWorkerClient.evaluate(`chrome.action.getBadgeText({tabId:${tabId}})`), '');
+
+    log('restoring an acknowledged tour on reload and clearing it explicitly');
+    await stopBackground();
+    await reloadPage();
+    await waitForPageCondition(pageClient, `document.querySelector('.element-picker-tour-title')?.textContent === 'Page two'`, 'tour checkpoint after reload');
+    await attachBackground();
+    await clickButton('Back');
+    await clickButton('Open Step');
+    await waitForPageCondition(pageClient, `location.href === ${jsString(firstUrl)} && document.querySelector('.element-picker-tour-title')?.textContent === 'Page one'`, 'returning to the first tour page');
+    assert.equal(await pageClient.evaluate(`document.querySelector('.element-picker-tour-ask').value`), 'Keep the first page note');
+    await clickButton('End tour');
+    await waitForPageCondition(serviceWorkerClient, `readTabState(${tabId}).then(state => !state.tour && state.breakOnLoadEnabled)`, 'ending the saved tour without disabling Break on Load');
+    await pageClient.evaluate(`document.querySelector('.element-picker-capture-options').open = true`);
+    await clickButton('Break Load On');
+    await waitForPageCondition(serviceWorkerClient, `readTabState(${tabId}).then(state => !state.tour && !state.breakOnLoadEnabled)`, 'persisted explicit disable');
+    await stopBackground();
+    await reloadPage();
+    await attachBackground();
+    await serviceWorkerClient.evaluate(`readTabState(${tabId})`);
+    assert.equal(await pageClient.evaluate(`!!document.querySelector('#__element-picker-toolbar')`), false, 'ended tours and disabled Break on Load must not return');
+
+    log('checking both extensions together, opening QA Bridge before Vibe Digger');
+    const diggerDir = join(workspaceRoot, 'vibe-digger-extension');
+    await mkdir(diggerDir);
+    for (const file of ['manifest.json', 'background.js', 'page-agent.js', 'content.js', 'icon16.png', 'icon48.png', 'icon128.png']) {
+      await cp(join(PROJECT_DIR, '..', 'vibe-digger', file), join(diggerDir, file));
+    }
+    const diggerManifestPath = join(diggerDir, 'manifest.json');
+    const diggerManifest = JSON.parse(await readFile(diggerManifestPath, 'utf8'));
+    diggerManifest.name = 'Vibe Digger Coexistence E2E';
+    diggerManifest.host_permissions = [`${staticServer.baseUrl}/*`];
+    await writeFile(diggerManifestPath, JSON.stringify(diggerManifest));
+    const diggerShadow = `document.querySelector('#__vibe_digger_host')?.shadowRoot`;
+
+    async function observeProbe() {
+      await pageClient.evaluate(`(() => {
+        window.coexistProbeEvents = [];
+        window.addEventListener('message', event => {
+          if (event.source === window && event.data?.source === 'element-picker-vibe-probe')
+            window.coexistProbeEvents.push(event.data);
+        });
+      })()`);
+    }
+    async function openBridge() {
+      await serviceWorkerClient.evaluate(`(async () => handleActionClick(await chrome.tabs.get(${tabId})))()`);
+      await waitForPageCondition(pageClient, `!!document.querySelector('#__element-picker-toolbar') && window.coexistProbeEvents.some(event => event.kind === 'probe.started')`, 'QA Bridge probe starting');
+      await clickButton('Use page');
+      await clickButton('Move');
+      await clickButton('Move');
+    }
+    async function openDigger() {
+      await diggerWorkerClient.evaluate(`(async () => {
+        await chrome.scripting.executeScript({ target:{tabId:${tabId}}, files:['page-agent.js'], world:'MAIN' });
+        await chrome.scripting.executeScript({ target:{tabId:${tabId}}, files:['content.js'] });
+      })()`);
+      await waitForPageCondition(pageClient, `!!${diggerShadow}?.querySelector('.vd-panel')`, 'Vibe Digger panel opening');
+    }
+    async function closeBridge() {
+      await pageClient.evaluate('window.coexistProbeEvents = []');
+      await clickButton('Close');
+      await waitForPageCondition(pageClient, `!window.__elementPickerVibeProbeInstalled && window.coexistProbeEvents.some(event => event.kind === 'probe.stopped')`, 'QA Bridge probe stopping');
+    }
+    async function exerciseBoth(marker, bridgeActive) {
+      await pageClient.evaluate('window.coexistProbeEvents = []');
+      const result = await pageClient.evaluate(`(async () => {
+        const response = await fetch(${jsString(`${SMOKE_PATH}?coexist-fetch=${marker}`)});
+        const body = await response.text();
+        const xhrStatus = await new Promise((resolveXhr, rejectXhr) => {
+          const xhr = new XMLHttpRequest();
+          xhr.open('GET', ${jsString(`${SMOKE_PATH}?coexist-xhr=${marker}`)});
+          xhr.onload = () => resolveXhr(xhr.status);
+          xhr.onerror = () => rejectXhr(new Error('Coexistence XHR failed'));
+          xhr.send();
+        });
+        console.warn(${jsString(`coexist-warning-${marker}`)});
+        return { status: response.status, bodyLength: body.length, xhrStatus };
+      })()`);
+      assert.equal(result.status, 200);
+      assert.ok(result.bodyLength > 0);
+      assert.equal(result.xhrStatus, 200);
+      await pageClient.evaluate(`${diggerShadow}.querySelector('[data-view="network"]').click()`);
+      await waitForPageCondition(pageClient, `(() => {
+        const rows = [...${diggerShadow}.querySelectorAll('.vd-net')];
+        return ['coexist-fetch=', 'coexist-xhr='].every(kind => rows.some(row =>
+          row.textContent.includes(kind + ${jsString(marker)}) && row.querySelector('.vd-net-status')?.textContent === '200'));
+      })()`, 'Vibe Digger HTTP capture during coexistence');
+      await pageClient.evaluate(`${diggerShadow}.querySelector('[data-view="issues"]').click()`);
+      await waitForPageCondition(pageClient, `${diggerShadow}.querySelector('.vd-body').textContent.includes(${jsString(`coexist-warning-${marker}`)})`, 'Vibe Digger console capture during coexistence');
+      if (bridgeActive) {
+        await waitForPageCondition(pageClient, `window.coexistProbeEvents.some(event => event.kind === 'console.warn')`, 'QA Bridge console observation');
+        const kinds = await pageClient.evaluate('window.coexistProbeEvents.map(event => event.kind)');
+        for (const kind of ['network.fetch.start', 'network.fetch.end', 'network.xhr.start', 'network.xhr.end', 'console.warn']) {
+          assert.equal(kinds.filter(value => value === kind).length, 1, `${marker}: one active QA observer per event`);
+        }
+      } else {
+        assert.equal(await pageClient.evaluate('window.coexistProbeEvents.length'), 0, 'a stopped QA probe must remain silent');
+      }
+    }
+
+    await observeProbe();
+    assert.equal(await pageClient.evaluate('!!window.__vibeDiggerAgentInstalled'), false);
+    await openBridge();
+    const diggerLoad = await chrome.cdp.send('Extensions.loadUnpacked', { path: diggerDir });
+    diggerWorkerClient = await attachTarget(chrome.cdp, await waitForExtensionWorker(chrome.cdp, diggerLoad.id));
+    await openDigger();
+    for (const order of ['bridge-first', 'digger-first']) {
+      if (order === 'digger-first') {
+        log('checking both extensions together, opening Vibe Digger before QA Bridge');
+        await reloadPage();
+        await observeProbe();
+        await openDigger();
+        assert.equal(await pageClient.evaluate('!!window.__elementPickerVibeProbeInstalled'), false);
+        await openBridge();
+      }
+      await exerciseBoth(`${order}-active`, true);
+      navigationHold = staticServer.holdNavigation();
+      await pageClient.evaluate(`window.coexistPendingFetch = fetch(${jsString(`${SMOKE_PATH}?hold-tour=fetch-${order}`)}).then(response => response.text()); true`);
+      await waitForCondition(() => navigationHold.started, 'the in-flight coexistence request being held');
+      await closeBridge();
+      await exerciseBoth(`${order}-closed`, false);
+      await openBridge();
+      await pageClient.evaluate('window.coexistProbeEvents = []');
+      navigationHold.release();
+      navigationHold = null;
+      await pageClient.evaluate('window.coexistPendingFetch');
+      assert.equal(await pageClient.evaluate(`window.coexistProbeEvents.some(event => event.kind === 'network.fetch.end')`), false, 'a retired installation must not emit into the reopened bridge');
+      await exerciseBoth(`${order}-reopened`, true);
+      await closeBridge();
+      await exerciseBoth(`${order}-closed-again`, false);
+    }
+
     log(`pass: ${latestTrace.manifest.traceId}`);
     log(`artifacts: ${join(inboxRoot, 'traces', 'latest')}`);
   } finally {
+    navigationHold?.release();
     pageClient?.close();
     serviceWorkerClient?.close();
+    diggerWorkerClient?.close();
     await chrome?.close();
     await inbox?.close();
     await staticServer.close();

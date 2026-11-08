@@ -13,9 +13,38 @@ import { fileURLToPath } from 'node:url';
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
 const PROJECT_DIR = resolve(TEST_DIR, '..');
 const RUNTIME_PAGE = '/demo/runtime-login.html';
+const PROVISIONING_ROUNDS = Number(process.env.TEST_USERS_E2E_PROVISIONING_ROUNDS || 3);
+assert.ok(Number.isInteger(PROVISIONING_ROUNDS) && PROVISIONING_ROUNDS >= 1 && PROVISIONING_ROUNDS <= 100,
+  'TEST_USERS_E2E_PROVISIONING_ROUNDS must be an integer from 1 to 100');
 
 function log(message) {
   console.log(`[test-users-e2e] ${message}`);
+}
+
+function heldOperation(operation) {
+  let release;
+  let started;
+  return {
+    operation,
+    released: new Promise((resolveRelease) => { release = resolveRelease; }),
+    waiting: new Promise((resolveStarted) => { started = resolveStarted; }),
+    release: () => release(),
+    started: (payload) => started(payload),
+  };
+}
+
+async function waitForHeldOperation(held) {
+  let timeout;
+  try {
+    return await Promise.race([
+      held.waiting,
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(new Error('Timed out waiting for held adapter request')), 10000);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function pathExists(path) {
@@ -56,6 +85,7 @@ async function startStaticServer() {
   const port = await getFreePort();
   const adapterState = {
     capabilityRequests: 0,
+    operationAttempts: [],
     provisionRequests: [],
     resetRequests: [],
     accountRefsByKey: new Map(),
@@ -67,11 +97,21 @@ async function startStaticServer() {
         response.setHeader('content-type', 'application/json; charset=utf-8');
         if (request.method === 'GET') {
           adapterState.capabilityRequests += 1;
-          response.writeHead(200);
+          const reply = adapterState.nextCapabilities || {};
+          adapterState.nextCapabilities = null;
+          const held = adapterState.holdNextCapabilities;
+          adapterState.holdNextCapabilities = null;
+          if (held) {
+            adapterState.activeHeldCapabilities = held;
+            held.started({url:requestUrl.href});
+            await held.released;
+            adapterState.activeHeldCapabilities = null;
+          }
+          response.writeHead(reply.status || 200);
           response.end(
-            JSON.stringify({
+            reply.text ?? JSON.stringify(reply.body || {
               schemaVersion: 1,
-              label: 'HikeStrong fixtures',
+              label: requestUrl.searchParams.get('label') || 'HikeStrong fixtures',
               roles: [
                 { id: 'member', label: 'Member' },
                 { id: 'org-admin', label: 'Admin' },
@@ -93,6 +133,15 @@ async function startStaticServer() {
             if (rawBody.length > 65536) throw new Error('Adapter request too large');
           }
           const payload = JSON.parse(rawBody);
+          adapterState.operationAttempts.push({operation:payload.operation,idempotencyKey:payload.idempotencyKey});
+          const held = adapterState.holdNextOperation;
+          if (held?.operation === payload.operation) {
+            adapterState.holdNextOperation = null;
+            adapterState.activeHeldOperation = held;
+            held.started(payload);
+            await held.released;
+            adapterState.activeHeldOperation = null;
+          }
           if (adapterState.failNextOperation === payload.operation) {
             adapterState.failNextOperation = null;
             await new Promise((resolveDelay) => setTimeout(resolveDelay, 350));
@@ -176,6 +225,36 @@ async function prepareTestExtension(destination, pagePort) {
   manifest.name = `${manifest.name} E2E`;
   manifest.host_permissions = [`http://127.0.0.1:${pagePort}/*`];
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+
+  // Control the real storage-event/message-reply ordering without changing the
+  // shipped worker. A held reply releases the write queue and lets Retry run.
+  const backgroundPath = join(destination,'background.js');
+  const background = await readFile(backgroundPath,'utf8');
+  const reply = '.then((applied) => sendResponse({ ok: true, ...applied }))';
+  assert.ok(background.includes(reply),'mutation reply instrumentation must match the fixture worker');
+  await writeFile(backgroundPath, background.replace(reply, `.then(async (applied) => {
+      const gate = globalThis.__testUsersMutationReplyGate;
+      if (gate?.type === message.mutation.type && !gate.received) {
+        gate.received = true;
+        gate.requestId = message.mutation.requestId;
+        await gate.promise;
+        if (globalThis.__testUsersMutationReplyGate === gate) globalThis.__testUsersMutationReplyGate = null;
+      }
+      sendResponse({ ok:true, ...applied });
+    })`));
+  // Observe completion of the actual click handler, including its final render.
+  // Browser assertions can await it instead of guessing when a toast settled.
+  const contentPath = join(destination,'content.js');
+  const content = await readFile(contentPath,'utf8');
+  const click = "element.addEventListener('click', (event) => handleAction(event).catch(showActionError));";
+  assert.ok(content.includes(click),'action completion instrumentation must match the fixture content script');
+  await writeFile(contentPath, content.replace(click, `element.addEventListener('click', event => {
+      const pending = {type:event.currentTarget.dataset.action};
+      const actions = globalThis.__testUsersPendingActions ||= new Set();
+      pending.promise = handleAction(event).catch(showActionError).finally(() => actions.delete(pending));
+      actions.add(pending);
+      globalThis.__testUsersLastAction = pending;
+    });`));
 }
 
 async function stopProcess(child, signal = 'SIGTERM') {
@@ -349,7 +428,16 @@ async function waitForCondition(client, expression, label) {
     if (await client.evaluate(expression)) return;
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
   }
-  throw new Error(`Timed out waiting for ${label}`);
+  const diagnostic = await client.evaluate(`(() => {
+    if (typeof document === 'undefined') return {worker:true};
+    const root=document.querySelector('#test-users-extension-root')?.shadowRoot;
+    return {cards:[...(root?.querySelectorAll('.tu-user-card') || [])].map(card=>({
+      id:card.dataset.userId,busy:card.getAttribute('aria-busy'),status:card.querySelector('.tu-provisioning-status')?.textContent,
+      retryDisabled:card.querySelector('[data-action="provision-user"]')?.disabled,
+      error:card.querySelector('.tu-inline-error')?.textContent
+    })),toast:root?.querySelector('.tu-page-toast')?.textContent};
+  })()`).catch(() => null);
+  throw new Error(`Timed out waiting for ${label}: ${JSON.stringify(diagnostic)}`);
 }
 
 async function run() {
@@ -409,6 +497,74 @@ async function run() {
     })()`);
 
     const shadowRootExpression = `document.querySelector('#test-users-extension-root')?.shadowRoot`;
+    async function adapterConnection() {
+      return worker.evaluate(`(async () => {
+        const [tab]=await chrome.tabs.query({active:true,currentWindow:true});
+        const [result]=await chrome.scripting.executeScript({target:{tabId:tab.id},func:()=>
+          document.getElementById('test-users-extension-root').__testUsersApi.getState().appState.adapter});
+        return result.result;
+      })()`);
+    }
+    async function settleActions(latest = false) {
+      await worker.evaluate(`(async () => {
+        const [tab]=await chrome.tabs.query({active:true,currentWindow:true});
+        await chrome.scripting.executeScript({target:{tabId:tab.id},func:async()=>{
+          if (${JSON.stringify(latest)}) await globalThis.__testUsersLastAction?.promise;
+          else await Promise.all([...(globalThis.__testUsersPendingActions || [])].map(action=>action.promise));
+        }});
+      })()`);
+    }
+    async function holdMutationReply(type) {
+      await worker.evaluate(`(() => {
+        let release;
+        const gate={type:${JSON.stringify(type)},received:false,promise:new Promise(resolve=>{release=resolve}),release:()=>release()};
+        globalThis.__testUsersMutationReplyGate=gate;
+      })()`);
+    }
+    async function releaseMutationReply() {
+      await worker.evaluate('globalThis.__testUsersMutationReplyGate.release()');
+      await settleActions();
+    }
+    async function clickUserAction(action) {
+      await page.evaluate(`(() => {
+        const button=${shadowRootExpression}.querySelector('[data-action="${action}"]');
+        if (!button || button.disabled) throw new Error('Unavailable account action: ${action}');
+        button.click();
+      })()`);
+      await settleActions(true);
+    }
+    async function makeAccountStale(name) {
+      await page.evaluate(`(() => {
+        const root=${shadowRootExpression}; root.querySelector('[data-action="edit"]').click();
+        root.querySelector('input[name="name"]').value=${JSON.stringify(name)};
+        root.querySelector('[data-action="save-only"]').click();
+      })()`);
+      await settleActions(true);
+      await waitForCondition(page,`!!${shadowRootExpression}.querySelector('.tu-provisioning-status--stale')`,'edited identity requires reprovisioning');
+    }
+    async function assertReadyAfterAction(label) {
+      await waitForCondition(page,`!!${shadowRootExpression}.querySelector('.tu-provisioning-status--ready') && !${shadowRootExpression}.querySelector('.tu-user-card[aria-busy="true"]')`,label);
+      assert.equal(await page.evaluate(`!!${shadowRootExpression}.querySelector('.tu-inline-error')`),false,label);
+      assert.match(await page.evaluate(`${shadowRootExpression}.querySelector('.tu-user-card .tu-action-result').textContent`),/Filled/);
+    }
+    async function saveAdapter(url) {
+      if (!await page.evaluate(`!!${shadowRootExpression}.querySelector('[data-form="settings"]')`)) {
+        await page.evaluate(`${shadowRootExpression}.querySelector('[data-action="settings"]').click()`);
+      }
+      await page.evaluate(`(() => {
+        const form=${shadowRootExpression}.querySelector('[data-form="settings"]');
+        if (${JSON.stringify(url === undefined)} === false) form.elements.adapterUrl.value=${JSON.stringify(url || '')};
+        form.requestSubmit();
+      })()`);
+    }
+    async function changeAdapterSettings(adapterUrl, environment='') {
+      await worker.evaluate(`(async () => {
+        const state=(await chrome.storage.local.get('testUsersStateV1')).testUsersStateV1;
+        const origin=${JSON.stringify(new URL(pageUrl).origin)};
+        state.origins[origin]={...state.origins[origin],adapterUrl:${JSON.stringify(adapterUrl)},environment:${JSON.stringify(environment)},updatedAt:new Date().toISOString()};
+        await chrome.storage.local.set({testUsersStateV1:state});
+      })()`);
+    }
     async function selectView(view) {
       await page.evaluate(`${shadowRootExpression}.querySelector('[data-view="${view}"]').click()`);
     }
@@ -546,6 +702,78 @@ async function run() {
     assert.equal(adapterSettingsActions.submitLabel, 'Save & check');
     assert.ok(staticServer.adapterState.capabilityRequests >= 1);
     await page.evaluate(`${shadowRootExpression}.querySelector('[data-action="back"]').click()`);
+
+    log('checking adapter loading on startup with saved settings');
+    const startupCapabilities = heldOperation('capabilities');
+    staticServer.adapterState.holdNextCapabilities = startupCapabilities;
+    await reloadOverlay();
+    await waitForHeldOperation(startupCapabilities);
+    assert.equal(await page.evaluate(`!!${shadowRootExpression}.querySelector('.tu-adapter-notice--loading')`),true,
+      'startup must show loading while capability discovery is pending');
+    await page.evaluate(`${shadowRootExpression}.querySelector('[data-action="settings"]').click()`);
+    const draftAdapter='/__test-users?label=Draft%20adapter';
+    await page.evaluate(`(() => { const input=${shadowRootExpression}.querySelector('input[name="adapterUrl"]'); input.value=${JSON.stringify(draftAdapter)}; })()`);
+    const requestsBeforeDraft=staticServer.adapterState.capabilityRequests;
+    startupCapabilities.release();
+    await waitForCondition(page,`!!${shadowRootExpression}.querySelector('.tu-adapter-status--ready')`,'startup adapter ready');
+    assert.equal(await page.evaluate(`${shadowRootExpression}.querySelector('input[name="adapterUrl"]').value`),draftAdapter,
+      'a capability result must not overwrite unsaved adapter input');
+    assert.equal(staticServer.adapterState.capabilityRequests,requestsBeforeDraft,'typing a URL must not start a check');
+
+    log('checking Save & check uses the newly saved URL and recovers failed discovery');
+    const savedCapabilities=heldOperation('capabilities');
+    staticServer.adapterState.holdNextCapabilities=savedCapabilities;
+    await saveAdapter();
+    assert.equal(new URL((await waitForHeldOperation(savedCapabilities)).url).searchParams.get('label'),'Draft adapter');
+    await waitForCondition(page,`!!${shadowRootExpression}.querySelector('.tu-adapter-notice--loading')`,'saved adapter checking');
+    assert.equal((await adapterConnection()).capabilities,null,'old capabilities must be absent while checking');
+    savedCapabilities.release();
+    await waitForCondition(page,`${shadowRootExpression}.querySelector('.tu-adapter-notice--ready')?.textContent.includes('Draft adapter')`,'newly saved adapter ready');
+    assert.equal(staticServer.adapterState.capabilityRequests,requestsBeforeDraft+1,'a settings notification and save completion must share one check');
+
+    staticServer.adapterState.nextCapabilities={status:503};
+    await reloadOverlay();
+    await waitForCondition(page,`${shadowRootExpression}.querySelector('.tu-adapter-notice--error')?.textContent.includes('HTTP 503')`,'startup discovery error');
+    assert.equal((await adapterConnection()).capabilities,null);
+    await saveAdapter();
+    await waitForCondition(page,`!!${shadowRootExpression}.querySelector('.tu-adapter-notice--ready')`,'Save & check recovery after startup failure');
+    for (const [reply, expected] of [
+      [{text:'not JSON'},'did not return JSON'],
+      [{body:{roles:['Member'],password:'invalid metadata'}},'must not include password'],
+    ]) {
+      staticServer.adapterState.nextCapabilities=reply;
+      await saveAdapter();
+      await waitForCondition(page,`${shadowRootExpression}.querySelector('.tu-adapter-notice--error')?.textContent.includes(${JSON.stringify(expected)})`,'invalid capability discovery');
+      assert.equal((await adapterConnection()).capabilities,null);
+      await saveAdapter();
+      await waitForCondition(page,`!!${shadowRootExpression}.querySelector('.tu-adapter-notice--ready')`,'capability retry recovery');
+    }
+
+    log('checking changed, disabled, and production settings retire pending adapter checks');
+    const outdatedCapabilities=heldOperation('capabilities');
+    staticServer.adapterState.holdNextCapabilities=outdatedCapabilities;
+    await saveAdapter('/__test-users?label=Old%20adapter');
+    await waitForHeldOperation(outdatedCapabilities);
+    await changeAdapterSettings(`http://127.0.0.1:${staticServer.port}/__test-users?label=Current%20adapter`);
+    await waitForCondition(page,`${shadowRootExpression}.querySelector('.tu-adapter-notice--ready')?.textContent.includes('Current adapter')`,'storage change discovers the current adapter');
+    outdatedCapabilities.release();
+    assert.equal((await adapterConnection()).capabilities.label,'Current adapter');
+
+    const disabledCapabilities=heldOperation('capabilities');
+    staticServer.adapterState.holdNextCapabilities=disabledCapabilities;
+    await saveAdapter('/__test-users?label=Retired%20adapter');
+    await waitForHeldOperation(disabledCapabilities);
+    const requestsBeforeProduction=staticServer.adapterState.capabilityRequests;
+    await changeAdapterSettings(`http://127.0.0.1:${staticServer.port}/__test-users`,'production');
+    await waitForCondition(page,`${shadowRootExpression}.querySelector('.tu-adapter-notice--error')?.textContent.includes('only on local or staging')`,'production blocks connection');
+    assert.equal(staticServer.adapterState.capabilityRequests,requestsBeforeProduction,'production must fail before fetching');
+    await changeAdapterSettings('');
+    await waitForCondition(page,`!${shadowRootExpression}.querySelector('.tu-adapter-notice')`,'adapter explicitly disabled');
+    disabledCapabilities.release();
+    assert.equal((await adapterConnection()).status,'disabled');
+    assert.equal((await adapterConnection()).capabilities,null);
+    await saveAdapter('/__test-users');
+    await waitForCondition(page,`${shadowRootExpression}.querySelector('.tu-adapter-notice--ready')?.textContent.includes('HikeStrong fixtures')`,'current adapter restored before provisioning');
 
     await page.evaluate(`${shadowRootExpression}.querySelector('[data-action="new-user"]').click()`);
     await waitForCondition(
@@ -722,13 +950,63 @@ async function run() {
     );
 
     log('checking failure recovery and keeping provisioned state separate from fill results');
+    await settleActions();
+    await holdMutationReply('fail-provisioning');
     staticServer.adapterState.failNextOperation = 'reset';
     await page.evaluate(`${shadowRootExpression}.querySelector('[data-action="reset-user"]').click()`);
     await waitForCondition(page, `${shadowRootExpression}.querySelector('.tu-fill-button')?.textContent.includes('Resetting')`, 'reset busy state');
-    await waitForCondition(page, `!!${shadowRootExpression}.querySelector('.tu-inline-error')`, 'persistent provisioning error');
+    await waitForCondition(page, `!!${shadowRootExpression}.querySelector('.tu-inline-error') && !!${shadowRootExpression}.querySelector('[data-action="provision-user"]:not(:disabled)')`, 'persistent provisioning error and enabled retry');
+    await waitForCondition(worker,'!!globalThis.__testUsersMutationReplyGate?.received','failure persisted before its reply');
     await capture('provisioning-error');
     await page.evaluate(`${shadowRootExpression}.querySelector('[data-action="provision-user"]').click()`);
     await waitForCondition(page, `!!${shadowRootExpression}.querySelector('.tu-provisioning-status--ready') && !${shadowRootExpression}.querySelector('.tu-user-card[aria-busy="true"]')`, 'retry provision completion');
+    await settleActions(true);
+    await releaseMutationReply();
+    assert.equal(await page.evaluate(`${shadowRootExpression}.querySelector('.tu-page-toast')?.classList.contains('tu-page-toast--error') || ${shadowRootExpression}.querySelector('.tu-page-toast')?.textContent.includes('HTTP 503') || false`),false,
+      'a delayed failure reply must not replace the successful retry feedback');
+
+    const repeatedStart = staticServer.adapterState.operationAttempts.length;
+    log(`repeating provisioning, reset, and retry for ${PROVISIONING_ROUNDS} rounds`);
+    for (let round=1;round<=PROVISIONING_ROUNDS;round++) {
+      const name=`${generated.name} repeat ${round}`;
+      await makeAccountStale(name);
+      await clickUserAction('provision-user');
+      await assertReadyAfterAction(`round ${round}: provision and fill`);
+      assert.equal(await page.evaluate('document.querySelector(\'input[name="name"]\').value'),name);
+      await clickUserAction('reset-user');
+      await assertReadyAfterAction(`round ${round}: reset and fill`);
+
+      const failureOperation=round%2 ? 'reset' : 'provision';
+      if (failureOperation==='provision') await makeAccountStale(`${name} retry`);
+      await holdMutationReply('fail-provisioning');
+      staticServer.adapterState.failNextOperation=failureOperation;
+      await page.evaluate(`(() => {
+        const button=${shadowRootExpression}.querySelector('[data-action="${failureOperation==='reset' ? 'reset-user' : 'provision-user'}"]');
+        if(!button || button.disabled) throw new Error('Failed operation must start from an enabled action');
+        button.click();
+      })()`);
+      await waitForCondition(worker,'!!globalThis.__testUsersMutationReplyGate?.received',`round ${round}: persisted failure before reply`);
+      await waitForCondition(page,`!!${shadowRootExpression}.querySelector('.tu-inline-error') && !!${shadowRootExpression}.querySelector('[data-action="provision-user"]:not(:disabled)')`,`round ${round}: enabled retry`);
+      const failedToken=await worker.evaluate('globalThis.__testUsersMutationReplyGate.requestId');
+      await clickUserAction('provision-user');
+      await assertReadyAfterAction(`round ${round}: retry and fill`);
+      await releaseMutationReply();
+      await assertReadyAfterAction(`round ${round}: retired failure acknowledgement`);
+      assert.equal(await page.evaluate(`${shadowRootExpression}.querySelector('.tu-page-toast')?.textContent.includes('HTTP 503') || false`),false,
+        `round ${round}: obsolete failure must not replace retry success`);
+      const savedAttempt=await worker.evaluate(`chrome.storage.local.get('testUsersStateV1').then(result=>{
+        const users=result.testUsersStateV1.users; const user=users.find(user=>user.id===${JSON.stringify(stored.users[0].id)});
+        return {requestId:user.provisioning.requestId,accountRef:user.provisioning.accountRef};
+      })`);
+      assert.notEqual(savedAttempt.requestId,failedToken);
+      assert.equal(savedAttempt.accountRef,'acct_1','retries must keep the stable idempotency identity');
+      assert.equal(await page.evaluate(`document.querySelector('iframe').contentDocument.querySelector('input[type="email"]').value`),generated.email);
+      assert.equal(await page.evaluate(`document.querySelector('input[type="password"]').value`),generated.password);
+      if(round%5===0 || round===PROVISIONING_ROUNDS) log(`passed ${round}/${PROVISIONING_ROUNDS} provisioning rounds`);
+    }
+    const repeatedAttempts=staticServer.adapterState.operationAttempts.slice(repeatedStart);
+    assert.equal(repeatedAttempts.length,PROVISIONING_ROUNDS*4,'each round must send provision, reset, failure, and retry exactly once');
+    assert.ok(repeatedAttempts.every(attempt=>attempt.idempotencyKey===stored.users[0].id));
     await page.evaluate(`(() => {
       for (const doc of [document, document.querySelector('iframe').contentDocument]) {
         doc.querySelectorAll('input').forEach((input) => { input.disabled = true; });
@@ -742,6 +1020,55 @@ async function run() {
         doc.querySelectorAll('input').forEach((input) => { input.disabled = false; });
       }
     })()`);
+
+    log('ignoring a delayed reset after editing the account, then reprovisioning the current identity');
+    const delayedReset = heldOperation('reset');
+    staticServer.adapterState.holdNextOperation = delayedReset;
+    await page.evaluate(`${shadowRootExpression}.querySelector('[data-action="reset-user"]').click()`);
+    const oldResetRequest = await waitForHeldOperation(delayedReset);
+    assert.equal(oldResetRequest.role.id, 'org-admin');
+    const editedPassword = `${generated.password}new`;
+    await page.evaluate(`(() => {
+      const root = ${shadowRootExpression};
+      root.querySelector('[data-action="edit"]').click();
+      root.querySelector('select[name="role"]').value = 'member';
+      root.querySelector('select[name="scenario"]').value = 'standard';
+      root.querySelector('input[name="password"]').value = ${JSON.stringify(editedPassword)};
+      root.querySelector('[data-action="save-only"]').click();
+    })()`);
+    await waitForCondition(page, `!!${shadowRootExpression}.querySelector('.tu-provisioning-status--stale') && !!${shadowRootExpression}.querySelector('[data-action="provision-user"]:not(:disabled)')`, 'edited account invalidating the pending reset');
+    await page.evaluate(`(() => {
+      for (const doc of [document, document.querySelector('iframe').contentDocument]) {
+        doc.querySelectorAll('input[type="email"], input[type="password"]').forEach(input => { input.value = ''; });
+      }
+    })()`);
+    delayedReset.release();
+    await waitForCondition(page, `${shadowRootExpression}.querySelector('.tu-action-result')?.textContent.includes('response ignored')`, 'outdated reset response being ignored');
+    const afterOldResponse = await worker.evaluate(`(async () => {
+      return (await chrome.storage.local.get('testUsersStateV1')).testUsersStateV1.users[0];
+    })()`);
+    assert.equal(afterOldResponse.provisioning.status, 'stale');
+    assert.equal(afterOldResponse.roleId, 'member');
+    assert.equal(afterOldResponse.password, editedPassword);
+    assert.equal(await page.evaluate(`(() => [document, document.querySelector('iframe').contentDocument]
+      .every(doc => [...doc.querySelectorAll('input[type="email"], input[type="password"]')]
+        .every(input => input.value === '')))()`), true, 'an ignored response must not refill old credentials');
+
+    await page.evaluate(`${shadowRootExpression}.querySelector('[data-action="provision-user"]').click()`);
+    await waitForCondition(page, `!!${shadowRootExpression}.querySelector('.tu-provisioning-status--ready') && !${shadowRootExpression}.querySelector('.tu-user-card[aria-busy="true"]')`, 'reprovisioning the edited account');
+    const currentProvision = staticServer.adapterState.provisionRequests.at(-1);
+    assert.equal(currentProvision.role.id, 'member');
+    assert.equal(currentProvision.scenario.id, 'standard');
+    assert.equal(currentProvision.identity.password, editedPassword);
+    assert.equal(currentProvision.idempotencyKey, stored.users[0].id);
+    assert.equal(await page.evaluate(`document.querySelector('input[type="password"]').value`), editedPassword);
+    await capture('reprovisioned-edited-account');
+
+    if (process.argv.includes('--provisioning-only')) {
+      assert.deepEqual(browser.cdp.exceptions,[],'provisioning flows must not throw browser runtime exceptions');
+      log(`passed: ${PROVISIONING_ROUNDS} repeated rounds (${repeatedAttempts.length} POSTs), delayed failure acknowledgements, retry feedback, reset, stale responses, and autofill`);
+      return;
+    }
 
     await page.evaluate(`(() => {
       const search = ${shadowRootExpression}.querySelector('[data-input="search"]');
@@ -1421,11 +1748,15 @@ async function run() {
     );
 
     assert.deepEqual(browser.cdp.exceptions, [], 'the main flows must not throw browser runtime exceptions');
-    log('passed: task/scope navigation, keyboard focus, short/narrow editor actions, provision/reset/retry, autofill, partial snapshot refill, deletion, persistence, site linking, and concurrent saves');
+    log('passed: adapter startup/save/check/recovery and stale-response guards, task/scope navigation, keyboard focus, short/narrow editor actions, provision/reset/retry, autofill, partial snapshot refill, deletion, persistence, site linking, and concurrent saves');
   } finally {
+    staticServer.adapterState.activeHeldCapabilities?.release();
+    staticServer.adapterState.holdNextCapabilities?.release();
+    staticServer.adapterState.activeHeldOperation?.release();
+    staticServer.adapterState.holdNextOperation?.release();
     await browser?.close();
     await staticServer.close();
-    await rm(tempRoot, { recursive: true, force: true });
+    await rm(tempRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 

@@ -278,6 +278,31 @@
     };
   }
 
+  // TU-6 is transient: only the current check for the current saved settings
+  // can install capabilities. Persisted account provisioning has its own owner.
+  function transitionAdapterConnection(connection, event) {
+    const current = connection || {
+      status: 'disabled', contextKey: '', requestId: null, capabilities: null, error: '',
+    };
+    if (event.type === 'disable') return {
+      status: 'disabled', contextKey: event.contextKey || '', requestId: null, capabilities: null, error: '',
+    };
+    if (event.type === 'start') return {
+      status: 'loading', contextKey: event.contextKey, requestId: event.requestId, capabilities: null, error: '',
+    };
+    if (current.status !== 'loading' || current.contextKey !== event.contextKey ||
+        current.requestId !== event.requestId) return current;
+    if (event.type === 'succeed') return {
+      ...current, status: 'ready', requestId: null, error: '',
+      capabilities: normalizeAdapterCapabilities(event.capabilities),
+    };
+    if (event.type === 'fail') return {
+      ...current, status: 'error', requestId: null, capabilities: null,
+      error: normalizeWhitespace(event.error || 'Unable to reach provisioning adapter').slice(0, 180),
+    };
+    throw new Error('Unknown adapter connection transition');
+  }
+
   function normalizeAdapterResult(value, fallbackAccountRef = '') {
     if (!value || typeof value !== 'object' || Array.isArray(value)) {
       throw new Error('Provisioning adapter returned an invalid result');
@@ -895,6 +920,54 @@
     };
   }
 
+  const PROVISIONING_INPUTS = [
+    'name', 'email', 'username', 'password', 'role', 'roleId',
+    'scenarioId', 'scenarioLabel', 'environment', 'origin',
+  ];
+
+  function getProvisioningStatus(user, state, now = Date.now()) {
+    const provisioning = user?.provisioning;
+    if (!provisioning?.status) return 'unprovisioned';
+    if (provisioning.status === 'ready' &&
+        (provisioning.adapterUrl !== (state.origins[user.origin]?.adapterUrl || '') ||
+          (provisioning.expiresAt && new Date(provisioning.expiresAt).getTime() <= now))) {
+      return 'stale';
+    }
+    return provisioning.status;
+  }
+
+  // TU-3: only these events change provisioning metadata. A request token is
+  // valid for one saved account/configuration revision, not just an account ID.
+  function transitionProvisioning(provisioning, event) {
+    const { requestId: _requestId, ...settled } = provisioning || {};
+    switch (event.type) {
+      case 'invalidate':
+        return provisioning ? { ...settled, status: 'stale', error: '' } : provisioning;
+      case 'start':
+        return {
+          ...settled,
+          status: event.operation === 'reset' ? 'resetting' : 'provisioning',
+          requestId: event.requestId,
+          adapterUrl: event.adapterUrl,
+          error: '',
+        };
+      case 'succeed':
+        return {
+          ...event.result,
+          requestId: provisioning.requestId,
+          adapterUrl: provisioning.adapterUrl,
+          roleId: event.user.roleId || event.user.role,
+          scenarioId: event.user.scenarioId || '',
+          provisionedAt: event.now,
+          error: '',
+        };
+      case 'fail':
+        return { ...settled, requestId: provisioning.requestId, status: 'failed', error: event.error };
+      default:
+        throw new Error('Unknown provisioning transition');
+    }
+  }
+
   // Apply one user action to the latest state, rather than persisting a tab's
   // snapshot of every site, account, and form snapshot.
   function applyStoredMutation(value, mutation) {
@@ -945,11 +1018,16 @@
         saved = { ...mergeEdits(existing, mutation.base, record, editable, `This ${label}`), updatedAt: now };
       }
       saved.siteId = state.origins[record.origin]?.siteId || record.siteId || identity.siteId;
-      if (collection === 'users' && existing?.provisioning &&
-          ['name', 'email', 'username', 'password', 'roleId', 'scenarioId'].some(
+      if (collection === 'users' && existing) {
+        // Editors cannot restore an older attempt or its settled metadata.
+        if (existing.provisioning) {
+          saved.provisioning = PROVISIONING_INPUTS.some(
             (key) => String(existing[key] || '') !== String(saved[key] || '')
-          )) {
-        saved.provisioning = { ...existing.provisioning, status: 'stale', error: '' };
+          ) ? transitionProvisioning(existing.provisioning, { type: 'invalidate' })
+            : existing.provisioning;
+        } else {
+          delete saved.provisioning;
+        }
       }
       state[collection] = existing
         ? state[collection].map((candidate) => candidate.id === saved.id ? saved : candidate)
@@ -979,11 +1057,63 @@
         };
         break;
       }
-      case 'set-provisioning':
-        state.users = state.users.map((user) => user.id === mutation.id
-          ? { ...user, provisioning: mutation.provisioning, updatedAt: now }
-          : user);
+      case 'start-provisioning': {
+        const user = state.users.find((candidate) => candidate.id === mutation.id);
+        if (!user || user.origin !== mutation.origin) {
+          throw new Error('This test user is no longer available on this site');
+        }
+        if (!['provision', 'reset'].includes(mutation.operation) || !mutation.requestId) {
+          throw new Error('Invalid provisioning request');
+        }
+        const identity = resolveSiteContext(state, new URL(user.origin));
+        const configuredUrl = state.origins[user.origin]?.adapterUrl || '';
+        if (!configuredUrl || configuredUrl !== mutation.adapterUrl ||
+            identity.environment !== mutation.environment) {
+          throw new Error('Provisioning settings changed. Check the adapter and retry.');
+        }
+        const adapterUrl = normalizeAdapterUrl(configuredUrl, user.origin, identity.environment);
+        if (mutation.operation === 'reset' &&
+            (getProvisioningStatus(user, state) !== 'ready' || !user.provisioning?.accountRef)) {
+          throw new Error('Provision this account before resetting it');
+        }
+        if (user.provisioning?.requestId === mutation.requestId) {
+          throw new Error('This provisioning request is already running');
+        }
+        const started = {
+          ...user,
+          provisioning: transitionProvisioning(user.provisioning, {
+            type: 'start', operation: mutation.operation, requestId: mutation.requestId, adapterUrl,
+          }),
+          updatedAt: now,
+        };
+        state.users = state.users.map((candidate) => candidate.id === user.id ? started : candidate);
+        result = { accepted: true, user: started, adapterUrl };
         break;
+      }
+      case 'complete-provisioning':
+      case 'fail-provisioning': {
+        const user = state.users.find((candidate) => candidate.id === mutation.id);
+        if (!mutation.requestId || user?.provisioning?.requestId !== mutation.requestId ||
+            !['provisioning', 'resetting'].includes(user?.provisioning?.status)) {
+          return { state: previous, result: { accepted: false } };
+        }
+        const event = mutation.type === 'complete-provisioning'
+          ? {
+              type: 'succeed', user, now,
+              result: normalizeAdapterResult(mutation.result,
+                user.provisioning.status === 'resetting' ? user.provisioning.accountRef : ''),
+            }
+          : {
+              type: 'fail',
+              error: normalizeWhitespace(mutation.error || 'Provisioning request failed').slice(0, 180),
+            };
+        const settled = {
+          ...user, provisioning: transitionProvisioning(user.provisioning, event), updatedAt: now,
+        };
+        state.users = state.users.map((candidate) => candidate.id === user.id ? settled : candidate);
+        result = { accepted: true, user: settled };
+        break;
+      }
       case 'delete-site': {
         state.users = state.users.filter((user) => user.siteId !== mutation.id);
         state.snapshots = state.snapshots.filter((snapshot) => snapshot.siteId !== mutation.id);
@@ -1030,8 +1160,10 @@
         }
         state.users = state.users.map((user) => {
           if (user.origin !== origin) return user;
-          const provisioning = user.provisioning && previousAdapterUrl !== savedOrigin.adapterUrl
-            ? { ...user.provisioning, status: 'stale', error: '' }
+          const provisioning = user.provisioning &&
+              (previousAdapterUrl !== savedOrigin.adapterUrl ||
+                currentOrigin.environment !== savedOrigin.environment)
+            ? transitionProvisioning(user.provisioning, { type: 'invalidate' })
             : user.provisioning;
           if (user.siteId === targetSiteId && provisioning === user.provisioning) return user;
           return { ...user, siteId: targetSiteId, provisioning, updatedAt: now };
@@ -1084,6 +1216,7 @@
     sanitizePasswordSymbols,
     getEnvironment,
     getOriginInfo,
+    getProvisioningStatus,
     isLocalHostname,
     normalizeAdapterCapabilities,
     normalizeAdapterResult,
@@ -1095,5 +1228,6 @@
     siteIdForHost,
     slugify,
     splitPersonName,
+    transitionAdapterConnection,
   };
 });

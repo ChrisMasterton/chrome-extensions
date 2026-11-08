@@ -45,7 +45,9 @@
     status: null,
     pinned: null,
     issues: [],
+    issueSync: { revision: null, awaitingSnapshot: false },
     network: [],
+    networkSync: { revision: null, awaitingSnapshot: false },
     expandedNetworkIds: new Set(),
     expandedIssueIds: new Set(),
     viewScroll: {},
@@ -100,6 +102,7 @@
       border-radius: 7px; padding: 4px 9px; font: inherit; font-size: 11px; cursor: pointer;
     }
     .vd-btn:hover { background: #302a5c; }
+    .vd-btn:disabled { opacity: .5; cursor: default; }
     .vd-btn.active { background: #7c3aed; border-color: #8b5cf6; color: #fff; }
     .vd-btn.ghost { border-color: transparent; background: transparent; color: #a5a0c8; }
     .vd-btn.ghost:hover { color: #fff; background: #262149; }
@@ -444,6 +447,10 @@
     ui.body?.setAttribute('aria-labelledby', `vd-tab-${model.view}`);
     ui.inspectButton?.setAttribute('aria-pressed', String(model.inspectMode));
     ui.heatmapButton?.setAttribute('aria-pressed', String(model.heatmapOn));
+    if (ui.heatmapButton) {
+      ui.heatmapButton.disabled = !model.status?.heatmapAvailable;
+      ui.heatmapButton.classList.toggle('active', model.heatmapOn);
+    }
     if (ui.inspectButton) ui.inspectButton.textContent = model.inspectMode ? 'Picking · Esc to exit' : 'Pick element';
   }
 
@@ -532,13 +539,19 @@
     ui.statusDot.className = `vd-dot${s.reactDetected ? ' on' : ''}`;
     if (!s.reactDetected) {
       ui.statusText.textContent = 'no React detected on this page (yet)';
-    } else if (s.hookMode === 'none') {
-      ui.statusText.textContent = 'React found · heatmap needs a reload';
+    } else if (!s.heatmapAvailable) {
+      ui.statusText.textContent = s.attachment?.reason === 'missed-startup'
+        ? 'React found · heatmap missed startup' : 'React found · heatmap unavailable';
     } else {
       ui.statusText.textContent = `React · ${s.commitCount} commits observed`;
     }
     ui.statusText.title = ui.statusText.textContent;
-    ui.heatmapButton.title = s.hookMode === 'none' ? 'Reload the page to observe React commits' : 'Show React re-renders on the page';
+    ui.heatmapButton.title = s.heatmapAvailable ? 'Show React re-renders on the page' : ({
+      'missed-startup': 'React started before capture. Reload on localhost, or load React Developer Tools before React and reload.',
+      disabled: 'The React DevTools hook is disabled. Enable it and reload to observe commits.',
+      unsupported: 'The existing React hook does not support commit observation.',
+      protected: 'The existing React hook cannot be wrapped. Inspection and capture still work.',
+    }[s.attachment?.reason] || 'Waiting for a React renderer to connect.');
     const badge = ui.issuesButton.querySelector('.vd-badge');
     const count = model.issues.length;
     const increased = count > Number(badge.textContent);
@@ -746,7 +759,7 @@
   }
 
   function statusClass(entry) {
-    if (entry.error || (typeof entry.status === 'number' && entry.status >= 400)) return 'bad';
+    if (entry.error || entry.phase === 'rejected' || (typeof entry.status === 'number' && entry.status >= 400)) return 'bad';
     if (entry.kind === 'ws') {
       if (entry.wsState === 'open') return 'ok';
       if (entry.wsState === 'closed') return entry.ok ? 'pending' : 'bad';
@@ -757,13 +770,15 @@
   }
 
   function statusLabel(entry) {
+    if (entry.phase === 'aborted') return 'aborted';
+    if (entry.phase === 'timed-out') return 'timeout';
     if (entry.error && entry.kind !== 'ws') return 'ERR';
     if (entry.kind === 'ws') {
       if (entry.wsState === 'closed') return `closed ${entry.closeCode ?? ''}`.trim();
       return entry.wsState || '…';
     }
     if (typeof entry.status === 'number') return String(entry.status);
-    if (entry.kind === 'beacon') return entry.ok ? 'queued' : 'dropped';
+    if (entry.kind === 'beacon' && entry.phase !== 'pending') return entry.ok ? 'queued' : 'dropped';
     return '…';
   }
 
@@ -931,10 +946,10 @@
   }
 
   function setHeatmap(enabled) {
+    if (enabled && !model.status?.heatmapAvailable) return;
     if (model.heatmapOn === enabled) return;
     model.heatmapOn = enabled;
     updateViewControls();
-    ui.heatmapButton?.classList.toggle('active', enabled);
     sendControl('heatmap', { enabled });
     if (!enabled) ui.flashLayer.textContent = '';
   }
@@ -1092,7 +1107,7 @@
     }
     if (entry.error) return `FAILED: ${entry.error}`;
     if (entry.status != null) return String(entry.status);
-    if (entry.kind === 'beacon') return entry.ok ? 'queued' : 'dropped';
+    if (entry.kind === 'beacon' && entry.phase !== 'pending') return entry.ok ? 'queued' : 'dropped';
     return 'pending';
   }
 
@@ -1134,6 +1149,7 @@
       lines.push(
         `- React: ${s.reactDetected ? 'detected' : 'not detected'} (hook: ${s.hookMode}, commits observed: ${s.commitCount})`
       );
+      lines.push(`- Heatmap: ${s.heatmapAvailable ? 'available' : s.attachment?.reason || 'waiting for renderer'}`);
     }
     lines.push('');
 
@@ -1172,17 +1188,7 @@
       lines.push(`## Network lifecycle (last ${entries.length} of ${model.network.length}, in order)`);
       lines.push('');
       for (const entry of entries) {
-        const status = entry.kind === 'ws'
-          ? entry.wsState === 'closed'
-            ? `closed ${entry.closeCode ?? ''}${entry.ok ? ' clean' : ' UNCLEAN'}`
-            : entry.wsState
-          : entry.error
-            ? `FAILED: ${entry.error}`
-            : entry.status != null
-              ? entry.status
-              : entry.kind === 'beacon'
-                ? 'queued'
-                : 'pending';
+        const status = networkCopyStatus(entry);
         const timing = entry.durationMs != null ? `, ${entry.durationMs}ms` : '';
         const sizes = `, ↑${formatByteSize(entry.requestSizeBytes)} ↓${formatByteSize(entry.responseSizeBytes)}`;
         lines.push(
@@ -1246,6 +1252,71 @@
   // Agent event handling
   // ---------------------------------------------------------------------------
 
+  function applyNetworkCollection(details, snapshot = false) {
+    const sync = model.networkSync;
+    const revision = details.revision;
+    if (!Number.isInteger(revision) || revision < 0) return false;
+    if (snapshot) sync.awaitingSnapshot = false;
+    if (sync.revision !== null && revision < sync.revision) return false;
+    if (snapshot) {
+      model.network = details.entries || [];
+    } else {
+      if (revision === sync.revision) return false;
+      if (sync.revision === null || revision !== sync.revision + 1) {
+        if (!sync.awaitingSnapshot) {
+          sync.awaitingSnapshot = true;
+          sendControl('get-network');
+        }
+        return false;
+      }
+      const removedIds = new Set(details.removedIds || []);
+      model.network = model.network.filter(entry => !removedIds.has(entry.id));
+      const index = model.network.findIndex(entry => entry.id === details.entry.id);
+      if (index >= 0) model.network[index] = details.entry;
+      else model.network.push(details.entry);
+    }
+    sync.revision = revision;
+    const currentIds = new Set(model.network.map(entry => entry.id));
+    for (const id of model.expandedNetworkIds) {
+      if (!currentIds.has(id)) model.expandedNetworkIds.delete(id);
+    }
+    return true;
+  }
+
+  function applyIssueCollection(details, snapshot = false) {
+    const sync = model.issueSync;
+    const revision = details.revision;
+    if (!Number.isInteger(revision) || revision < 0) return false;
+    if (snapshot) sync.awaitingSnapshot = false;
+    if (sync.revision !== null && revision < sync.revision) return false;
+
+    if (snapshot) {
+      model.issues = details.issues || [];
+    } else {
+      if (revision === sync.revision) return false;
+      if (sync.revision === null || revision !== sync.revision + 1) {
+        // A delta is only valid against its immediate predecessor. Keep the
+        // current projection until an authoritative snapshot repairs the gap.
+        if (!sync.awaitingSnapshot) {
+          sync.awaitingSnapshot = true;
+          sendControl('get-issues');
+        }
+        return false;
+      }
+      const removedIds = new Set(details.removedIds || []);
+      model.issues = model.issues.filter(issue => !removedIds.has(issue.id));
+      const index = model.issues.findIndex(issue => issue.id === details.issue.id);
+      if (index >= 0) model.issues[index] = details.issue;
+      else model.issues.push(details.issue);
+    }
+    sync.revision = revision;
+    const currentIds = new Set(model.issues.map(issue => issue.id));
+    for (const id of model.expandedIssueIds) {
+      if (!currentIds.has(id)) model.expandedIssueIds.delete(id);
+    }
+    return true;
+  }
+
   window.addEventListener('message', (event) => {
     if (event.source !== window) return;
     const data = event.data;
@@ -1254,6 +1325,8 @@
     switch (data.kind) {
       case 'status':
         model.status = data.details;
+        model.heatmapOn = !!data.details.heatmapEnabled;
+        if (!model.heatmapOn) ui.flashLayer.textContent = '';
         updateStatusHeader();
         if (model.view === 'inspect' && !model.pinned) renderBody();
         break;
@@ -1270,51 +1343,32 @@
         drawFlashes(data.details.entries || []);
         break;
       case 'network': {
-        const entry = data.details.entry;
-        const index = model.network.findIndex((e) => e.id === entry.id);
-        if (index >= 0) model.network[index] = entry;
-        else model.network.push(entry);
-        if (model.network.length > 300) {
-          const removed = model.network.shift();
-          if (removed) model.expandedNetworkIds.delete(removed.id);
-        }
+        if (!applyNetworkCollection(data.details)) break;
         updateStatusHeader();
         if (model.view === 'network') renderBody();
         break;
       }
       case 'network-list':
+        if (!applyNetworkCollection(data.details, true)) break;
         if (model.copyPending) model.copyPending.network = true;
-        model.network = data.details.entries || [];
-        {
-          const currentIds = new Set(model.network.map((entry) => entry.id));
-          for (const id of model.expandedNetworkIds) {
-            if (!currentIds.has(id)) model.expandedNetworkIds.delete(id);
-          }
-        }
         updateStatusHeader();
         if (model.view === 'network') renderBody();
         finishCaptureCopy();
         break;
       case 'issue': {
-        const issue = data.details.issue;
-        const index = model.issues.findIndex((i) => i.id === issue.id);
-        if (index >= 0) model.issues[index] = issue;
-        else model.issues.push(issue);
+        if (!applyIssueCollection(data.details)) break;
         updateStatusHeader();
         if (model.view === 'issues') renderBody();
         break;
       }
       case 'issues':
+        if (!applyIssueCollection(data.details, true)) break;
         if (model.copyPending) model.copyPending.issues = true;
-        model.issues = data.details.issues || [];
         if (model.status && data.details.renderCounts) {
           model.status.renderCounts = data.details.renderCounts;
         }
         updateStatusHeader();
         if (model.open) renderBody();
-        for (const id of model.expandedIssueIds) {
-          if (!model.issues.some(issue => issue.id === id)) model.expandedIssueIds.delete(id);
-        }
         finishCaptureCopy();
         break;
       default:

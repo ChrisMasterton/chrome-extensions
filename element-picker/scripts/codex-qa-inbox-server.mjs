@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 
 import { createServer } from 'node:http';
-import { copyFile, mkdir, readFile, rm, writeFile, cp } from 'node:fs/promises';
-import { basename, extname, isAbsolute, join } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { copyFile, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { homedir } from 'node:os';
 
 const PORT = Number.parseInt(process.env.CODEX_QA_INBOX_PORT || '43117', 10);
-const ROOT = process.env.CODEX_QA_INBOX_DIR || join(homedir(), 'CodexInbox', 'web-qa');
+const ROOT = resolve(process.env.CODEX_QA_INBOX_DIR || join(homedir(), 'CodexInbox', 'web-qa'));
 const MAX_BODY_BYTES = Number.parseInt(process.env.CODEX_QA_MAX_BODY_BYTES || String(80 * 1024 * 1024), 10);
 const TOUR_SCHEMA_VERSION = '1.0';
 const TRACE_SCHEMA_VERSION = '1.0';
@@ -52,6 +53,68 @@ function timestampId(date = new Date()) {
     .replace(/[:]/g, '')
     .replace(/[TZ]/g, '-')
     .replace(/-$/, '');
+}
+
+function createDirectoryLink(directory, linkPath) {
+  const target = process.platform === 'win32' ? directory : relative(dirname(linkPath), directory);
+  return symlink(target, linkPath, process.platform === 'win32' ? 'junction' : 'dir');
+}
+
+async function publishLatest(directory, latestDir) {
+  const pendingLink = join(dirname(latestDir), `.latest-${randomUUID()}`);
+  await createDirectoryLink(directory, pendingLink);
+  try {
+    // IN-1 commit point: readers see either complete immutable directory.
+    await rename(pendingLink, latestDir);
+  } catch (error) {
+    await rm(pendingLink, { force: true }).catch(() => {});
+    throw error;
+  }
+}
+
+async function writePublication(historyDir, id, latestDir, writeArtifacts) {
+  await mkdir(historyDir, { recursive: true });
+  // Caller-supplied tour/trace IDs may repeat, and capture clocks have second
+  // precision. No acknowledged submission may share a writable directory.
+  const directory = await mkdtemp(join(historyDir, `${id}-`));
+  try {
+    const manifest = await writeArtifacts(directory);
+    await publishLatest(directory, latestDir);
+    return manifest;
+  } catch (error) {
+    await rm(directory, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
+}
+
+async function migrateLatestDirectory(latestDir) {
+  let entry;
+  try {
+    entry = await lstat(latestDir);
+  } catch (error) {
+    if (error.code === 'ENOENT') return;
+    throw error;
+  }
+  if (!entry.isDirectory() || entry.isSymbolicLink()) return;
+
+  // Older servers copied files into a real latest directory. Preserve that
+  // snapshot before accepting requests; subsequent publications only swap links.
+  const historyDir = join(dirname(latestDir), 'history');
+  await mkdir(historyDir, { recursive: true });
+  const legacyDir = join(historyDir, `legacy-${randomUUID()}`);
+  const pendingLink = join(dirname(latestDir), `.latest-${randomUUID()}`);
+  await createDirectoryLink(legacyDir, pendingLink);
+  try {
+    await rename(latestDir, legacyDir);
+    try {
+      await rename(pendingLink, latestDir);
+    } catch (error) {
+      await rename(legacyDir, latestDir);
+      throw error;
+    }
+  } finally {
+    await rm(pendingLink, { force: true });
+  }
 }
 
 function parseDataUrl(dataUrl) {
@@ -228,39 +291,34 @@ async function writeCapture(payload) {
   } catch {
     host = 'page';
   }
-  const captureId = `${timestampId(receivedAt)}-${slugify(host, 'page')}`;
-  const captureDir = join(ROOT, 'history', captureId);
   const latestDir = join(ROOT, 'latest');
+  const id = `${timestampId(receivedAt)}-${slugify(host, 'page')}`;
+  return writePublication(join(ROOT, 'history'), id, latestDir, async (captureDir) => {
+    const captureId = basename(captureDir);
+    const savedImages = await materializeImages(bundle, captureDir);
+    const manifest = {
+      captureId,
+      receivedAt: receivedAt.toISOString(),
+      page: bundle.page || null,
+      totalElements: bundle.totalElements || 0,
+      rootDir: ROOT,
+      captureDir,
+      latestDir,
+      files: {
+        manifest: join(captureDir, 'manifest.json'),
+        bundle: join(captureDir, 'bundle.json'),
+        markdown: join(captureDir, 'bundle.md'),
+        images: savedImages.map((image) => image.path),
+      },
+      source: payload.source || null,
+    };
 
-  await mkdir(captureDir, { recursive: true });
+    await writeFile(join(captureDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
+    await writeFile(join(captureDir, 'bundle.json'), `${JSON.stringify(bundle, null, 2)}\n`);
+    await writeFile(join(captureDir, 'bundle.md'), `${payload.markdown || '# Element Debug Bundle\n\nNo Markdown payload was provided.'}\n`);
 
-  const savedImages = await materializeImages(bundle, captureDir);
-  const manifest = {
-    captureId,
-    receivedAt: receivedAt.toISOString(),
-    page: bundle.page || null,
-    totalElements: bundle.totalElements || 0,
-    rootDir: ROOT,
-    captureDir,
-    latestDir,
-    files: {
-      manifest: join(captureDir, 'manifest.json'),
-      bundle: join(captureDir, 'bundle.json'),
-      markdown: join(captureDir, 'bundle.md'),
-      images: savedImages.map((image) => image.path),
-    },
-    source: payload.source || null,
-  };
-
-  await writeFile(join(captureDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
-  await writeFile(join(captureDir, 'bundle.json'), `${JSON.stringify(bundle, null, 2)}\n`);
-  await writeFile(join(captureDir, 'bundle.md'), `${payload.markdown || '# Element Debug Bundle\n\nNo Markdown payload was provided.'}\n`);
-
-  await rm(latestDir, { recursive: true, force: true });
-  await mkdir(latestDir, { recursive: true });
-  await cp(captureDir, latestDir, { recursive: true });
-
-  return manifest;
+    return manifest;
+  });
 }
 
 function trimArray(value, maxItems, fieldName, trimmed) {
@@ -430,45 +488,39 @@ function buildTraceMarkdown(trace, manifest) {
 async function writeTrace(payload) {
   const receivedAt = new Date();
   const trace = normalizeTrace(payload, receivedAt);
-  const traceDir = join(ROOT, 'traces', 'history', trace.traceId);
   const latestDir = join(ROOT, 'traces', 'latest');
+  return writePublication(join(ROOT, 'traces', 'history'), trace.traceId, latestDir, async (traceDir) => {
+    const manifest = {
+      traceId: trace.traceId,
+      receivedAt: receivedAt.toISOString(),
+      page: trace.page || null,
+      startedAt: trace.startedAt,
+      endedAt: trace.endedAt,
+      durationMs: trace.durationMs,
+      totalWatchTargets: trace.watchTargets.length,
+      totalEvents: trace.events.length,
+      totalSamples: trace.samples.length,
+      totalMutations: trace.mutations.length,
+      rootDir: ROOT,
+      traceDir,
+      latestDir,
+      files: {
+        manifest: join(traceDir, 'manifest.json'),
+        trace: join(traceDir, 'trace.json'),
+        markdown: join(traceDir, 'trace.md'),
+      },
+      source: trace.source || payload.source || null,
+      trimmed: trace.trimmed || null,
+    };
 
-  await mkdir(traceDir, { recursive: true });
+    const markdown = payload.markdown || buildTraceMarkdown(trace, manifest);
 
-  const manifest = {
-    traceId: trace.traceId,
-    receivedAt: receivedAt.toISOString(),
-    page: trace.page || null,
-    startedAt: trace.startedAt,
-    endedAt: trace.endedAt,
-    durationMs: trace.durationMs,
-    totalWatchTargets: trace.watchTargets.length,
-    totalEvents: trace.events.length,
-    totalSamples: trace.samples.length,
-    totalMutations: trace.mutations.length,
-    rootDir: ROOT,
-    traceDir,
-    latestDir,
-    files: {
-      manifest: join(traceDir, 'manifest.json'),
-      trace: join(traceDir, 'trace.json'),
-      markdown: join(traceDir, 'trace.md'),
-    },
-    source: trace.source || payload.source || null,
-    trimmed: trace.trimmed || null,
-  };
+    await writeFile(join(traceDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
+    await writeFile(join(traceDir, 'trace.json'), `${JSON.stringify(trace, null, 2)}\n`);
+    await writeFile(join(traceDir, 'trace.md'), markdown.endsWith('\n') ? markdown : `${markdown}\n`);
 
-  const markdown = payload.markdown || buildTraceMarkdown(trace, manifest);
-
-  await writeFile(join(traceDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
-  await writeFile(join(traceDir, 'trace.json'), `${JSON.stringify(trace, null, 2)}\n`);
-  await writeFile(join(traceDir, 'trace.md'), markdown.endsWith('\n') ? markdown : `${markdown}\n`);
-
-  await rm(latestDir, { recursive: true, force: true });
-  await mkdir(latestDir, { recursive: true });
-  await cp(traceDir, latestDir, { recursive: true });
-
-  return manifest;
+    return manifest;
+  });
 }
 
 function normalizeTourStep(step, index) {
@@ -531,42 +583,37 @@ function normalizeTour(payload, receivedAt) {
 async function writeTour(payload) {
   const receivedAt = new Date();
   const tour = normalizeTour(payload, receivedAt);
-  const tourDir = join(ROOT, 'tours', 'history', tour.id);
   const latestDir = join(ROOT, 'tours', 'latest');
+  return writePublication(join(ROOT, 'tours', 'history'), tour.id, latestDir, async (tourDir) => {
+    const manifest = {
+      tourId: tour.id,
+      receivedAt: receivedAt.toISOString(),
+      title: tour.title,
+      totalSteps: tour.steps.length,
+      rootDir: ROOT,
+      tourDir,
+      latestDir,
+      files: {
+        manifest: join(tourDir, 'manifest.json'),
+        tour: join(tourDir, 'tour.json'),
+      },
+    };
 
-  await mkdir(tourDir, { recursive: true });
+    await writeFile(join(tourDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
+    await writeFile(join(tourDir, 'tour.json'), `${JSON.stringify(tour, null, 2)}\n`);
 
-  const manifest = {
-    tourId: tour.id,
-    receivedAt: receivedAt.toISOString(),
-    title: tour.title,
-    totalSteps: tour.steps.length,
-    rootDir: ROOT,
-    tourDir,
-    latestDir,
-    files: {
-      manifest: join(tourDir, 'manifest.json'),
-      tour: join(tourDir, 'tour.json'),
-    },
-  };
-
-  await writeFile(join(tourDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
-  await writeFile(join(tourDir, 'tour.json'), `${JSON.stringify(tour, null, 2)}\n`);
-
-  await rm(latestDir, { recursive: true, force: true });
-  await mkdir(latestDir, { recursive: true });
-  await cp(tourDir, latestDir, { recursive: true });
-
-  return manifest;
+    return manifest;
+  });
 }
 
 async function readLatestTour() {
   const latestDir = join(ROOT, 'tours', 'latest');
 
   try {
+    const directory = await realpath(latestDir);
     const [manifestJson, tourJson] = await Promise.all([
-      readFile(join(latestDir, 'manifest.json'), 'utf8'),
-      readFile(join(latestDir, 'tour.json'), 'utf8'),
+      readFile(join(directory, 'manifest.json'), 'utf8'),
+      readFile(join(directory, 'tour.json'), 'utf8'),
     ]);
 
     return {
@@ -586,10 +633,11 @@ async function readLatestTrace() {
   const latestDir = join(ROOT, 'traces', 'latest');
 
   try {
+    const directory = await realpath(latestDir);
     const [manifestJson, traceJson, markdown] = await Promise.all([
-      readFile(join(latestDir, 'manifest.json'), 'utf8'),
-      readFile(join(latestDir, 'trace.json'), 'utf8'),
-      readFile(join(latestDir, 'trace.md'), 'utf8'),
+      readFile(join(directory, 'manifest.json'), 'utf8'),
+      readFile(join(directory, 'trace.json'), 'utf8'),
+      readFile(join(directory, 'trace.md'), 'utf8'),
     ]);
 
     return {
@@ -732,6 +780,10 @@ const server = createServer(async (request, response) => {
     });
   }
 });
+
+for (const latestDir of [join(ROOT, 'latest'), join(ROOT, 'tours', 'latest'), join(ROOT, 'traces', 'latest')]) {
+  await migrateLatestDirectory(latestDir);
+}
 
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`Codex QA inbox listening on http://127.0.0.1:${PORT}`);

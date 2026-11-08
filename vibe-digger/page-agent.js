@@ -30,16 +30,23 @@
 
   const state = {
     heatmapEnabled: false,
-    hookMode: 'none', // 'shim' | 'wrapped' | 'none'
-    reactDetected: false,
     commitCount: 0,
     lastCommitProcessedAt: 0,
-    issues: [],
-    issueSeq: 0,
-    network: [],
-    networkSeq: 0,
     renderCounts: new Map(), // component name -> cumulative render count
   };
+
+  // The page agent owns retained issues for this document. Every mutation
+  // advances the revision; panels only project this collection.
+  const issueCollection = { entries: [], nextId: 0, revision: 0 };
+  // Membership is the authority for publication. Clear/eviction permanently
+  // retire entries while their native requests and sockets can still finish.
+  const networkCollection = { entries: new Map(), pending: new Set(), nextId: 0, revision: 0 };
+  const reactAttachment = {
+    phase: 'waiting', mode: 'none', reason: null, detected: false, rendererIds: new Set(),
+  };
+  let reactObserver = null;
+  let reactDetectionTimer = null;
+  let reactStatusTimer = null;
 
   // ---------------------------------------------------------------------------
   // Messaging
@@ -131,29 +138,54 @@
   }
 
   function addIssue(kind, message, detail = '') {
-    const boundedMessage = truncate(message, 500);
-    const existing = state.issues.find(
-      (issue) => issue.kind === kind && issue.message === boundedMessage
+    transitionIssues({ type: 'observe', kind, message, detail });
+  }
+
+  function postIssues() {
+    post('issues', {
+      issues: issueCollection.entries.slice(),
+      revision: issueCollection.revision,
+      renderCounts: topRenderCounts(),
+    });
+  }
+
+  function transitionIssues(event) {
+    if (event.type === 'clear') {
+      issueCollection.entries.length = 0;
+      issueCollection.revision += 1;
+      postIssues();
+      return;
+    }
+    if (event.type !== 'observe') return;
+
+    const boundedMessage = truncate(event.message, 500);
+    const existing = issueCollection.entries.find(
+      (issue) => issue.kind === event.kind && issue.message === boundedMessage
     );
+    const removedIds = [];
+    let issue;
     if (existing) {
       existing.count += 1;
       existing.lastAt = Date.now();
-      post('issue', { issue: existing, total: state.issues.length });
-      return;
+      issue = existing;
+    } else {
+      issue = {
+        id: `issue-${++issueCollection.nextId}`,
+        kind: event.kind,
+        message: boundedMessage,
+        detail: truncate(event.detail, 2000),
+        count: 1,
+        firstAt: Date.now(),
+        lastAt: Date.now(),
+      };
+      issueCollection.entries.push(issue);
+      if (issueCollection.entries.length > MAX_ISSUES) {
+        removedIds.push(issueCollection.entries.shift().id);
+      }
     }
 
-    const issue = {
-      id: `issue-${++state.issueSeq}`,
-      kind,
-      message: boundedMessage,
-      detail: truncate(detail, 2000),
-      count: 1,
-      firstAt: Date.now(),
-      lastAt: Date.now(),
-    };
-    state.issues.push(issue);
-    if (state.issues.length > MAX_ISSUES) state.issues.shift();
-    post('issue', { issue, total: state.issues.length });
+    issueCollection.revision += 1;
+    post('issue', { issue, removedIds, revision: issueCollection.revision, total: issueCollection.entries.length });
   }
 
   function installConsoleCapture() {
@@ -285,23 +317,65 @@
   }
 
   function recordRequest(entry) {
-    entry.id = `req-${++state.networkSeq}`;
-    entry.seq = state.networkSeq;
+    entry.id = `req-${++networkCollection.nextId}`;
+    entry.seq = networkCollection.nextId;
     entry.startedAt = Date.now();
     entry.sinceLoadMs = Math.round(performance.now());
     entry.status = null;
     entry.durationMs = null;
+    if (entry.kind !== 'ws') entry.phase = 'pending';
     if (!Object.hasOwn(entry, 'requestSizeBytes')) entry.requestSizeBytes = 0;
     if (!Object.hasOwn(entry, 'responseSizeBytes')) entry.responseSizeBytes = null;
-    state.network.push(entry);
-    if (state.network.length > MAX_NETWORK_ENTRIES) state.network.shift();
-    post('network', { entry, total: state.network.length });
+    networkCollection.entries.set(entry.id, entry);
+    const removedIds = [];
+    if (networkCollection.entries.size > MAX_NETWORK_ENTRIES) {
+      const oldestId = networkCollection.entries.keys().next().value;
+      networkCollection.pending.delete(networkCollection.entries.get(oldestId));
+      networkCollection.entries.delete(oldestId);
+      removedIds.push(oldestId);
+    }
+    publishNetwork(entry, removedIds);
     return entry;
   }
 
-  function settleRequest(entry, patch) {
+  function isRetainedRequest(entry) {
+    return networkCollection.entries.get(entry.id) === entry;
+  }
+
+  function publishNetwork(entry, removedIds = []) {
+    networkCollection.pending.delete(entry);
+    if (!isRetainedRequest(entry)) return;
+    networkCollection.revision += 1;
+    post('network', { entry, removedIds, revision: networkCollection.revision, total: networkCollection.entries.size });
+  }
+
+  function postNetwork() {
+    // Flush throttled socket frames so a snapshot never changes the contents
+    // associated with an already-published revision.
+    for (const entry of networkCollection.pending) publishNetwork(entry);
+    post('network-list', { entries: [...networkCollection.entries.values()], revision: networkCollection.revision });
+  }
+
+  function clearNetwork() {
+    networkCollection.pending.clear();
+    networkCollection.entries.clear();
+    networkCollection.revision += 1;
+    postNetwork();
+  }
+
+  function updateRequestDetails(entry, patch) {
+    if (!isRetainedRequest(entry)) return;
     Object.assign(entry, patch);
-    post('network', { entry, total: state.network.length });
+    publishNetwork(entry);
+  }
+
+  function settleRequest(entry, patch, phase = patch.error ? 'failed' : 'completed') {
+    if (entry.phase !== 'pending') return;
+    entry.phase = phase;
+    Object.assign(entry, patch);
+    publishNetwork(entry);
+    // Issues observe new failures independently, even if the Network row was
+    // retired before the failure became known.
     if (typeof entry.status === 'number' && entry.status >= 400) {
       addIssue('network', `${entry.method} ${entry.url} -> ${entry.status}`);
     } else if (entry.error) {
@@ -322,7 +396,7 @@
 
     const OriginalWebSocket = window.WebSocket;
     const entriesBySocket = new WeakMap();
-    const postScheduled = new WeakSet();
+    const postTimers = new WeakMap();
 
     function redactFrame(data) {
       if (typeof data === 'string') {
@@ -342,15 +416,15 @@
     }
 
     function schedulePost(entry) {
-      if (postScheduled.has(entry)) return;
-      postScheduled.add(entry);
-      setTimeout(() => {
-        postScheduled.delete(entry);
-        post('network', { entry, total: state.network.length });
-      }, 250);
+      if (!isRetainedRequest(entry) || postTimers.has(entry)) return;
+      postTimers.set(entry, setTimeout(() => {
+        postTimers.delete(entry);
+        if (networkCollection.pending.has(entry)) publishNetwork(entry);
+      }, 250));
     }
 
     function recordFrame(entry, dir, data) {
+      if (!isRetainedRequest(entry) || entry.wsState === 'closed') return;
       const frameSize = bodyByteLength(data) ?? 0;
       entry.frameCount = (entry.frameCount || 0) + 1;
       if (dir === 'send') entry.requestSizeBytes += frameSize;
@@ -365,34 +439,53 @@
         entry.frames.shift();
         entry.droppedFrames = (entry.droppedFrames || 0) + 1;
       }
+      networkCollection.pending.add(entry);
       schedulePost(entry);
+    }
+
+    function transitionSocket(entry, event) {
+      if (entry.wsState === 'closed') return;
+      switch (event.type) {
+        case 'frame':
+          recordFrame(entry, event.direction, event.data);
+          return;
+        case 'open':
+          if (entry.wsState !== 'connecting') return;
+          entry.wsState = 'open';
+          break;
+        case 'closing':
+          if (entry.wsState === 'closing') return;
+          entry.wsState = 'closing';
+          break;
+        case 'error':
+          entry.error = 'socket error';
+          break;
+        case 'close':
+          clearTimeout(postTimers.get(entry));
+          postTimers.delete(entry);
+          entry.wsState = 'closed';
+          entry.closeCode = event.code;
+          entry.closeReason = truncate(event.reason || '', 120);
+          entry.ok = !!event.wasClean && !entry.error;
+          entry.durationMs = event.durationMs;
+          if (!entry.ok) addIssue('network',
+            `WS ${entry.url} closed uncleanly (${event.code}${entry.closeReason ? ` ${entry.closeReason}` : ''})`);
+          break;
+        default:
+          return;
+      }
+      publishNetwork(entry);
     }
 
     function watchSocket(ws, entry) {
       const startedAt = performance.now();
       entriesBySocket.set(ws, entry);
-      ws.addEventListener('open', () => {
-        entry.wsState = 'open';
-        post('network', { entry, total: state.network.length });
-      });
-      ws.addEventListener('message', (event) => recordFrame(entry, 'recv', event.data));
-      ws.addEventListener('error', () => {
-        entry.error = 'socket error';
-      });
-      ws.addEventListener('close', (event) => {
-        entry.wsState = 'closed';
-        entry.closeCode = event.code;
-        entry.closeReason = truncate(event.reason || '', 120);
-        entry.ok = !!event.wasClean && !entry.error;
-        entry.durationMs = Math.round(performance.now() - startedAt);
-        post('network', { entry, total: state.network.length });
-        if (!entry.ok) {
-          addIssue(
-            'network',
-            `WS ${entry.url} closed uncleanly (${event.code}${entry.closeReason ? ` ${entry.closeReason}` : ''})`
-          );
-        }
-      });
+      ws.addEventListener('open', () => transitionSocket(entry, { type: 'open' }));
+      ws.addEventListener('message', event => transitionSocket(entry, { type: 'frame', direction: 'recv', data: event.data }));
+      ws.addEventListener('error', () => transitionSocket(entry, { type: 'error' }));
+      ws.addEventListener('close', event => transitionSocket(entry, { type: 'close',
+        code: event.code, reason: event.reason, wasClean: event.wasClean,
+        durationMs: Math.round(performance.now() - startedAt) }));
     }
 
     function ensureEntry(ws) {
@@ -416,6 +509,7 @@
     }
 
     window.WebSocket = function WebSocket(url, protocols) {
+      if (!new.target) return OriginalWebSocket.apply(this, arguments);
       const ws =
         protocols !== undefined
           ? new OriginalWebSocket(url, protocols)
@@ -441,12 +535,21 @@
 
     const originalSend = OriginalWebSocket.prototype.send;
     OriginalWebSocket.prototype.send = function vibeDiggerWsSend(data) {
+      const wasOpen = this.readyState === OriginalWebSocket.OPEN;
+      const result = originalSend.apply(this, arguments);
       try {
-        recordFrame(ensureEntry(this), 'send', data);
+        if (wasOpen) transitionSocket(ensureEntry(this), { type: 'frame', direction: 'send', data });
       } catch {
         // Capture must never block the socket.
       }
-      return originalSend.apply(this, arguments);
+      return result;
+    };
+    const originalClose = OriginalWebSocket.prototype.close;
+    OriginalWebSocket.prototype.close = function vibeDiggerWsClose() {
+      const result = originalClose.apply(this, arguments);
+      const entry = entriesBySocket.get(this);
+      if (entry && this.readyState === OriginalWebSocket.CLOSING) transitionSocket(entry, { type: 'closing' });
+      return result;
     };
   }
 
@@ -488,13 +591,11 @@
           try {
             input.clone().text().then((text) => {
               if (text) {
-                entry.requestBody = redactBodyText(text);
-                post('network', { entry, total: state.network.length });
+                updateRequestDetails(entry, { requestBody: redactBodyText(text) });
               }
             }).catch(() => {});
             input.clone().arrayBuffer().then((buffer) => {
-              entry.requestSizeBytes = buffer.byteLength;
-              post('network', { entry, total: state.network.length });
+              updateRequestDetails(entry, { requestSizeBytes: buffer.byteLength });
             }).catch(() => {});
           } catch {
             // Body already used or unreadable; leave it null.
@@ -502,7 +603,15 @@
         }
 
         const startedAt = performance.now();
-        return originalFetch.apply(this, arguments).then(
+        let request;
+        try {
+          request = originalFetch.apply(this, arguments);
+        } catch (error) {
+          settleRequest(entry, { error: error?.message || String(error), ok: false,
+            durationMs: Math.round(performance.now() - startedAt) });
+          throw error;
+        }
+        return request.then(
           (response) => {
             const patch = {
               status: response?.status ?? null,
@@ -511,31 +620,31 @@
               responseSizeBytes: contentLengthBytes(response?.headers),
             };
             const contentType = response?.headers?.get?.('content-type');
+            settleRequest(entry, {
+              ...patch,
+              responseBody: contentType && !isTextLike(contentType) ? `[${contentType.split(';')[0]} body not captured]` : null,
+            });
             if (response && isTextLike(contentType)) {
               try {
                 response.clone().text().then((text) => {
-                  settleRequest(entry, {
-                    ...patch,
+                  updateRequestDetails(entry, {
                     responseBody: redactBodyText(text),
                     responseSizeBytes: utf8ByteLength(text),
                   });
-                }).catch(() => settleRequest(entry, patch));
+                }).catch(() => {});
               } catch {
-                settleRequest(entry, patch);
+                // Headers already settled the request; an unreadable clone
+                // cannot keep the entry pending or change the native response.
               }
-            } else {
-              settleRequest(entry, {
-                ...patch,
-                responseBody: contentType ? `[${contentType.split(';')[0]} body not captured]` : null,
-              });
             }
             return response;
           },
           (error) => {
             settleRequest(entry, {
               error: error?.message || String(error),
+              ok: false,
               durationMs: Math.round(performance.now() - startedAt),
-            });
+            }, error?.name === 'AbortError' ? 'aborted' : 'failed');
             throw error;
           }
         );
@@ -547,17 +656,20 @@
       const originalSend = XMLHttpRequest.prototype.send;
 
       XMLHttpRequest.prototype.open = function vibeDiggerXhrOpen(method, url) {
+        const result = originalOpen.apply(this, arguments);
         this.__vibeDiggerXhr = {
           method: String(method || 'GET').toUpperCase(),
           url: truncate(url || '', 500),
         };
-        return originalOpen.apply(this, arguments);
+        return result;
       };
 
       XMLHttpRequest.prototype.send = function vibeDiggerXhrSend(body) {
         const info = this.__vibeDiggerXhr;
+        let entry;
+        let cleanup = () => {};
         if (info) {
-          const entry = recordRequest({
+          entry = recordRequest({
             kind: 'xhr',
             method: info.method,
             url: info.url,
@@ -566,45 +678,57 @@
             initiator: captureInitiator(),
           });
           const startedAt = performance.now();
-          this.addEventListener(
-            'loadend',
-            () => {
-              let responseBody = null;
-              let responseSizeBytes = null;
-              try {
-                const contentType = this.getResponseHeader('content-type');
-                const contentLength = this.getResponseHeader('content-length');
-                responseSizeBytes = contentLengthBytes({ get: () => contentLength });
-                if (isTextLike(contentType)) {
-                  if (this.responseType === '' || this.responseType === 'text') {
-                    responseBody = redactBodyText(this.responseText);
-                    responseSizeBytes = utf8ByteLength(this.responseText);
-                  } else if (this.responseType === 'json') {
-                    const rawJson = JSON.stringify(this.response);
-                    responseBody = redactBodyText(rawJson);
-                    if (responseSizeBytes == null) responseSizeBytes = utf8ByteLength(rawJson);
-                  }
-                } else if (this.responseType === 'arraybuffer') {
-                  responseSizeBytes = this.response?.byteLength ?? responseSizeBytes;
-                } else if (this.responseType === 'blob') {
-                  responseSizeBytes = this.response?.size ?? responseSizeBytes;
+          let outcome = 'load';
+          const outcomes = new Map(['error', 'abort', 'timeout'].map(kind => [kind, () => { outcome = kind; }]));
+          const finish = () => {
+            cleanup();
+            let responseBody = null;
+            let responseSizeBytes = null;
+            try {
+              const contentType = this.getResponseHeader('content-type');
+              const contentLength = this.getResponseHeader('content-length');
+              responseSizeBytes = contentLengthBytes({ get: () => contentLength });
+              if (isTextLike(contentType)) {
+                if (this.responseType === '' || this.responseType === 'text') {
+                  responseBody = redactBodyText(this.responseText);
+                  responseSizeBytes = utf8ByteLength(this.responseText);
+                } else if (this.responseType === 'json') {
+                  const rawJson = JSON.stringify(this.response);
+                  responseBody = redactBodyText(rawJson);
+                  if (responseSizeBytes == null) responseSizeBytes = utf8ByteLength(rawJson);
                 }
-              } catch {
-                // Response body unreadable; keep the status line.
+              } else if (this.responseType === 'arraybuffer') {
+                responseSizeBytes = this.response?.byteLength ?? responseSizeBytes;
+              } else if (this.responseType === 'blob') {
+                responseSizeBytes = this.response?.size ?? responseSizeBytes;
               }
-              settleRequest(entry, {
-                status: this.status || null,
-                ok: this.status > 0 && this.status < 400,
-                error: this.status === 0 ? 'request failed (status 0)' : null,
-                durationMs: Math.round(performance.now() - startedAt),
-                responseBody,
-                responseSizeBytes,
-              });
-            },
-            { once: true }
-          );
+            } catch {
+              // Response body unreadable; keep the status line.
+            }
+            settleRequest(entry, {
+              status: this.status || null,
+              ok: this.status > 0 && this.status < 400,
+              error: outcome === 'abort' ? 'request aborted' : outcome === 'timeout' ? 'request timed out' :
+                this.status === 0 ? 'request failed (status 0)' : null,
+              durationMs: Math.round(performance.now() - startedAt),
+              responseBody,
+              responseSizeBytes,
+            }, outcome === 'abort' ? 'aborted' : outcome === 'timeout' ? 'timed-out' : this.status === 0 ? 'failed' : 'completed');
+          };
+          cleanup = () => {
+            this.removeEventListener('loadend', finish);
+            for (const [kind, listener] of outcomes) this.removeEventListener(kind, listener);
+          };
+          for (const [kind, listener] of outcomes) this.addEventListener(kind, listener);
+          this.addEventListener('loadend', finish);
         }
-        return originalSend.apply(this, arguments);
+        try {
+          return originalSend.apply(this, arguments);
+        } catch (error) {
+          cleanup();
+          if (entry) settleRequest(entry, { error: error?.message || String(error), ok: false, durationMs: 0 });
+          throw error;
+        }
       };
     }
 
@@ -621,9 +745,14 @@
           requestSizeBytes: bodyByteLength(data),
           initiator: captureInitiator(),
         });
-        const queued = originalBeacon(url, data);
-        settleRequest(entry, { status: null, ok: queued, durationMs: 0 });
-        return queued;
+        try {
+          const queued = originalBeacon(url, data);
+          settleRequest(entry, { status: null, ok: queued, durationMs: 0 }, queued ? 'queued' : 'rejected');
+          return queued;
+        } catch (error) {
+          settleRequest(entry, { error: error?.message || String(error), ok: false, durationMs: 0 });
+          throw error;
+        }
       };
     }
   }
@@ -633,33 +762,94 @@
   // existing hook (e.g. the real React DevTools) if one beat us to it.
   // ---------------------------------------------------------------------------
 
+  function transitionReactAttachment(event) {
+    const before = `${reactAttachment.phase}:${reactAttachment.reason}:${reactAttachment.detected}:${reactAttachment.rendererIds.size}`;
+    switch (event.type) {
+      case 'renderer':
+        reactAttachment.rendererIds.add(event.id);
+        reactAttachment.detected = true;
+        reactAttachment.phase = 'attached';
+        reactAttachment.reason = null;
+        break;
+      case 'commit':
+        reactAttachment.detected = true;
+        reactAttachment.phase = 'attached';
+        reactAttachment.reason = null;
+        break;
+      case 'dom':
+        reactAttachment.detected = true;
+        if (reactAttachment.phase === 'waiting') {
+          reactAttachment.phase = 'unavailable';
+          reactAttachment.reason = 'missed-startup';
+        }
+        break;
+      case 'blocked':
+        reactAttachment.phase = 'unavailable';
+        reactAttachment.reason = event.reason;
+        break;
+      default:
+        return;
+    }
+    if (reactAttachment.phase !== 'attached') state.heatmapEnabled = false;
+    if (reactAttachment.detected || reactAttachment.phase === 'attached') {
+      reactObserver?.disconnect();
+      reactObserver = null;
+      if (reactDetectionTimer !== null) clearTimeout(reactDetectionTimer);
+      reactDetectionTimer = null;
+    }
+    const after = `${reactAttachment.phase}:${reactAttachment.reason}:${reactAttachment.detected}:${reactAttachment.rendererIds.size}`;
+    if (before !== after) postCurrentStatus();
+  }
+
   function installHook() {
     const existing = window.__REACT_DEVTOOLS_GLOBAL_HOOK__;
 
     if (existing && typeof existing === 'object') {
-      if (existing.renderers && existing.renderers.size > 0) state.reactDetected = true;
-
-      const previousInject = existing.inject;
-      if (typeof previousInject === 'function') {
-        existing.inject = function vibeDiggerInject(renderer) {
-          state.reactDetected = true;
-          return previousInject.apply(this, arguments);
-        };
+      reactAttachment.detected = !!existing.renderers?.size;
+      if (existing.isDisabled || !existing.supportsFiber) {
+        transitionReactAttachment({type:'blocked',reason:existing.isDisabled ? 'disabled' : 'unsupported'});
+        return;
       }
-
+      const previousInject = existing.inject;
       const previousCommit = existing.onCommitFiberRoot;
-      existing.onCommitFiberRoot = function vibeDiggerOnCommit(rendererId, root) {
-        try {
-          handleCommit(root);
-        } catch {
-          // Heatmap failures must never break the host hook.
-        }
-        return typeof previousCommit === 'function'
-          ? previousCommit.apply(this, arguments)
-          : undefined;
+      if (typeof previousInject !== 'function' || typeof previousCommit !== 'function') {
+        transitionReactAttachment({type:'blocked',reason:'unsupported'});
+        return;
+      }
+      const wrappedInject = function vibeDiggerInject() {
+        const id = previousInject.apply(this, arguments);
+        if (id != null) transitionReactAttachment({type:'renderer',id});
+        return id;
       };
-
-      state.hookMode = 'wrapped';
+      const wrappedCommit = function vibeDiggerOnCommit(rendererId, root) {
+        try { return previousCommit.apply(this, arguments); }
+        finally {
+          try { handleCommit(root); }
+          catch { /* Debug observation must not change the host hook result. */ }
+        }
+      };
+      const methods = [['inject',wrappedInject],['onCommitFiberRoot',wrappedCommit]].map(([key,value]) =>
+        ({key,value,descriptor:Object.getOwnPropertyDescriptor(existing,key)}));
+      try {
+        for (const {key,value} of methods) {
+          existing[key] = value;
+          if (existing[key] !== value) throw new Error('Protected React hook');
+        }
+      } catch {
+        for (const {key,value,descriptor} of methods) {
+          try {
+            if (existing[key] !== value) continue;
+            if (descriptor) Object.defineProperty(existing,key,descriptor);
+            else delete existing[key];
+          } catch { /* Preserve properties another tool owns. */ }
+        }
+        transitionReactAttachment({type:'blocked',reason:'protected'});
+        return;
+      }
+      reactAttachment.mode = 'wrapped';
+      if (existing.renderers?.keys) {
+        for (const id of existing.renderers.keys()) transitionReactAttachment({type:'renderer',id});
+      }
       return;
     }
 
@@ -674,7 +864,7 @@
       inject(renderer) {
         nextRendererId += 1;
         hook.renderers.set(nextRendererId, renderer);
-        state.reactDetected = true;
+        transitionReactAttachment({type:'renderer',id:nextRendererId});
         return nextRendererId;
       },
       on() {},
@@ -694,7 +884,8 @@
       onScheduleFiberRoot() {},
       onCommitFiberRoot(rendererId, root) {
         try {
-          hook.getFiberRoots(rendererId).add(root);
+          if (root?.current?.memoizedState?.element === null) hook.getFiberRoots(rendererId).delete(root);
+          else hook.getFiberRoots(rendererId).add(root);
           handleCommit(root);
         } catch {
           // Heatmap failures must never break React's commit.
@@ -705,8 +896,13 @@
       setStrictMode() {},
     };
 
-    window.__REACT_DEVTOOLS_GLOBAL_HOOK__ = hook;
-    state.hookMode = 'shim';
+    try {
+      window.__REACT_DEVTOOLS_GLOBAL_HOOK__ = hook;
+      if (window.__REACT_DEVTOOLS_GLOBAL_HOOK__ !== hook) throw new Error('Protected React hook');
+      reactAttachment.mode = 'shim';
+    } catch {
+      transitionReactAttachment({type:'blocked',reason:'protected'});
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -749,8 +945,14 @@
   }
 
   function handleCommit(root) {
+    if (!root?.current) return;
     state.commitCount += 1;
-    if (!state.heatmapEnabled || !root?.current) return;
+    transitionReactAttachment({type:'commit'});
+    if (reactStatusTimer === null) reactStatusTimer = setTimeout(() => {
+      reactStatusTimer = null;
+      postCurrentStatus();
+    }, 150);
+    if (!state.heatmapEnabled) return;
 
     const now = performance.now();
     if (now - state.lastCommitProcessedAt < COMMIT_THROTTLE_MS) return;
@@ -932,6 +1134,7 @@
       });
       return;
     }
+    transitionReactAttachment({type:'dom'});
 
     // Walk up to the nearest user component; that's what the user cares about.
     let componentFiber = fiber;
@@ -971,7 +1174,7 @@
   // ---------------------------------------------------------------------------
 
   function detectReactLate() {
-    if (state.reactDetected) return;
+    if (reactAttachment.detected) return;
     const candidates = document.querySelectorAll('body, body *');
     const limit = Math.min(candidates.length, 400);
     for (let i = 0; i < limit; i += 1) {
@@ -983,10 +1186,22 @@
           key.startsWith('__reactInternalInstance$')
       );
       if (hasFiberKey) {
-        state.reactDetected = true;
+        transitionReactAttachment({type:'dom'});
         return;
       }
     }
+  }
+
+  function watchForReact() {
+    if (reactAttachment.detected || typeof MutationObserver !== 'function') return;
+    reactObserver = new MutationObserver(() => {
+      if (reactDetectionTimer !== null) return;
+      reactDetectionTimer = setTimeout(() => {
+        reactDetectionTimer = null;
+        detectReactLate();
+      }, 100);
+    });
+    reactObserver.observe(document, {childList:true,subtree:true});
   }
 
   function topRenderCounts(limit = 15) {
@@ -998,13 +1213,19 @@
 
   function postStatus() {
     detectReactLate();
+    postCurrentStatus();
+  }
+
+  function postCurrentStatus() {
     post('status', {
-      reactDetected: state.reactDetected,
-      hookMode: state.hookMode,
+      reactDetected: reactAttachment.detected,
+      hookMode: reactAttachment.mode,
+      attachment: {phase:reactAttachment.phase, reason:reactAttachment.reason, rendererCount:reactAttachment.rendererIds.size},
+      heatmapAvailable: reactAttachment.phase === 'attached',
       heatmapEnabled: state.heatmapEnabled,
       commitCount: state.commitCount,
-      issueCount: state.issues.length,
-      networkCount: state.network.length,
+      issueCount: issueCollection.entries.length,
+      networkCount: networkCollection.entries.size,
       renderCounts: topRenderCounts(),
     });
   }
@@ -1027,7 +1248,8 @@
           inspectAt(data.x, data.y, !!data.pin);
           break;
         case 'heatmap':
-          state.heatmapEnabled = !!data.enabled;
+          detectReactLate();
+          state.heatmapEnabled = !!data.enabled && reactAttachment.phase === 'attached';
           postStatus();
           break;
         case 'reset-render-counts':
@@ -1035,18 +1257,16 @@
           postStatus();
           break;
         case 'get-issues':
-          post('issues', { issues: state.issues.slice(), renderCounts: topRenderCounts() });
+          postIssues();
           break;
         case 'clear-issues':
-          state.issues.length = 0;
-          post('issues', { issues: [], renderCounts: topRenderCounts() });
+          transitionIssues({ type: 'clear' });
           break;
         case 'get-network':
-          post('network-list', { entries: state.network.slice() });
+          postNetwork();
           break;
         case 'clear-network':
-          state.network.length = 0;
-          post('network-list', { entries: [] });
+          clearNetwork();
           break;
         default:
           break;
@@ -1057,8 +1277,10 @@
   });
 
   installHook();
+  detectReactLate();
+  watchForReact();
   installConsoleCapture();
   installErrorCapture();
   installNetworkCapture();
-  post('agent-ready', { url: location.href, hookMode: state.hookMode });
+  post('agent-ready', { url: location.href, hookMode: reactAttachment.mode });
 })();

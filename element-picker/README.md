@@ -109,8 +109,8 @@ Defaults:
 - Health check: `http://127.0.0.1:43117/health`
 - Output: `~/CodexInbox/web-qa/latest`
 - History: `~/CodexInbox/web-qa/history/<capture-id>`
-- Guided review history: `~/CodexInbox/web-qa/tours/history/<tour-id>`
-- Vibe trace history: `~/CodexInbox/web-qa/traces/history/<trace-id>`
+- Guided review history: `~/CodexInbox/web-qa/tours/history/<tour-id>-<submission>`
+- Vibe trace history: `~/CodexInbox/web-qa/traces/history/<trace-id>-<submission>`
 
 Environment overrides:
 
@@ -125,7 +125,22 @@ Each capture writes:
 - `bundle.md`: Markdown summary plus JSON for agent consumption
 - `images/`: highlighted viewport and crop images when image capture was available
 
-The server keeps a stable `latest` folder for the most recent capture and a timestamped `history` folder for older captures. That makes it easy to tell Codex, "look at latest QA capture," while still preserving prior debugging evidence.
+The server keeps stable `latest` directory links for captures, tours, and traces. Each link points to one complete, immutable submission in `history`. Reusing a tour or trace ID creates a separate submission directory, so earlier artifacts stay readable.
+
+### IN-1 inbox publication lifecycle
+
+All three POST routes share one publication boundary:
+
+| Trigger | Transition and effect |
+| --- | --- |
+| Valid submission | Prepare every artifact in a unique history directory. |
+| Preparation completes | Atomically replace the stream's `latest` link, then acknowledge the POST. Latest means the last successfully published submission. |
+| Preparation or publication fails | Keep the previous publication and remove the unpublished directory. A later send can retry independently. |
+| Latest tour/trace GET | Resolve the link once and read all files from that fixed directory. |
+
+Capture, tour, and trace streams publish independently. Before the first publication, latest GET endpoints return 404. At startup, the server preserves older real `latest` directories under `history` and converts them to links before accepting requests.
+
+For file-based review, read `latest/manifest.json` once, then use its `files` paths for JSON, Markdown, and images. Those paths pin one submission even when another send updates `latest` during review. Alternatively, resolve `latest` once before opening several files; independently opening files through the moving link can span different submissions.
 
 ## Vibe Debugger
 
@@ -205,6 +220,31 @@ Tour steps support `url`, `selector`, `text`, `title`, `body`, and `notes`. The 
 
 While a tour is active, the page is in guided-review mode: the extension locks normal element picking, hides the bottom QA toolbar, and captures only the highlighted tour target when you click **Ask Codex**. The tour panel automatically moves between corners to avoid covering the highlighted target; use **Move** to cycle the panel manually when you want a different corner. Each tour capture includes `tourContext` with the tour title, step number, step title/body, URL/selector/text target, whether the target was found, and the typed Ask Codex note.
 
+### EP-7 and EP-6 navigation lifecycle
+
+Break on Load and tour checkpoints are stored per tab in `chrome.storage.session`. They survive background service-worker restarts during the current browser session. Tour checkpoints include the current step and per-step notes, so an acknowledged tour can also resume after a reload. The `storage` permission enables this; website access still uses the existing `activeTab` permission.
+
+| Event | Persisted transition and behavior |
+| --- | --- |
+| Enable/disable Break on Load | Save the flag independently of the current tour. |
+| Load a tour, change its step, or edit a note | Save the current tour checkpoint for the owning page document. |
+| Open a step on another page | Save the destination and pending delivery before navigating. |
+| A page starts/completes loading | Mark delivery pending, inject into the loaded document, and restore both the tour and Break on Load. |
+| The page acknowledges the delivery token | Mark the checkpoint active; retain it for future reloads. |
+| Injection or acknowledgement fails | Keep the checkpoint and show **!** on the extension icon. Click the icon to retry restoration. |
+| End tour or Done | Remove the tour and its notes while keeping Break on Load. |
+| Close the bridge or close the tab | Remove its saved navigation state. |
+
+Each delivery has a token and document owner. Late acknowledgements and messages from an old page cannot consume a replacement tour or restore a closed session. Persistence writes are serialized per tab, so toggling Break on Load cannot overwrite a tour update. Failed writes do not block later changes.
+
+Cross-origin navigation can require invoking the extension icon again to grant `activeTab` access on the new origin. A failed automatic reinjection retains the checkpoint for that retry. A navigation that cannot be saved is reported in the Tour workspace; **Open Step** retries it without discarding the tour.
+
+### EP-8 probe ownership lifecycle
+
+Each page-world probe installation owns its API wrappers, event listeners, and app trace API. Closing QA Bridge retires that installation before cleanup: its retained wrappers become silent pass-throughs, and its pending request completions stop emitting trace events.
+
+Cleanup restores a patched property only if it still contains that installation's value. A wrapper or app API installed later by Vibe Digger or another tool stays in place. When QA Bridge still owns a property, cleanup restores its previous descriptor, including inherited methods and a pre-existing `window.__VIBE_DEBUGGER__` API. Reopening creates a fresh active installation, so older wrappers retained by other tools cannot duplicate observations.
+
 ## Development Checks
 
 Run the JavaScript syntax check and focused Node tests before committing extension changes:
@@ -220,7 +260,7 @@ For the real browser smoke lane, run:
 npm run test:e2e
 ```
 
-The smoke lane launches a clean Edge/Chrome/Chromium profile, loads the unpacked extension through the browser's CDP pipe, injects the QA Bridge into `smoke/vibe-debugger-smoke.html`, records a Vibe Debugger trace, sends it to a temporary inbox server, and verifies the exported trace artifacts. It prefers Edge when installed; set `BROWSER_PATH`, `EDGE_PATH`, or `CHROME_PATH` to force a specific browser.
+The smoke lane launches a clean Edge/Chrome/Chromium profile, loads the unpacked extension through the browser's CDP pipe, injects the QA Bridge into `smoke/vibe-debugger-smoke.html`, records a Vibe Debugger trace, sends it to a temporary inbox server, and verifies the exported trace artifacts. It also stops the service worker during reloads and cross-page tour navigation, forces a reinjection failure, retries after another restart, and checks explicit tour/Break on Load cleanup. It loads the sibling Vibe Digger extension in both opening orders and checks fetch, XHR, and console capture through QA Bridge close/reopen cycles and an in-flight completion. It prefers Edge when installed; set `BROWSER_PATH`, `EDGE_PATH`, or `CHROME_PATH` to force a specific browser.
 
 ## What Gets Copied
 

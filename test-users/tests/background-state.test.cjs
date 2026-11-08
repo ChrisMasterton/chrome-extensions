@@ -27,8 +27,8 @@ function deferred() {
   return { promise, resolve };
 }
 
-function backgroundHarness(beforeSet = async () => {}) {
-  let saved = structuredClone(seedState());
+function backgroundHarness(beforeSet = async () => {}, initialState = seedState()) {
+  let saved = structuredClone(initialState);
   let onMessage;
   let reads = 0;
   let writes = 0;
@@ -234,4 +234,141 @@ test('competing site links and stale site-name edits cannot change the newly lin
   });
   assert.deepEqual(outcomes, ['conflict', 'conflict']);
   assert.deepEqual(linked, before);
+});
+
+const ADAPTER_URL = `${ORIGIN}/__test-users`;
+const readyResult = { status: 'ready', accountRef: 'account-1', stateLabel: 'Member · Standard' };
+
+function provisioningState() {
+  const state = seedState();
+  state.origins[ORIGIN].adapterUrl = ADAPTER_URL;
+  state.users = [{
+    ...controlUser, name: 'Test Member', password: 'original-password',
+    role: 'Member', roleId: 'member', scenarioId: 'standard', scenarioLabel: 'Standard',
+    environment: 'local',
+    provisioning: { ...readyResult, adapterUrl: ADAPTER_URL, roleId: 'member', scenarioId: 'standard' },
+  }];
+  return state;
+}
+
+function startRequest(requestId, operation = 'provision') {
+  return {
+    type: 'start-provisioning', id: controlUser.id, origin: ORIGIN,
+    requestId, operation, adapterUrl: ADAPTER_URL, environment: 'local',
+  };
+}
+
+function completion(requestId, result = readyResult) {
+  return { type: 'complete-provisioning', id: controlUser.id, requestId, result };
+}
+
+test('late provisioning success and failure cannot settle edited account inputs', async () => {
+  for (const change of [
+    { role: 'Admin', roleId: 'org-admin' },
+    { password: 'edited-password', email: 'edited@example.test' },
+    { scenarioId: 'empty-org', scenarioLabel: 'Empty organization' },
+  ]) {
+    const background = backgroundHarness(undefined, provisioningState());
+    const started = await background.request(startRequest('old-request', 'reset'));
+    assert.equal(started.ok, true);
+    assert.equal(started.result.user.provisioning.status, 'resetting');
+    const base = background.read().users[0];
+    await background.request({ type: 'save-user', origin: ORIGIN, base, user: { ...base, ...change } });
+    const edited = background.read();
+    assert.equal(edited.users[0].provisioning.status, 'stale');
+    assert.equal(edited.users[0].provisioning.requestId, undefined);
+    const writes = background.counts().writes;
+    for (const response of [completion('old-request'), {
+      type: 'fail-provisioning', id: controlUser.id, requestId: 'old-request', error: 'Old failure',
+    }]) {
+      const ignored = await background.request(response);
+      assert.equal(ignored.ok, true);
+      assert.equal(ignored.result.accepted, false);
+      assert.deepEqual(background.read(), edited, 'outdated outcomes must leave the saved edit untouched');
+    }
+    assert.equal(background.counts().writes, writes, 'ignored responses must not publish storage changes');
+  }
+});
+
+test('retry uses a new token and older outcomes cannot replace its ready state', async () => {
+  const background = backgroundHarness(undefined, provisioningState());
+  await background.request(startRequest('first'));
+  const failed = await background.request({
+    type: 'fail-provisioning', id: controlUser.id, requestId: 'first', error: 'Adapter unavailable',
+  });
+  assert.equal(failed.result.user.provisioning.status, 'failed');
+  assert.equal(failed.result.user.provisioning.accountRef, 'account-1');
+  await background.request(startRequest('retry'));
+  assert.equal((await background.request(completion('first'))).result.accepted, false);
+  const ready = await background.request(completion('retry'));
+  assert.equal(ready.result.user.provisioning.status, 'ready');
+  const saved = background.read();
+  for (const response of [completion('retry'), {
+    type: 'fail-provisioning', id: controlUser.id, requestId: 'first', error: 'Delayed old failure',
+  }]) {
+    assert.equal((await background.request(response)).result.accepted, false);
+    assert.deepEqual(background.read(), saved);
+  }
+});
+
+test('a superseding request and a restored pending request remain retryable', async () => {
+  const background = backgroundHarness(undefined, provisioningState());
+  await background.request(startRequest('old-tab'));
+  const restored = backgroundHarness(undefined, background.read());
+  await restored.request(startRequest('new-tab'));
+  assert.equal((await restored.request(completion('old-tab'))).result.accepted, false);
+  assert.equal((await restored.request(completion('new-tab'))).result.user.provisioning.status, 'ready');
+});
+
+test('adapter changes, deletion, and changing inputs back still revoke pending responses', async () => {
+  for (const action of ['adapter', 'environment', 'delete-user', 'delete-site', 'edit-back']) {
+    const background = backgroundHarness(undefined, provisioningState());
+    await background.request(startRequest('pending'));
+    if (action === 'adapter' || action === 'environment') {
+      await background.request({
+        type: 'save-settings', origin: ORIGIN, linkedSiteId: '', siteName: '',
+        adapterUrl: action === 'adapter' ? `${ORIGIN}/replacement` : ADAPTER_URL,
+        environment: action === 'environment' ? 'production' : '',
+      });
+    } else if (action === 'edit-back') {
+      const base = background.read().users[0];
+      const changed = { ...base, password: 'temporary-password' };
+      await background.request({ type: 'save-user', origin: ORIGIN, base, user: changed });
+      await background.request({ type: 'save-user', origin: ORIGIN, base: changed, user: base });
+    } else {
+      await background.request({ type: action, id: action === 'delete-user' ? controlUser.id : SITE_ID });
+    }
+    const saved = background.read();
+    assert.equal((await background.request(completion('pending'))).result.accepted, false, action);
+    assert.deepEqual(background.read(), saved, action);
+  }
+});
+
+test('provisioning starts from current saved input while notes do not invalidate its response', async () => {
+  const background = backgroundHarness(undefined, provisioningState());
+  const old = background.read().users[0];
+  await background.request({
+    type: 'save-user', origin: ORIGIN, base: old, user: { ...old, password: 'latest-password' },
+  });
+  const started = await background.request(startRequest('current'));
+  assert.equal(Core.buildAdapterRequest(started.result.user).identity.password, 'latest-password');
+  // This editor was opened before the request started; it cannot restore old metadata.
+  await background.request({
+    type: 'save-user', origin: ORIGIN, base: old, user: { ...old, notes: 'Concurrent notes' },
+  });
+  const completed = await background.request(completion('current'));
+  assert.equal(completed.result.accepted, true);
+  assert.equal(completed.result.user.notes, 'Concurrent notes');
+  assert.equal(completed.result.user.password, 'latest-password');
+  assert.equal('password' in completed.result.user.provisioning, false);
+});
+
+test('reset requires a current ready fixture and provisioning validates the current adapter', async () => {
+  const state = provisioningState();
+  state.users[0].provisioning.expiresAt = '2020-01-01T00:00:00Z';
+  const background = backgroundHarness(undefined, state);
+  assert.match((await background.request(startRequest('expired-reset', 'reset'))).error, /before resetting/);
+  assert.match((await background.request({ ...startRequest('wrong-adapter'), adapterUrl: `${ORIGIN}/old` })).error, /settings changed/);
+  await background.request(startRequest('reprovision'));
+  assert.equal((await background.request(completion('reprovision'))).result.user.provisioning.status, 'ready');
 });

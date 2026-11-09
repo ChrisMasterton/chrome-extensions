@@ -4,7 +4,7 @@
   "description": "Build QA debug bundles with comments, tour context, and Codex guided review handoffs through a local inbox",
   "version": "1.9",
   "permissions": ["activeTab", "scripting", "clipboardWrite", "downloads", "storage"],
-  "host_permissions": ["http://127.0.0.1:43117/*"],
+  "host_permissions": ["<all_urls>"],
   "action": {
     "default_title": "Pick Element",
     "default_icon": {

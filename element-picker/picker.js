@@ -37,7 +37,7 @@
     trace: 'Trace: open the Vibe Debugger panel to review watched targets, recent diffs, timeline events, and export status.',
     send: 'Send Trace: save trace.json, trace.md, and manifest.json to the local Codex QA inbox so Codex can inspect them with "look at latest trace."',
   };
-  const BREAK_ON_LOAD_HELP = 'Break on Load: pause the QA Bridge after route changes or same-origin full page loads so you can pick and watch the new screen.';
+  const BREAK_ON_LOAD_HELP = 'Break on Load: pause the QA Bridge after route changes or page loads on any HTTP(S) site so you can pick and watch the new screen.';
   const CLICK_THROUGH_HELP = 'Click Through: let the next page click go to the app instead of selecting another element.';
 
   const TEST_ID_ATTRIBUTES = [
@@ -1154,7 +1154,7 @@
     if (breakOnLoadButton) {
       breakOnLoadButton.textContent = breakOnLoadEnabled ? 'Break Load On' : 'Break on Load';
       breakOnLoadButton.title = breakOnLoadEnabled
-        ? 'Break on Load is on. QA Bridge will pause after route changes or same-origin page loads.'
+        ? 'Break on Load is on. QA Bridge will pause after route changes or page loads on any HTTP(S) site.'
         : BREAK_ON_LOAD_HELP;
       breakOnLoadButton.setAttribute('aria-label', breakOnLoadButton.title);
       breakOnLoadButton.setAttribute('aria-pressed', breakOnLoadEnabled ? 'true' : 'false');

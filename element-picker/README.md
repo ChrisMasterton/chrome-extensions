@@ -50,7 +50,7 @@ The reverse loop is:
 
 ## Project Files
 
-- `manifest.json`: Manifest V3 extension metadata and local inbox host permission.
+- `manifest.json`: Manifest V3 extension metadata and host access for automatic reinjection, viewport screenshots, and the local inbox.
 - `background.js`: extension injection, screenshot capture, image downloads, local inbox posting, latest tour loading, and cross-page tour continuation.
 - `picker.js`: page overlay, toolbar, element analysis, locator ranking, screenshots, clipboard export, Send to Codex, guided tour UI, and Vibe Debugger recording.
 - `vibe-page-probe.js`: main-world probe for fetch/XHR, route, storage, console, and optional app-provided trace events.
@@ -151,7 +151,7 @@ Plain English:
 - **Watch** chooses the UI target whose state should be sampled over time.
 - **Record** starts and stops the timeline of actions, DOM changes, route changes, network calls, console output, app probes, and watched-value diffs.
 - **Trace** opens the review panel; **Send Trace** exports the trace artifacts for Codex to inspect.
-- **Break on Load** pauses the QA Bridge after SPA route changes or same-origin page loads so you can add watches on the new screen.
+- **Break on Load** pauses the QA Bridge after SPA route changes or page loads on any HTTP(S) site so you can add watches on the new screen.
 - **Click Through** arms the next page click so it goes to the app instead of selecting another element.
 
 1. Open QA Bridge and select the UI you want to observe in **Capture**.
@@ -222,7 +222,9 @@ While a tour is active, the page is in guided-review mode: the extension locks n
 
 ### EP-7 and EP-6 navigation lifecycle
 
-Break on Load and tour checkpoints are stored per tab in `chrome.storage.session`. They survive background service-worker restarts during the current browser session. Tour checkpoints include the current step and per-step notes, so an acknowledged tour can also resume after a reload. The `storage` permission enables this; website access still uses the existing `activeTab` permission.
+Break on Load and tour checkpoints are stored per tab in `chrome.storage.session`. They survive background service-worker restarts during the current browser session. Tour checkpoints include the current step and per-step notes, so an acknowledged tour can also resume after a reload. The `storage` permission enables this.
+
+Automatic reinjection and viewport screenshots use the required host permission `<all_urls>`, including access to the local inbox. Break on Load, tour continuation, and image capture work across HTTP(S) origins without per-site approval or another icon click. Chrome [requires `<all_urls>` for `captureVisibleTab` without an `activeTab` icon gesture](https://developer.chrome.com/docs/extensions/reference/api/tabs#method-captureVisibleTab); the HTTP(S) wildcard `*://*/*` permits reinjection alone. This single host rule covers both operations using the existing API permissions.
 
 | Event | Persisted transition and behavior |
 | --- | --- |
@@ -237,7 +239,9 @@ Break on Load and tour checkpoints are stored per tab in `chrome.storage.session
 
 Each delivery has a token and document owner. Late acknowledgements and messages from an old page cannot consume a replacement tour or restore a closed session. Persistence writes are serialized per tab, so toggling Break on Load cannot overwrite a tour update. Failed writes do not block later changes.
 
-Cross-origin navigation can require invoking the extension icon again to grant `activeTab` access on the new origin. A failed automatic reinjection retains the checkpoint for that retry. A navigation that cannot be saved is reported in the Tour workspace; **Open Step** retries it without discarding the tour.
+Browser-restricted pages or site access withheld in the browser can still prevent injection. A failed automatic reinjection retains the checkpoint for an icon retry. A navigation that cannot be saved is reported in the Tour workspace; **Open Step** retries it without discarding the tour.
+
+Cross-origin captures and **Ask Codex** tour submissions include the highlighted viewport and selected-element images in the inbox. Chrome still requires the separate browser setting to allow access to local file URLs; `<all_urls>` does not bypass it.
 
 ### EP-8 probe ownership lifecycle
 
@@ -260,7 +264,7 @@ For the real browser smoke lane, run:
 npm run test:e2e
 ```
 
-The smoke lane launches a clean Edge/Chrome/Chromium profile, loads the unpacked extension through the browser's CDP pipe, injects the QA Bridge into `smoke/vibe-debugger-smoke.html`, records a Vibe Debugger trace, sends it to a temporary inbox server, and verifies the exported trace artifacts. It also stops the service worker during reloads and cross-page tour navigation, forces a reinjection failure, retries after another restart, and checks explicit tour/Break on Load cleanup. It loads the sibling Vibe Digger extension in both opening orders and checks fetch, XHR, and console capture through QA Bridge close/reopen cycles and an in-flight completion. It prefers Edge when installed; set `BROWSER_PATH`, `EDGE_PATH`, or `CHROME_PATH` to force a specific browser.
+The smoke lane launches a clean Edge/Chrome/Chromium profile, loads the unpacked extension through the browser's CDP pipe, injects the QA Bridge into `smoke/vibe-debugger-smoke.html`, records a Vibe Debugger trace, sends it to a temporary inbox server, and verifies the exported trace artifacts. It preserves the shipped host permissions and checks Break on Load across different hostnames over HTTP and HTTPS. It sends ordinary captures and tour notes across origins without an icon gesture, then decodes the saved viewport and element images from each inbox publication. It stops the service worker during reloads and cross-origin tour navigation, forces a cross-origin reinjection failure, retries after another restart, and checks explicit tour/Break on Load cleanup. Its temporary self-signed HTTPS fixture requires `openssl`; certificate checks are bypassed only in the disposable test browser. It loads the sibling Vibe Digger extension in both opening orders and checks fetch, XHR, and console capture through QA Bridge close/reopen cycles and an in-flight completion. It prefers Edge when installed; set `BROWSER_PATH`, `EDGE_PATH`, or `CHROME_PATH` to force a specific browser.
 
 ## What Gets Copied
 

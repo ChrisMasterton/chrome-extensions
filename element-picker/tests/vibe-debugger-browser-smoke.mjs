@@ -1,20 +1,24 @@
 #!/usr/bin/env node
 
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { access, cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer as createHttpServer } from 'node:http';
+import { createServer as createHttpsServer } from 'node:https';
 import { createServer as createNetServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { basename, dirname, extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
 const PROJECT_DIR = resolve(TEST_DIR, '..');
 const SERVER_PATH = join(PROJECT_DIR, 'scripts', 'codex-qa-inbox-server.mjs');
 const SMOKE_PATH = '/smoke/vibe-debugger-smoke.html';
 const LOCAL_INBOX_PORT_TOKEN = '43117';
+const CROSS_ORIGIN_HOST = 'qa-bridge-origin.test';
+const execFileAsync = promisify(execFile);
 
 const REQUIRED_EXTENSION_FILES = [
   'manifest.json',
@@ -92,12 +96,13 @@ function getContentType(pathname) {
   }
 }
 
-async function startStaticServer(rootDir) {
+async function startStaticServer(rootDir, tls = null) {
   const port = await getFreePort();
+  const baseUrl = tls ? `https://${CROSS_ORIGIN_HOST}:${port}` : `http://127.0.0.1:${port}`;
   let heldNavigation = null;
-  const server = createHttpServer(async (request, response) => {
+  const handleRequest = async (request, response) => {
     try {
-      const url = new URL(request.url || '/', `http://127.0.0.1:${port}`);
+      const url = new URL(request.url || '/', baseUrl);
       if (url.searchParams.has('hold-tour') && heldNavigation) {
         const hold = heldNavigation;
         heldNavigation = null;
@@ -120,7 +125,8 @@ async function startStaticServer(rootDir) {
       response.writeHead(500);
       response.end(error?.message || 'Static server error');
     }
-  });
+  };
+  const server = tls ? createHttpsServer(tls, handleRequest) : createHttpServer(handleRequest);
 
   await new Promise((resolveListen) => {
     server.listen(port, '127.0.0.1', resolveListen);
@@ -128,7 +134,7 @@ async function startStaticServer(rootDir) {
 
   return {
     port,
-    baseUrl: `http://127.0.0.1:${port}`,
+    baseUrl,
     holdNavigation: () => {
       let release;
       const hold = { started: false, wait: new Promise(resolveHold => { release = resolveHold; }), release: () => release() };
@@ -195,7 +201,7 @@ async function startInboxServer(root, port) {
   };
 }
 
-async function copyExtensionForPort(sourceDir, destinationDir, inboxPort, pagePort) {
+async function copyExtensionForPort(sourceDir, destinationDir, inboxPort) {
   await mkdir(destinationDir, { recursive: true });
 
   for (const relativePath of REQUIRED_EXTENSION_FILES) {
@@ -214,10 +220,10 @@ async function copyExtensionForPort(sourceDir, destinationDir, inboxPort, pagePo
   const manifestPath = join(destinationDir, 'manifest.json');
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
   manifest.name = `${manifest.name} E2E`;
-  manifest.host_permissions = [
-    `http://127.0.0.1:${inboxPort}/*`,
-    `http://127.0.0.1:${pagePort}/*`,
-  ];
+  // Preserve the shipped access policy: pregranting fixture origins here would
+  // hide missing permissions for automatic cross-origin reinjection.
+  manifest.host_permissions = manifest.host_permissions.map(pattern =>
+    pattern.replaceAll(LOCAL_INBOX_PORT_TOKEN, String(inboxPort)));
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 }
 
@@ -255,6 +261,9 @@ async function startBrowser({ browserPath, profileDir, pageUrl }) {
     '--disable-background-networking',
     '--disable-sync',
     '--disable-popup-blocking',
+    `--host-resolver-rules=MAP ${CROSS_ORIGIN_HOST} 127.0.0.1`,
+    '--no-proxy-server',
+    '--ignore-certificate-errors', // Temporary self-signed HTTPS fixture only.
     '--window-size=1280,900',
     pageUrl,
   ];
@@ -491,9 +500,17 @@ async function run() {
   let serviceWorkerClient = null;
   let diggerWorkerClient = null;
   let navigationHold = null;
+  let secureServer = null;
 
   try {
-    await copyExtensionForPort(PROJECT_DIR, extensionDir, inboxPort, staticServer.port);
+    const keyPath = join(workspaceRoot, 'fixture-key.pem');
+    const certPath = join(workspaceRoot, 'fixture-cert.pem');
+    await execFileAsync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+      '-keyout', keyPath, '-out', certPath, '-days', '1', '-subj', `/CN=${CROSS_ORIGIN_HOST}`]);
+    secureServer = await startStaticServer(PROJECT_DIR, {
+      key: await readFile(keyPath), cert: await readFile(certPath),
+    });
+    await copyExtensionForPort(PROJECT_DIR, extensionDir, inboxPort);
     inbox = await startInboxServer(inboxRoot, inboxPort);
 
     const browserPath = await findBrowserExecutable();
@@ -502,6 +519,9 @@ async function run() {
       browserPath,
       profileDir,
       pageUrl: smokeUrl,
+    });
+    await chrome.cdp.send('Browser.setDownloadBehavior', {
+      behavior: 'allow', downloadPath: join(workspaceRoot, 'downloads'),
     });
 
     log(`loading extension from ${extensionDir}`);
@@ -572,6 +592,35 @@ async function run() {
       await mkdir(process.env.CODEX_QA_E2E_SCREENSHOT_DIR, { recursive: true });
       const { data } = await pageClient.send('Page.captureScreenshot', { format: 'png' });
       await writeFile(join(process.env.CODEX_QA_E2E_SCREENSHOT_DIR, name + '.png'), Buffer.from(data, 'base64'));
+    }
+    async function readSubmission(label) {
+      const manifest = JSON.parse(await readFile(join(inboxRoot, 'latest', 'manifest.json'), 'utf8'));
+      const bundle = JSON.parse(await readFile(manifest.files.bundle, 'utf8'));
+      return { label, manifest, bundle };
+    }
+    async function assertSubmissionImages({ label, manifest, bundle }) {
+      assert.equal(bundle.screenshot.status, 'ok', `${label} must include screenshots without an icon click`);
+      assert.equal(bundle.screenshot.captureScope, 'visible-viewport');
+      const crop = bundle.elements[0].screenshotCrop;
+      assert.equal(crop.visibleInViewport, true);
+      const images = [
+        [bundle.screenshot.highlightedViewportImageLocalFile, bundle.screenshot.captureImageSize],
+        [crop.imageLocalFile, crop.captureRectPixels],
+      ];
+      for (const [path, size] of images) {
+        assert.ok(manifest.files.images.includes(path), `${label}: image must be published in the inbox`);
+        const bytes = await readFile(path);
+        const mime = extname(path) === '.png' ? 'image/png' : 'image/jpeg';
+        const dimensions = await pageClient.evaluate(`(async () => {
+          const image = new Image();
+          image.src = ${jsString(`data:${mime};base64,${bytes.toString('base64')}`)};
+          await image.decode();
+          return { width: image.naturalWidth, height: image.naturalHeight };
+        })()`);
+        assert.ok(dimensions.width > 0 && dimensions.height > 0, `${label}: image must decode`);
+        assert.ok(dimensions.width <= size.width && dimensions.height <= size.height,
+          `${label}: exported image must fit its captured region`);
+      }
     }
     async function assertReachable(label) {
       assert.equal(await pageClient.evaluate(`(() => {
@@ -828,9 +877,46 @@ async function run() {
     await attachBackground();
     assert.match(await pageClient.evaluate(`document.querySelector('.element-picker-capture-options summary').textContent`), /break on load/);
 
-    log('continuing a cross-page tour after stopping the worker during navigation');
+    log('resuming Break on Load and sending captures across HTTP and HTTPS origins after cold worker starts');
+    const crossOriginSubmissions = [];
+    for (const url of [
+      `http://${CROSS_ORIGIN_HOST}:${staticServer.port}${SMOKE_PATH}`,
+      `${secureServer.baseUrl}${SMOKE_PATH}`,
+      smokeUrl,
+    ]) {
+      const previousToken = await serviceWorkerClient.evaluate(`readTabState(${tabId}).then(state => state.delivery.token)`);
+      await stopBackground();
+      await pageClient.send('Page.navigate', { url });
+      await waitForPageCondition(pageClient, `location.href === ${jsString(url)} && document.readyState === 'complete'`, 'the new origin loading');
+      await attachBackground();
+      const state = await waitForPageCondition(serviceWorkerClient, `readTabState(${tabId}).then(state =>
+        state.delivery?.token !== ${jsString(previousToken)} && ['active', 'failed'].includes(state.delivery?.status) && state)`, 'cross-origin delivery settling');
+      assert.equal(state.delivery.status, 'active', `reinjection on ${url}: ${state.delivery.error}`);
+      await waitForPageCondition(pageClient, `document.querySelector('.element-picker-workspace-mode > span')?.textContent.includes('Picking')`, 'Break on Load on the new origin');
+      assert.equal(state.breakOnLoadEnabled, true);
+      assert.equal(await serviceWorkerClient.evaluate(`chrome.action.getBadgeText({tabId:${tabId}})`), '');
+      await pageClient.evaluate(`(() => {
+        const target = document.querySelector('#save-button');
+        const rect = target.getBoundingClientRect();
+        target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true,
+          clientX: rect.x + 4, clientY: rect.y + 4 }));
+        document.querySelector('.element-picker-toolbar-comment').value = 'Cross-origin image capture';
+      })()`);
+      // Respect captureVisibleTab's two-calls-per-second quota across test sends.
+      await new Promise(resolveDelay => setTimeout(resolveDelay, 600));
+      await clickButton('Send capture');
+      await waitForPageCondition(pageClient, `document.querySelector('.element-picker-handoff')?.dataset.state === 'success'`, 'cross-origin capture submission');
+      const submission = await readSubmission(`Capture on ${new URL(url).origin}`);
+      assert.equal(submission.bundle.page.url, url);
+      assert.equal(submission.bundle.elements.length, 1);
+      assert.equal(submission.bundle.elements[0].id, 'save-button');
+      assert.equal(submission.bundle.userComment, 'Cross-origin image capture');
+      crossOriginSubmissions.push(submission);
+    }
+
+    log('continuing a cross-origin tour after stopping the worker during navigation');
     const firstUrl = await pageClient.evaluate('location.href');
-    const secondUrl = `${staticServer.baseUrl}/tour-page-two?hold-tour=second`;
+    const secondUrl = `${secureServer.baseUrl}/tour-page-two?hold-tour=second`;
     const navigationTour = await fetch(`http://127.0.0.1:${inboxPort}/tours`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ tour: { title: 'Navigation review', steps: [
@@ -846,14 +932,14 @@ async function run() {
       const input = document.querySelector('.element-picker-tour-ask');
       input.value = 'Keep the first page note'; input.dispatchEvent(new Event('input', { bubbles: true }));
     })()`);
-    navigationHold = staticServer.holdNavigation();
+    navigationHold = secureServer.holdNavigation();
     await clickButton('Next');
     await waitForCondition(() => navigationHold.started, 'the second tour page request being held');
     await waitForPageCondition(serviceWorkerClient, `readTabState(${tabId}).then(state => state.delivery?.status === 'pending' && state.tour?.stepIndex === 1)`, 'persisted pending tour');
     await stopBackground();
     navigationHold.release();
     navigationHold = null;
-    await waitForPageCondition(pageClient, `location.href === ${jsString(secondUrl)} && document.querySelector('.element-picker-tour-title')?.textContent === 'Page two'`, 'cross-page continuation after a cold worker start');
+    await waitForPageCondition(pageClient, `location.href === ${jsString(secondUrl)} && document.querySelector('.element-picker-tour-title')?.textContent === 'Page two'`, 'cross-origin continuation after a cold worker start');
     await attachBackground();
     assert.match(await pageClient.evaluate(`document.querySelector('.element-picker-tour-status').textContent`), /Highlighting/);
     assert.match(await pageClient.evaluate(`document.querySelector('.element-picker-capture-options summary').textContent`), /break on load/);
@@ -862,23 +948,38 @@ async function run() {
       input.value = 'Keep the second page note'; input.dispatchEvent(new Event('input', { bubbles: true }));
     })()`);
     await waitForPageCondition(serviceWorkerClient, `readTabState(${tabId}).then(state => state.tour.askNotes.some(entry => entry[1] === 'Keep the second page note'))`, 'saved second-page note');
+    await clickButton('Ask Codex');
+    await waitForPageCondition(pageClient, `document.querySelector('.element-picker-handoff')?.dataset.state === 'success'`, 'tour submission from the HTTPS origin');
+    const tourSubmission = await readSubmission('Tour on HTTPS');
+    const crossOriginBundle = tourSubmission.bundle;
+    assert.equal(crossOriginBundle.page.url, secondUrl);
+    assert.equal(crossOriginBundle.tourContext.askText, 'Keep the second page note');
+    assert.equal(crossOriginBundle.elements.length, 1);
+    crossOriginSubmissions.push(tourSubmission);
+    log(`cross-origin screenshot results: ${crossOriginSubmissions.map(({ label, bundle }) => `${label}: ${bundle.screenshot.status}`).join('; ')}`);
+    for (const submission of crossOriginSubmissions) await assertSubmissionImages(submission);
 
-    log('retaining a failed tour reinjection, restarting, and retrying through the action handler');
+    log('retaining a failed cross-origin tour reinjection, restarting, and retrying through the action handler');
     await serviceWorkerClient.evaluate(`(() => {
       const execute = chrome.scripting.executeScript.bind(chrome.scripting);
       chrome.scripting.executeScript = options => options.files?.includes('picker.js')
         ? Promise.reject(new Error('Controlled reinjection failure')) : execute(options);
     })()`);
-    await reloadPage();
+    await clickButton('Back');
+    await clickButton('Open Step');
+    await waitForPageCondition(pageClient, `location.href === ${jsString(firstUrl)} && document.readyState === 'complete'`, 'the failed cross-origin tour destination loading');
     await waitForPageCondition(serviceWorkerClient, `readTabState(${tabId}).then(state => state.delivery?.status === 'failed')`, 'durable reinjection failure');
     assert.equal(await pageClient.evaluate(`!!document.querySelector('#__element-picker-toolbar')`), false);
     assert.equal(await serviceWorkerClient.evaluate(`chrome.action.getBadgeText({tabId:${tabId}})`), '!');
     await stopBackground();
     await attachBackground({ start: true });
     await serviceWorkerClient.evaluate(`(async () => handleActionClick(await chrome.tabs.get(${tabId})))()`);
-    await waitForPageCondition(pageClient, `document.querySelector('.element-picker-tour-title')?.textContent === 'Page two'`, 'manual reinjection retry restoring the tour');
-    assert.equal(await pageClient.evaluate(`document.querySelector('.element-picker-tour-ask').value`), 'Keep the second page note');
+    await waitForPageCondition(pageClient, `document.querySelector('.element-picker-tour-title')?.textContent === 'Page one'`, 'manual reinjection retry restoring the tour');
+    assert.equal(await pageClient.evaluate(`document.querySelector('.element-picker-tour-ask').value`), 'Keep the first page note');
     assert.equal(await serviceWorkerClient.evaluate(`chrome.action.getBadgeText({tabId:${tabId}})`), '');
+    await clickButton('Next');
+    await waitForPageCondition(pageClient, `location.href === ${jsString(secondUrl)} && document.querySelector('.element-picker-tour-title')?.textContent === 'Page two'`, 'cross-origin continuation after retry');
+    assert.equal(await pageClient.evaluate(`document.querySelector('.element-picker-tour-ask').value`), 'Keep the second page note');
 
     log('restoring an acknowledged tour on reload and clearing it explicitly');
     await stopBackground();
@@ -1019,6 +1120,7 @@ async function run() {
     diggerWorkerClient?.close();
     await chrome?.close();
     await inbox?.close();
+    await secureServer?.close();
     await staticServer.close();
 
     if (process.env.CODEX_QA_E2E_KEEP_ARTIFACTS === '1') {

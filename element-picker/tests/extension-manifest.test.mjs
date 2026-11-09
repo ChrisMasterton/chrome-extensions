@@ -36,11 +36,11 @@ test('manifest references files that exist', async () => {
   }
 });
 
-test('background injection files and local inbox permission are present', async () => {
+test('background injection files and automatic reinjection/screenshot host access are present', async () => {
   const manifest = await readJson('manifest.json');
   const background = await readFile(join(PROJECT_DIR, 'background.js'), 'utf8');
 
-  assert.equal(manifest.host_permissions.includes('http://127.0.0.1:43117/*'), true);
+  assert.deepEqual(manifest.host_permissions, ['<all_urls>']);
 
   for (const injectedFile of ['vibe-page-probe.js', 'picker.js', 'picker.css']) {
     assert.match(background, new RegExp(injectedFile.replace('.', '\\.')));

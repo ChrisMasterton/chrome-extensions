@@ -26,6 +26,7 @@ const REQUIRED_EXTENSION_FILES = [
   'picker.js',
   'picker.css',
   'vibe-page-probe.js',
+  'element-source-probe.js',
   'icon16.png',
   'icon48.png',
   'icon128.png',
@@ -600,14 +601,10 @@ async function run() {
     }
     async function assertSubmissionImages({ label, manifest, bundle }) {
       assert.equal(bundle.screenshot.status, 'ok', `${label} must include screenshots without an icon click`);
-      assert.equal(bundle.screenshot.captureScope, 'visible-viewport');
       const crop = bundle.elements[0].screenshotCrop;
       assert.equal(crop.visibleInViewport, true);
-      const images = [
-        [bundle.screenshot.highlightedViewportImageLocalFile, bundle.screenshot.captureImageSize],
-        [crop.imageLocalFile, crop.captureRectPixels],
-      ];
-      for (const [path, size] of images) {
+      const decoded = [];
+      for (const path of [bundle.screenshot.highlightedViewportImageLocalFile, crop.imageLocalFile]) {
         assert.ok(manifest.files.images.includes(path), `${label}: image must be published in the inbox`);
         const bytes = await readFile(path);
         const mime = extname(path) === '.png' ? 'image/png' : 'image/jpeg';
@@ -618,9 +615,11 @@ async function run() {
           return { width: image.naturalWidth, height: image.naturalHeight };
         })()`);
         assert.ok(dimensions.width > 0 && dimensions.height > 0, `${label}: image must decode`);
-        assert.ok(dimensions.width <= size.width && dimensions.height <= size.height,
-          `${label}: exported image must fit its captured region`);
+        decoded.push(dimensions);
       }
+      const [viewportImage, cropImage] = decoded;
+      assert.ok(cropImage.width <= viewportImage.width && cropImage.height <= viewportImage.height,
+        `${label}: element crop must fit inside the viewport capture`);
     }
     async function assertReachable(label) {
       assert.equal(await pageClient.evaluate(`(() => {
@@ -897,6 +896,21 @@ async function run() {
       assert.equal(await serviceWorkerClient.evaluate(`chrome.action.getBadgeText({tabId:${tabId}})`), '');
       await pageClient.evaluate(`(() => {
         const target = document.querySelector('#save-button');
+        // A page-world React fiber: invisible to picker.js, readable by element-source-probe.js.
+        target.__reactFiber$e2e = {
+          tag: 5,
+          _debugSource: { fileName: '/repo/src/ui/Button.tsx', lineNumber: 20 },
+          return: {
+            tag: 0,
+            type: function SaveButton() {},
+            key: 'primary-save',
+            memoizedProps: { variant: 'primary', onSave() {}, children: 'Save' },
+            _debugStack: { stack: 'Error: react-stack-top-frame\\n' +
+              '    at exports.jsxDEV (' + location.origin + '/node_modules/.vite/deps/react_jsx-dev-runtime.js?v=1:250:30)\\n' +
+              '    at ProfileForm (' + location.origin + '/src/settings/ProfileForm.tsx?t=17:40:7)' },
+            return: { tag: 0, type: function ProfileForm() {}, key: null, memoizedProps: {}, return: null },
+          },
+        };
         const rect = target.getBoundingClientRect();
         target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true,
           clientX: rect.x + 4, clientY: rect.y + 4 }));
@@ -910,6 +924,18 @@ async function run() {
       assert.equal(submission.bundle.page.url, url);
       assert.equal(submission.bundle.elements.length, 1);
       assert.equal(submission.bundle.elements[0].id, 'save-button');
+      assert.deepEqual(submission.bundle.elements[0].source, {
+        framework: 'react',
+        elementSource: { file: '/repo/src/ui/Button.tsx', line: 20 },
+        components: [
+          { name: 'SaveButton', key: 'primary-save', usedAt: { file: '/src/settings/ProfileForm.tsx', line: 40, approximate: true } },
+          { name: 'ProfileForm' },
+        ],
+        props: { variant: 'primary', onSave: '[function]' },
+      }, 'capture must read page-world React source details');
+      const markdown = await readFile(submission.manifest.files.markdown, 'utf8');
+      assert.match(markdown, /Element written at: \/repo\/src\/ui\/Button\.tsx:20/);
+      assert.match(markdown, /- <SaveButton key="primary-save"> used at \/src\/settings\/ProfileForm\.tsx:40 \(approx\. line\)/);
       assert.equal(submission.bundle.userComment, 'Cross-origin image capture');
       crossOriginSubmissions.push(submission);
     }

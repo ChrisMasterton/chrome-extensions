@@ -1677,25 +1677,6 @@
     return Object.keys(state).length > 0 ? state : null;
   }
 
-  function getA11yInfo(element) {
-    const info = {};
-
-    const role = element.getAttribute('role');
-    if (role) info.role = role;
-
-    for (const attribute of Array.from(element.attributes)) {
-      if (attribute.name.startsWith('aria-')) {
-        info[attribute.name] = attribute.value;
-      }
-    }
-
-    if (element.tabIndex !== -1 && element.tabIndex !== 0) {
-      info.tabIndex = element.tabIndex;
-    }
-
-    return Object.keys(info).length > 0 ? info : null;
-  }
-
   function getAccessibleNameInfo(element) {
     const ariaLabel = element.getAttribute('aria-label');
     if (ariaLabel) return { name: truncate(ariaLabel, 120), source: 'aria-label' };
@@ -2322,73 +2303,52 @@
       .sort((a, b) => b.score - a.score);
   }
 
-  function buildElementInfo(element, index) {
-    const rect = element.getBoundingClientRect();
-    const selector = getCssSelector(element);
-    const xpath = getXPath(element);
-    const text = getTextPreview(element);
-    const classDiagnostics = getClassDiagnostics(element);
-    const accessibleNameInfo = getAccessibleNameInfo(element);
+  const SOURCE_REQUEST_EVENT = 'element-picker:source-request';
+  const SOURCE_RESPONSE_EVENT = 'element-picker:source-response';
 
-    const info = {
-      index,
-      selectedAt: new Date().toISOString(),
-      tag: element.tagName.toLowerCase(),
-      id: element.id || null,
-      classes: classDiagnostics?.meaningful.join(' ') || null,
-      classDiagnostics,
-      text,
-      accessibleName: accessibleNameInfo?.name || null,
-      accessibleNameSource: accessibleNameInfo?.source || null,
-      dimensions: `${Math.round(rect.width)}x${Math.round(rect.height)}`,
-      viewportRect: toRectObject(rect),
-      selector,
-      xpath,
-      url: window.location.href,
+  // Framework internals live in the page world; element-source-probe.js answers synchronously.
+  function requestElementSource(element) {
+    let result = null;
+    const onResponse = (event) => {
+      try {
+        result = typeof event.detail === 'string' ? JSON.parse(event.detail) : null;
+      } catch {
+        result = null;
+      }
     };
 
-    const locatorCandidates = buildLocatorCandidates(element, selector, xpath, text);
-    info.locators = locatorCandidates;
-    info.primaryLocator = locatorCandidates[0] || null;
+    document.addEventListener(SOURCE_RESPONSE_EVENT, onResponse, { once: true });
+    element.dispatchEvent(new CustomEvent(SOURCE_REQUEST_EVENT, { bubbles: true, composed: true }));
+    document.removeEventListener(SOURCE_RESPONSE_EVENT, onResponse);
+    return result;
+  }
 
-    const reactComponents = getReactInfo(element);
-    if (reactComponents) info.reactComponents = reactComponents;
-
-    const reactState = getReactState(element);
-    if (reactState) info.reactState = reactState;
-
-    const reactNativeWebProps = getReactNativeWebProps(element);
-    if (reactNativeWebProps) info.reactNativeWebProps = reactNativeWebProps;
-
-    const styles = getDebugStyles(element);
-    if (styles) info.styles = styles;
-
+  // Everything here exists to help a coding agent find this element in source.
+  function buildElementInfo(element, index) {
+    const rect = element.getBoundingClientRect();
+    const text = getTextPreview(element);
+    const accessibleNameInfo = getAccessibleNameInfo(element);
+    const showAccessibleName = accessibleNameInfo?.name && accessibleNameInfo.source !== 'visible-text';
+    const locator = buildLocatorCandidates(element, getCssSelector(element), getXPath(element), text)[0] || null;
     const ancestorContext = getAncestorContext(element);
-    if (ancestorContext) info.ancestorContext = ancestorContext;
 
-    const scrollDiagnostics = getScrollDiagnostics(element);
-    if (scrollDiagnostics) info.scrollDiagnostics = scrollDiagnostics;
-
-    const formState = getFormState(element);
-    if (formState) info.formState = formState;
-
-    const accessibility = getA11yInfo(element);
-    if (accessibility) info.accessibility = accessibility;
-
-    const dataAttributes = {};
-    for (const attribute of Array.from(element.attributes)) {
-      if (attribute.name.startsWith('data-')) {
-        dataAttributes[attribute.name] = attribute.value;
-      }
-    }
-    if (Object.keys(dataAttributes).length > 0) {
-      info.dataAttributes = dataAttributes;
-    }
-
-    const htmlSnippet = getHtmlSnippet(element);
-    if (htmlSnippet) info.html = htmlSnippet;
-
-    return info;
+    return {
+      index,
+      tag: element.tagName.toLowerCase(),
+      id: element.id || null,
+      text,
+      accessibleName: showAccessibleName ? accessibleNameInfo.name : null,
+      dimensions: `${Math.round(rect.width)}x${Math.round(rect.height)}`,
+      // Used to place the screenshot crop; not exported.
+      viewportRect: toRectObject(rect),
+      source: requestElementSource(element),
+      locator: locator ? { playwright: locator.playwright, matches: locator.uniqueCount } : null,
+      sectionHeading: ancestorContext?.sectionHeading?.text || null,
+      stableAncestor: ancestorContext?.nearestStableAncestor
+        ? formatBriefElement(ancestorContext.nearestStableAncestor)
+        : null,
+      html: getHtmlSnippet(element),
+    };
   }
 
   function getTraceAttributesSnapshot(element) {
@@ -3325,10 +3285,7 @@
       lines.push('');
     }
 
-    lines.push('## JSON Trace');
-    lines.push('```json');
-    lines.push(JSON.stringify(trace, null, 2));
-    lines.push('```');
+    lines.push('Full events, samples, mutations, network, and console data: trace.json beside this file.');
 
     return lines.join('\n');
   }
@@ -3948,7 +3905,6 @@
       return {
         status: 'unavailable',
         reason: 'capture-failed',
-        inlineImages: false,
         crops: [],
       };
     }
@@ -3960,7 +3916,6 @@
       return {
         status: 'unavailable',
         reason: 'capture-decode-failed',
-        inlineImages: false,
         crops: [],
       };
     }
@@ -4055,8 +4010,6 @@
     return {
       status: 'ok',
       captureScope: 'visible-viewport',
-      fullPageCapture: false,
-      fullPageCaptureReason: 'The extension uses non-invasive visible-tab capture to avoid scrolling or mutating page state.',
       dpr: round(dpr, 3),
       viewport: {
         width: window.innerWidth,
@@ -4066,11 +4019,8 @@
         width: image.width,
         height: image.height,
       },
-      inlineImages: includeInlineImages,
       highlightedViewportImageDataUrl,
       highlightedViewportImageFile: viewportDownload,
-      imageDirectory: 'Downloads/elements',
-      imageFiles: downloadResults,
       note: includeInlineImages
         ? null
         : `Inline crop images omitted because ${selections.length} elements were selected (limit: ${MAX_INLINE_CROPS}).`,
@@ -4078,31 +4028,46 @@
     };
   }
 
-  function buildPlaywrightSkeleton(bundle) {
-    const lines = [
-      "import { test, expect } from '@playwright/test';",
-      '',
-      "test('repro from element picker bundle', async ({ page }) => {",
-      `  await page.goto(${JSON.stringify(bundle.page.url)});`,
-      '',
-    ];
+  function pruneEmpty(value) {
+    if (Array.isArray(value)) {
+      const items = value.map(pruneEmpty).filter((item) => item !== undefined);
+      return items.length ? items : undefined;
+    }
 
-    bundle.elements.forEach((elementInfo) => {
-      const locator =
-        elementInfo.primaryLocator?.playwright ||
-        `page.locator(${JSON.stringify(elementInfo.selector || elementInfo.xpath || elementInfo.tag)})`;
-      const label = truncate(`${elementInfo.tag}${elementInfo.id ? `#${elementInfo.id}` : ''} ${elementInfo.text || ''}`, 72);
+    if (value && typeof value === 'object') {
+      const result = {};
+      for (const [key, child] of Object.entries(value)) {
+        // Props mirror real values; keep their nulls and empty strings.
+        const pruned = key === 'props' ? child ?? undefined : pruneEmpty(child);
+        if (pruned !== undefined) result[key] = pruned;
+      }
+      return Object.keys(result).length ? result : undefined;
+    }
 
-      lines.push(`  // Element ${elementInfo.index}: ${label}`);
-      lines.push(`  const target${elementInfo.index} = ${locator};`);
-      lines.push(`  await expect(target${elementInfo.index}).toBeVisible();`);
-      lines.push(`  // TODO: add action/assertion for target${elementInfo.index}`);
-      lines.push('');
+    if (value === null || value === undefined || value === '') return undefined;
+    return value;
+  }
+
+  function compactImageFile(imageFile) {
+    if (!imageFile) return null;
+    if (imageFile.error) {
+      return { error: imageFile.error, requestedFilename: imageFile.requestedFilename || null };
+    }
+    return { filename: imageFile.filename || imageFile.requestedFilename || null };
+  }
+
+  function toAgentElement(info, crop) {
+    const { viewportRect, ...element } = info;
+    return pruneEmpty({
+      ...element,
+      screenshotCrop: crop
+        ? {
+          visibleInViewport: crop.visibleInViewport,
+          imageDataUrl: crop.imageDataUrl,
+          imageFile: compactImageFile(crop.imageFile),
+        }
+        : null,
     });
-
-    lines.push('});');
-
-    return lines.join('\n');
   }
 
   function getBrowserContextSnapshot() {
@@ -4160,58 +4125,45 @@
     };
   }
 
+  function getCaptureTraceContext() {
+    const context = getActiveTraceContext();
+    if (!context) return null;
+
+    return {
+      recording: context.recording,
+      watchTargetCount: context.watchTargetCount,
+      latestTrace: context.latestTrace,
+      watchTargets: context.watchTargets.map(({ watchId, label, selector }) => ({ watchId, label, selector })),
+    };
+  }
+
   function buildBundle(screenshotData, options = {}) {
     const elements = selections.map((selection) => {
       const crop = screenshotData.crops.find((item) => item.index === selection.info.index) || null;
-      return {
-        ...selection.info,
-        screenshotCrop: crop,
-      };
+      return toAgentElement(selection.info, crop);
     });
 
-    const bundle = {
-      bundleVersion: '2.2.0',
+    const bundle = pruneEmpty({
+      bundleVersion: '3.0.0',
       generatedAt: new Date().toISOString(),
       page: {
         title: document.title,
         url: window.location.href,
-        referrer: document.referrer || null,
       },
-      browserContext: getBrowserContextSnapshot(),
       userComment: getUserComment(),
       tourContext: options.tourContext || getActiveTourContext(),
-      traceContext: getActiveTraceContext(),
-      totalElements: elements.length,
+      traceContext: getCaptureTraceContext(),
       screenshot: {
         status: screenshotData.status,
-        reason: screenshotData.reason || null,
-        captureScope: screenshotData.captureScope || null,
-        fullPageCapture: screenshotData.fullPageCapture || false,
-        fullPageCaptureReason: screenshotData.fullPageCaptureReason || null,
-        dpr: screenshotData.dpr || null,
-        viewport: screenshotData.viewport || null,
-        captureImageSize: screenshotData.captureImageSize || null,
-        inlineImages: screenshotData.inlineImages,
-        highlightedViewportImageDataUrl: screenshotData.highlightedViewportImageDataUrl || null,
-        highlightedViewportImageFile: screenshotData.highlightedViewportImageFile || null,
-        imageDirectory: screenshotData.imageDirectory || null,
-        imageFiles: screenshotData.imageFiles || [],
-        note: screenshotData.note || null,
+        reason: screenshotData.reason,
+        highlightedViewportImageDataUrl: screenshotData.highlightedViewportImageDataUrl,
+        highlightedViewportImageFile: compactImageFile(screenshotData.highlightedViewportImageFile),
+        note: screenshotData.note,
       },
-      elements,
-    };
+    });
 
-    bundle.playwrightSkeleton = buildPlaywrightSkeleton(bundle);
+    bundle.elements = elements;
     return bundle;
-  }
-
-  function formatLocatorLine(locator) {
-    const matchText =
-      typeof locator.uniqueCount === 'number'
-        ? `${locator.uniqueCount} ${pluralize(locator.uniqueCount, 'match', 'matches')}`
-        : 'match count unknown';
-    const note = locator.note ? ` (${locator.note})` : '';
-    return `- ${locator.strategy}: score ${locator.score}, ${matchText}, ${locator.playwright}${note}`;
   }
 
   function formatHook(hook) {
@@ -4232,79 +4184,6 @@
     return parts.join(' ');
   }
 
-  function formatAncestorContextLines(context) {
-    if (!context) return [];
-
-    const lines = [];
-
-    if (context.sectionHeading?.text) {
-      lines.push(`Nearest section heading: "${context.sectionHeading.text}"`);
-    }
-
-    if (context.nearestStableAncestor) {
-      lines.push(`Nearest stable ancestor: ${formatBriefElement(context.nearestStableAncestor)}`);
-    }
-
-    if (context.nearestSection) {
-      lines.push(`Nearest section-like ancestor: ${formatBriefElement(context.nearestSection)}`);
-    }
-
-    return lines;
-  }
-
-  function formatScrollNode(info) {
-    if (!info) return '';
-
-    const label = formatBriefElement(info.element);
-    const flags = [];
-
-    if (info.canScrollHorizontally) flags.push('can scroll horizontally');
-    if (info.clipsHorizontal) flags.push('clips horizontal overflow');
-    if (info.hiddenOverflowRight) flags.push('hidden overflow to the right');
-    if (info.canScrollVertically) flags.push('can scroll vertically');
-    if (info.clipsVertical) flags.push('clips vertical overflow');
-    if (info.hiddenOverflowBottom) flags.push('hidden overflow below');
-    if (info.scrollSnapType) flags.push(`scroll-snap-type=${info.scrollSnapType}`);
-    if (info.scrollSnapAlign) flags.push(`scroll-snap-align=${info.scrollSnapAlign}`);
-
-    const metrics = `scrollWidth=${info.scrollWidth}, clientWidth=${info.clientWidth}, scrollLeft=${info.scrollLeft}, overflowX=${info.overflowX}`;
-    const suffix = flags.length ? `; ${flags.join(', ')}` : '';
-    return `${label || 'element'} (${metrics}${suffix})`;
-  }
-
-  function formatScrollDiagnosticsLines(scrollDiagnostics) {
-    if (!scrollDiagnostics) return [];
-
-    const lines = [];
-    const selected = scrollDiagnostics.selected;
-
-    if (selected) {
-      const selectedFlags = [];
-      if (selected.canScrollHorizontally) selectedFlags.push('can scroll horizontally');
-      if (selected.clipsHorizontal) selectedFlags.push('clips horizontal overflow');
-      if (selected.hiddenOverflowRight) selectedFlags.push('hidden overflow to the right');
-      if (selected.scrollSnapType) selectedFlags.push(`scroll-snap-type=${selected.scrollSnapType}`);
-
-      if (selectedFlags.length) {
-        lines.push(`Selected element scroll: ${selectedFlags.join(', ')}`);
-      }
-    }
-
-    if (scrollDiagnostics.nearestHorizontalContainer) {
-      lines.push(`Nearest horizontal scroll context: ${formatScrollNode(scrollDiagnostics.nearestHorizontalContainer)}`);
-    }
-
-    return lines;
-  }
-
-  function formatReactNativeProps(props) {
-    if (!props) return '';
-
-    return Object.entries(props)
-      .map(([name, details]) => `${name}=${JSON.stringify(details.value)}`)
-      .join(', ');
-  }
-
   function formatImageFile(imageFile) {
     if (!imageFile) return '';
     if (imageFile.error) {
@@ -4313,112 +4192,83 @@
     return imageFile.filename || imageFile.requestedFilename || '';
   }
 
+  function formatCropLine(crop) {
+    if (!crop) return null;
+    if (crop.imageFile) return `Crop image: ${formatImageFile(crop.imageFile)}`;
+    if (crop.visibleInViewport === false) return 'Crop: element was outside the viewport at export time';
+    return null;
+  }
+
+  function formatSourceLocation(location) {
+    if (!location?.file) return '';
+    const line = location.line ? `:${location.line}` : '';
+    return `${location.file}${line}${location.approximate ? ' (approx. line)' : ''}`;
+  }
+
+  function formatSourceLines(source) {
+    if (!source) return [];
+    if (source.error) return [`Source lookup failed: ${source.error}`];
+
+    const lines = [];
+    if (source.elementSource) {
+      lines.push(`Element written at: ${formatSourceLocation(source.elementSource)}`);
+    }
+
+    const components = source.components || [];
+    if (components.length) {
+      lines.push(`${source.framework === 'react' ? 'React' : source.framework === 'vue' ? 'Vue' : 'Svelte'} components (nearest first):`);
+      components.forEach((component) => {
+        const key = component.key != null ? ` key=${JSON.stringify(component.key)}` : '';
+        const where = component.usedAt
+          ? ` used at ${formatSourceLocation(component.usedAt)}`
+          : component.file ? ` in ${component.file}` : '';
+        lines.push(`- <${component.name}${key}>${where}`);
+      });
+    }
+
+    if (source.props && components[0]) {
+      lines.push(`<${components[0].name}> props: ${JSON.stringify(source.props)}`);
+    }
+
+    return lines;
+  }
+
   function formatElementSection(elementInfo) {
     const lines = [];
 
     const heading = `${elementInfo.index}. ${elementInfo.tag}${elementInfo.id ? `#${elementInfo.id}` : ''}`;
-    lines.push(`### ${heading}`);
+    lines.push(`### ${heading} (${elementInfo.dimensions})`);
 
     if (elementInfo.text) {
       lines.push(`Text: "${elementInfo.text}"`);
     }
 
-    if (elementInfo.primaryLocator) {
-      lines.push(`Primary locator: ${elementInfo.primaryLocator.playwright}`);
+    if (elementInfo.accessibleName) {
+      lines.push(`Accessible name: "${elementInfo.accessibleName}"`);
     }
 
-    if (elementInfo.accessibleName && elementInfo.accessibleNameSource !== 'visible-text') {
-      lines.push(`Accessible name: "${elementInfo.accessibleName}" (${elementInfo.accessibleNameSource})`);
+    lines.push(...formatSourceLines(elementInfo.source));
+
+    if (elementInfo.sectionHeading) {
+      lines.push(`Section heading: "${elementInfo.sectionHeading}"`);
     }
 
-    lines.push(`Size: ${elementInfo.dimensions}`);
-
-    lines.push(...formatAncestorContextLines(elementInfo.ancestorContext));
-    lines.push(...formatScrollDiagnosticsLines(elementInfo.scrollDiagnostics));
-
-    if (elementInfo.reactComponents) {
-      lines.push(`React chain: ${elementInfo.reactComponents.join(' -> ')}`);
+    if (elementInfo.stableAncestor) {
+      lines.push(`Inside: ${elementInfo.stableAncestor}`);
     }
 
-    if (elementInfo.reactNativeWebProps) {
-      lines.push(`RN-web props: ${formatReactNativeProps(elementInfo.reactNativeWebProps)}`);
+    if (elementInfo.locator) {
+      const matches = typeof elementInfo.locator.matches === 'number'
+        ? elementInfo.locator.matches === 1 ? 'unique' : `${elementInfo.locator.matches} matches`
+        : 'match count unknown';
+      lines.push(`Locator: ${elementInfo.locator.playwright} (${matches})`);
     }
 
-    if (elementInfo.classDiagnostics?.totalCount) {
-      const classParts = [];
-      if (elementInfo.classDiagnostics.meaningful?.length) {
-        classParts.push(`meaningful: ${elementInfo.classDiagnostics.meaningful.join(' ')}`);
-      }
-      if (elementInfo.classDiagnostics.generatedCount) {
-        classParts.push(`${elementInfo.classDiagnostics.generatedCount} generated omitted`);
-      }
-      if (elementInfo.classDiagnostics.utilityCount) {
-        classParts.push(`${elementInfo.classDiagnostics.utilityCount} utility omitted`);
-      }
-      if (classParts.length) {
-        lines.push(`Class summary: ${classParts.join('; ')}`);
-      }
-    }
-
-    if (elementInfo.locators?.length) {
-      const stableLocators = elementInfo.locators
-        .filter((locator) => !['css', 'xpath', 'id-fallback'].includes(locator.strategy))
-        .slice(0, 5);
-      const backupLocators = elementInfo.locators
-        .filter((locator) => ['css', 'xpath', 'id-fallback'].includes(locator.strategy))
-        .slice(0, 4);
-
-      if (stableLocators.length) {
-        lines.push('Stable locator candidates:');
-      }
-      stableLocators.forEach((locator) => {
-        lines.push(formatLocatorLine(locator));
-      });
-
-      if (backupLocators.length) {
-        lines.push('Backup locator candidates:');
-      }
-      backupLocators.forEach((locator) => {
-        lines.push(formatLocatorLine(locator));
-      });
-    }
-
-    if (elementInfo.screenshotCrop) {
-      const crop = elementInfo.screenshotCrop;
-      lines.push(
-        `Screenshot crop: ${crop.visibleInViewport ? 'visible in viewport' : 'not visible in viewport at export time'}`
-      );
-      if (crop.captureRectPixels) {
-        const rect = crop.captureRectPixels;
-        const padding = crop.cropPaddingCssPx ?? 0;
-        lines.push(`Capture pixels: x=${rect.x}, y=${rect.y}, w=${rect.width}, h=${rect.height}, padding=${padding} CSS px`);
-      }
-      if (crop.imageDataUrl) {
-        lines.push('Crop preview image: embedded in JSON under `screenshotCrop.imageDataUrl` with selected element outlined.');
-      }
-      if (crop.imageFile) {
-        lines.push(`Crop image file: ${formatImageFile(crop.imageFile)}`);
-      }
-    }
-
-    if (elementInfo.accessibility) {
-      lines.push(`A11y: ${JSON.stringify(elementInfo.accessibility)}`);
-    }
-
-    if (elementInfo.formState) {
-      lines.push(`Form state: ${JSON.stringify(elementInfo.formState)}`);
-    }
-
-    if (elementInfo.styles) {
-      lines.push(`Styles: ${JSON.stringify(elementInfo.styles)}`);
-    }
-
-    if (elementInfo.dataAttributes) {
-      lines.push(`Data attrs: ${JSON.stringify(elementInfo.dataAttributes)}`);
-    }
+    const cropLine = formatCropLine(elementInfo.screenshotCrop);
+    if (cropLine) lines.push(cropLine);
 
     if (elementInfo.html) {
-      lines.push('HTML snippet:');
+      lines.push('HTML:');
       lines.push('```html');
       lines.push(elementInfo.html);
       lines.push('```');
@@ -4476,10 +4326,7 @@
 
     const lines = [
       '## Vibe Trace Context',
-      `Recording: ${traceContext.recording ? 'yes' : 'no'}`,
-      `Watch targets: ${traceContext.watchTargetCount}`,
-      `Events: ${traceContext.eventCount}`,
-      `Samples: ${traceContext.sampleCount}`,
+      `Recording: ${traceContext.recording ? 'yes' : 'no'}; ${traceContext.watchTargetCount} watch targets`,
     ];
 
     if (traceContext.latestTrace?.latestDir) {
@@ -4497,62 +4344,32 @@
     return lines;
   }
 
-  function formatSessionControlLines(bundle) {
-    if (bundle.tourContext) {
-      return [
-        '## Session Controls',
-        '- Tour mode: normal page selection was locked during this capture',
-        '- Ask Codex: captured only the highlighted tour step target',
-        '- Next / Back: move through the guided review',
-        '- Close / Escape: exit the guided review',
-        '',
-      ];
+  function formatVisualCaptureLine(screenshot) {
+    if (screenshot?.status !== 'ok') {
+      return `Screenshot: unavailable${screenshot?.reason ? ` (${screenshot.reason})` : ''}`;
     }
 
-    return [
-      '## Session Controls',
-      '- Click: add element to bundle',
-      '- Send to Codex: save bundle to the local QA inbox',
-      '- Copy / Enter: export bundle to clipboard',
-      '- Backspace/Delete/Ctrl+Z: remove latest selection',
-      '- Resume / Escape: resume or cancel picker',
-      '',
-    ];
+    const file = screenshot.highlightedViewportImageFile
+      ? formatImageFile(screenshot.highlightedViewportImageFile)
+      : 'not saved as a file';
+    const note = screenshot.note ? ` (${screenshot.note})` : '';
+    return `Screenshot (selection highlighted): ${file}${note}`;
   }
 
-  function formatBundleForClipboard(bundle, includeJson = true) {
+  function formatBundleMarkdown(bundle) {
     const lines = [
-      '# Element Debug Bundle',
+      '# Element Capture',
       '',
       `Captured at: ${bundle.generatedAt}`,
       `URL: ${bundle.page.url}`,
-      `Title: ${bundle.page.title}`,
-      `Elements: ${bundle.totalElements}`,
+      bundle.page.title ? `Title: ${bundle.page.title}` : null,
+      formatVisualCaptureLine(bundle.screenshot),
       '',
       bundle.userComment ? '## User Comment' : null,
       bundle.userComment || null,
       bundle.userComment ? '' : null,
       ...formatTourContextLines(bundle.tourContext),
       ...formatTraceContextLines(bundle.traceContext),
-      ...formatSessionControlLines(bundle),
-      '## Visual Capture',
-      `Status: ${bundle.screenshot.status}`,
-      `Scope: ${bundle.screenshot.captureScope || 'unavailable'}`,
-      `Viewport: ${bundle.screenshot.viewport ? `${bundle.screenshot.viewport.width}x${bundle.screenshot.viewport.height}` : 'unknown'}`,
-      `Device pixel ratio: ${bundle.screenshot.dpr || 'unknown'}`,
-      bundle.screenshot.highlightedViewportImageDataUrl
-        ? 'Highlighted viewport image: embedded in JSON under `screenshot.highlightedViewportImageDataUrl`.'
-        : 'Highlighted viewport image: unavailable or omitted.',
-      bundle.screenshot.highlightedViewportImageFile
-        ? `Highlighted viewport file: ${formatImageFile(bundle.screenshot.highlightedViewportImageFile)}`
-        : 'Highlighted viewport file: unavailable.',
-      bundle.screenshot.imageDirectory
-        ? `Screenshot directory: ${bundle.screenshot.imageDirectory}`
-        : 'Screenshot directory: unavailable.',
-      bundle.screenshot.fullPageCapture
-        ? 'Full-page capture: included.'
-        : `Full-page capture: not included${bundle.screenshot.fullPageCaptureReason ? ` (${bundle.screenshot.fullPageCaptureReason})` : ''}.`,
-      '',
       '## Elements',
       '',
     ].filter((line) => line !== null);
@@ -4561,36 +4378,16 @@
       lines.push(...formatElementSection(elementInfo));
     });
 
-    lines.push('## Playwright Repro Skeleton');
-    lines.push('```ts');
-    lines.push(bundle.playwrightSkeleton);
-    lines.push('```');
-
-    if (bundle.screenshot.note) {
-      lines.push('');
-      lines.push(`Screenshot note: ${bundle.screenshot.note}`);
-    }
-
-    if (includeJson) {
-      lines.push('');
-      lines.push('## JSON Bundle');
-      lines.push('```json');
-      lines.push(JSON.stringify(bundle, null, 2));
-      lines.push('```');
-    }
-
-    return lines.join('\n');
+    return lines.join('\n').trimEnd();
   }
 
   function stripInlineImages(bundle) {
+    const screenshot = { ...bundle.screenshot };
+    delete screenshot.highlightedViewportImageDataUrl;
+
     return {
       ...bundle,
-      screenshot: {
-        ...bundle.screenshot,
-        inlineImages: false,
-        highlightedViewportImageDataUrl: null,
-        note: bundle.screenshot.note || 'Inline crop images removed to keep clipboard payload manageable.',
-      },
+      screenshot,
       elements: bundle.elements.map((elementInfo) => {
         const copy = {
           ...elementInfo,
@@ -4609,29 +4406,9 @@
     };
   }
 
+  // The clipboard gets the same Markdown that Send writes to bundle.md: no JSON, no inline images.
   async function copyBundleToClipboard(bundle) {
-    const fullText = formatBundleForClipboard(bundle, true);
-
-    try {
-      await navigator.clipboard.writeText(fullText);
-      return 'full';
-    } catch (error) {
-      console.warn('Full bundle copy failed, retrying with lighter payload.', error);
-    }
-
-    const slimBundle = stripInlineImages(bundle);
-    const slimText = formatBundleForClipboard(slimBundle, true);
-
-    try {
-      await navigator.clipboard.writeText(slimText);
-      return 'slim';
-    } catch (error) {
-      console.warn('Slim bundle copy failed, retrying with summary payload.', error);
-    }
-
-    const summaryText = formatBundleForClipboard(slimBundle, false);
-    await navigator.clipboard.writeText(summaryText);
-    return 'summary';
+    await navigator.clipboard.writeText(formatBundleMarkdown(stripInlineImages(bundle)));
   }
 
   function ensureSelectionForExport() {
@@ -4667,8 +4444,8 @@
 
     try {
       const bundle = await buildCurrentBundle();
-      const copyMode = await copyBundleToClipboard(bundle);
-      setHandoff('capture', { state: 'success', action: 'copy', message: `Copied ${copyMode === 'full' ? 'full capture' : copyMode === 'slim' ? 'capture without inline images' : 'capture summary'}` });
+      await copyBundleToClipboard(bundle);
+      setHandoff('capture', { state: 'success', action: 'copy', message: 'Copied capture Markdown' });
       if (cleanupAfter) {
         cleanup();
       } else {
@@ -4697,7 +4474,8 @@
     try {
       const bundle = await buildCurrentBundle(options);
       const markdownBundle = stripInlineImages(bundle);
-      const markdown = formatBundleForClipboard(markdownBundle, true);
+      // bundle.json is saved next to bundle.md, so the Markdown stays a summary.
+      const markdown = formatBundleMarkdown(markdownBundle);
       const response = await chrome.runtime.sendMessage({
         type: 'ELEMENT_PICKER_SEND_TO_CODEX',
         inboxUrl: CODEX_INBOX_URL,
@@ -4892,6 +4670,5 @@
   window.addEventListener('scroll', onViewportChange, true);
   window.addEventListener('resize', onViewportChange, true);
   chrome.runtime.onMessage.addListener(onRuntimeMessage);
-
 
 })();

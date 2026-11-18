@@ -42,7 +42,7 @@ test('background injection files and automatic reinjection/screenshot host acces
 
   assert.deepEqual(manifest.host_permissions, ['<all_urls>']);
 
-  for (const injectedFile of ['vibe-page-probe.js', 'picker.js', 'picker.css']) {
+  for (const injectedFile of ['vibe-page-probe.js', 'element-source-probe.js', 'picker.js', 'picker.css']) {
     assert.match(background, new RegExp(injectedFile.replace('.', '\\.')));
     await fileExists(injectedFile);
   }
@@ -56,6 +56,7 @@ test('check script covers extension runtime files and test app snippets', async 
     'background.js',
     'picker.js',
     'vibe-page-probe.js',
+    'element-source-probe.js',
     'snippets/vibe-debugger-app-probes.js',
     'scripts/codex-qa-inbox-server.mjs',
   ]) {

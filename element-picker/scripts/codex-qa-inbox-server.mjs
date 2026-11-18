@@ -300,7 +300,7 @@ async function writeCapture(payload) {
       captureId,
       receivedAt: receivedAt.toISOString(),
       page: bundle.page || null,
-      totalElements: bundle.totalElements || 0,
+      totalElements: bundle.totalElements ?? bundle.elements?.length ?? 0,
       rootDir: ROOT,
       captureDir,
       latestDir,

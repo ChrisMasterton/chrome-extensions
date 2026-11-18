@@ -54,6 +54,7 @@ The reverse loop is:
 - `background.js`: extension injection, screenshot capture, image downloads, local inbox posting, latest tour loading, and cross-page tour continuation.
 - `picker.js`: page overlay, toolbar, element analysis, locator ranking, screenshots, clipboard export, Send to Codex, guided tour UI, and Vibe Debugger recording.
 - `vibe-page-probe.js`: main-world probe for fetch/XHR, route, storage, console, and optional app-provided trace events.
+- `element-source-probe.js`: main-world probe that reads React/Vue/Svelte dev internals so captures can report where the selected element lives in source.
 - `picker.css`: overlay, toolbar, responsive controls, tour panel, and tour highlight styling.
 - `scripts/codex-qa-inbox-server.mjs`: local capture/tour server used by Codex and the extension.
 - `smoke/vibe-debugger-smoke.html`: dependency-free test page for the Vibe Debugger watch and trace workflow.
@@ -121,8 +122,8 @@ CODEX_QA_INBOX_PORT=43117 CODEX_QA_INBOX_DIR="$HOME/CodexInbox/web-qa" npm run i
 Each capture writes:
 
 - `manifest.json`: capture ID, paths, page URL, selected element count
-- `bundle.json`: structured page, element, locator, style, screenshot, and repro data
-- `bundle.md`: Markdown summary plus JSON for agent consumption
+- `bundle.json`: structured page, element, locator, style, and screenshot data, with empty and null fields omitted
+- `bundle.md`: compact Markdown summary for agents; the JSON lives only in `bundle.json`
 - `images/`: highlighted viewport and crop images when image capture was available
 
 The server keeps stable `latest` directory links for captures, tours, and traces. Each link points to one complete, immutable submission in `history`. Reusing a tour or trace ID creates a separate submission directory, so earlier artifacts stay readable.
@@ -268,54 +269,54 @@ The smoke lane launches a clean Edge/Chrome/Chromium profile, loads the unpacked
 
 ## What Gets Copied
 
-Each export now includes:
+Each capture exists to help a coding agent find the exact element in source. It includes:
 
-- Page URL + title + timestamp
-- Your toolbar comment, when provided
-- Tour context and per-step Ask Codex note, when sent from a guided review
-- Vibe trace context when watch targets or a recently exported trace exist
-- Multiple selected elements in one packet
-- Ranked locator candidates that prefer stable hooks (`data-testid`, role/name, label, placeholder, alt text, stable IDs)
-- Backup locator candidates (`CSS`, `XPath`, generated-looking IDs) separated from stable candidates
-- Uniqueness/match counts and score per locator
-- Nearest section heading, stable ancestor, and section-like ancestor context
-- Scroll diagnostics (`scrollWidth`, `clientWidth`, `scrollLeft`, `overflowX`, hidden overflow, scroll snap)
-- React component chain + props/state (when available)
-- React Native Web props such as `testID`, `nativeID`, and accessibility props when React exposes them
-- A11y/form/style/data-attribute diagnostics
-- Clean visible-viewport screenshot metadata; picker UI is hidden during capture
-- Padded, highlighted crop images for smaller bundles
-- A highlighted visible-viewport image for smaller bundles
-- Saved screenshot files in `Downloads/elements` with filenames included in the bundle
-- Generated Playwright repro skeleton
+- Page URL, title, and timestamp
+- Your toolbar comment, plus the tour step and Ask Codex note when sent from a guided review
+- Vibe trace watch targets when a trace is active
+- For each selected element:
+  - Tag, id, text, size, and a non-visible accessible name when there is one
+  - **Source location** read from the page's framework dev internals:
+    - React: the file and line where the element's JSX is written, plus the component chain (nearest first) with keys and the file and line where each is used. React 19 lines come from un-source-mapped stacks and are marked approximate.
+    - Vue: the component chain with `__file` paths.
+    - Svelte: the file and line of the component.
+  - Props of the nearest component, with sensitive keys redacted
+  - The best Playwright locator and its match count
+  - The nearest section heading and stable ancestor
+  - An outer-HTML snippet
+  - A highlighted crop image
+- A highlighted visible-viewport screenshot, with the picker UI hidden
 
 The visual capture is intentionally visible-viewport only. The extension does not scroll and stitch the full page because that can mutate page state while debugging.
 
 Example (abbreviated):
 
-```
-# Element Debug Bundle
+````
+# Element Capture
+
 Captured at: 2026-02-25T18:14:07.220Z
 URL: https://app.example.com/settings
-Elements: 3
+Title: Settings
+Screenshot (selection highlighted): /Users/name/Downloads/elements/element-picker-2026-02-25-181407-app.example.com-viewport.jpg
 
-### 1. button#save
-Primary locator: page.getByRole("button", { name: "Save changes" })
-Nearest section heading: "Settings"
-Nearest stable ancestor: form [data-testid="settings-form"] "Profile settings Save changes"
-Stable locator candidates:
-- data-testid: score 100, 1 match, page.getByTestId("save-btn")
-- role-name: score 98, 1 match, page.getByRole("button", { name: "Save changes" })
-Backup locator candidates:
-- css: score 80, 1 match, page.locator("#save")
-Screenshot crop: visible in viewport
-Capture pixels: x=120, y=340, w=180, h=76, padding=16 CSS px
-Crop image file: /Users/name/Downloads/elements/element-picker-2026-02-25-181407-app.example.com-element-01.jpg
+## Elements
 
-## Playwright Repro Skeleton
-import { test, expect } from '@playwright/test';
-...
+### 1. button#save (180x44)
+Text: "Save changes"
+Element written at: /src/ui/Button.tsx:20
+React components (nearest first):
+- <Button> used at /src/settings/ProfileForm.tsx:88
+- <ProfileForm> used at /src/settings/SettingsPage.tsx:31
+<Button> props: {"variant":"primary","onClick":"[function]"}
+Section heading: "Settings"
+Inside: form [data-testid="settings-form"] "Profile settings Save changes"
+Locator: page.getByTestId("save-btn") (unique)
+Crop image: /Users/name/Downloads/elements/element-picker-2026-02-25-181407-app.example.com-element-01.jpg
+HTML:
+```html
+<button id="save" data-testid="save-btn" class="btn btn-primary">Save changes</button>
 ```
+````
 
 ## Missing Icons?
 

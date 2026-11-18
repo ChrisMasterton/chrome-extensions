@@ -1,13 +1,13 @@
 ---
 name: web-qa-capture
-description: Inspect and explain the latest local web QA capture or Vibe Debugger trace, or post a guided review tour, using the Element Picker QA Bridge Chrome extension. Use when the user says "look at latest QA capture", "look at latest trace", "why did this disappear", "explain this page capture", "inspect the QA inbox", "what is going on here", "walk me through this page", or asks Codex to debug or annotate a selected webpage element from a Chrome extension capture.
+description: Inspect and explain the latest local web QA capture or Vibe Debugger trace, or post a guided review tour, using the Element Picker QA Bridge Chrome extension. Use when the user says "look at latest QA capture", "look at latest trace", "why did this disappear", "explain this page capture", "inspect the QA inbox", "what is going on here", "walk me through this page", or asks the coding agent to debug or annotate a selected webpage element from a Chrome extension capture.
 ---
 
 # Web QA Capture
 
-Use this skill when the user wants Codex to consume a capture or Vibe Debugger trace from the local Element Picker QA Bridge.
+Use this skill when the user wants the coding agent (Codex or Claude Code) to consume a capture or Vibe Debugger trace from the local Element Picker QA Bridge.
 
-Use the guided review workflow when the user wants Codex to talk back to the page, walk them through a web UI, or annotate an engineer's delivered work.
+Use the guided review workflow when the user wants the agent to talk back to the page, walk them through a web UI, or annotate an engineer's delivered work.
 
 ## Default Inbox
 
@@ -22,14 +22,20 @@ The Vibe Debugger writes temporal traces to:
 Expected files:
 
 - `manifest.json`: capture ID, timestamp, page URL, selected element count, and artifact paths.
-- `bundle.md`: Markdown summary intended for quick reading.
-- `bundle.json`: structured page, user comment, guided tour context when present, selected element, locator, style, React, scroll, screenshot, and Playwright repro data.
+- `bundle.md`: Markdown summary intended for quick reading. It does not embed the JSON.
+- `bundle.json`: page, user comment, guided tour context when present, and for each selected element the details needed to find it in source. Empty and null fields are omitted, so a missing key means "not present".
+  - `source.elementSource`: the file and line where the element itself is written.
+  - `source.components`: the component chain, nearest first. React entries carry `usedAt`, the file and line where that component is rendered. Vue and Svelte entries carry `file`.
+  - `approximate: true` marks lines read from un-source-mapped stacks. Search near that line rather than trusting it exactly.
+  - `source.props`: props of the nearest component.
+  - `locator`: the best Playwright expression and its match count.
+  - `sectionHeading`, `stableAncestor`, `html`: nearby DOM context to grep for when `source` is absent, as in production builds.
 - `images/`: highlighted viewport and crop images when available.
 
 Expected trace files:
 
 - `manifest.json`: trace ID, timestamp, page URL, watch/event/sample counts, and artifact paths.
-- `trace.md`: Markdown summary with watched targets, recent diffs, explanations, and timeline rows.
+- `trace.md`: Markdown summary with watched targets, recent diffs, explanations, and timeline rows. It does not embed the JSON.
 - `trace.json`: structured watch targets, events, samples, DOM mutations, network events, console events, and summaries.
 
 ## Workflow
@@ -37,12 +43,12 @@ Expected trace files:
 1. Read `~/CodexInbox/web-qa/latest/manifest.json` once and keep that manifest for the review. `latest` can move when another capture arrives.
 2. Read the manifest's `files.markdown` path for a compact summary.
 3. Read its `files.bundle` path when exact selectors, user comments, tour context, styles, React hints, scroll diagnostics, or screenshot file paths matter. Follow these immutable history paths instead of reopening files through `latest`.
-4. Use `view_image` for the manifest's `files.images` paths and relevant image paths in the pinned bundle when present.
+4. Open the images (`view_image` in Codex, `Read` in Claude Code) for the manifest's `files.images` paths and relevant image paths in the pinned bundle when present.
 5. Treat `userComment` as the user's live observation or question about the selected elements, and answer it directly before branching into broader analysis.
 6. If `tourContext` is present, treat it as the active guided-review step. Read `tourContext.askText`, the tour title/summary, the step index, step title/body, URL, selector/text target, and target-found flags before analyzing broader page state.
 7. If `traceContext` is present, prefer `latestTrace.traceDir` to inspect the exact related trace when the user's question is about changes over time. If only `latestTrace.latestDir` is available, pin its manifest before reading other files.
 8. Explain what the selected UI appears to be, what state it is in, and what evidence supports that interpretation.
-9. If the user wants a fix, map the capture back to the likely owning repo/code path from the URL, locators, text, React component chain, and nearby DOM context, then inspect the real repo before editing.
+9. If the user wants a fix, map the capture back to the owning code path. Start from `source` file and line hints when present, then use the URL, text, locator, section heading, and HTML, then inspect the real repo before editing.
 
 ## Vibe Debugger Trace Workflow
 
@@ -99,7 +105,7 @@ curl -sS http://127.0.0.1:43117/tours \
 - Call out suspicious evidence: disabled controls, hidden overflow, pointer-events, stale route/state, duplicated labels, wrong role/name, offscreen content, failed capture, missing image, or non-unique locators.
 - Separate confirmed capture facts from inferences.
 - Include exact file paths for the capture artifacts you inspected.
-- If the inbox is missing or stale, say that clearly and ask the user to click **Send to Codex** again with the inbox server running.
+- If the inbox is missing or stale, say that clearly and ask the user to run `npm run inbox` in the element-picker repo and click **Send capture** again.
 
 ## Useful Commands
 
@@ -108,7 +114,7 @@ capture_manifest="$(cat ~/CodexInbox/web-qa/latest/manifest.json)"
 capture_bundle="$(printf '%s' "$capture_manifest" | jq -r '.files.bundle')"
 printf '%s' "$capture_manifest" | jq '.captureId, .page, .totalElements, .files'
 jq '{userComment, tourContext}' "$capture_bundle"
-jq '.elements[] | {index, tag, text, primaryLocator, reactComponents, styles, formState, scrollDiagnostics}' "$capture_bundle"
+jq '.elements[] | {index, tag, text, source, locator, sectionHeading, stableAncestor, html}' "$capture_bundle"
 trace_manifest="$(cat ~/CodexInbox/web-qa/traces/latest/manifest.json)"
 trace_json="$(printf '%s' "$trace_manifest" | jq -r '.files.trace')"
 printf '%s' "$trace_manifest" | jq '.traceId, .page, .totalWatchTargets, .totalEvents, .totalSamples, .files'

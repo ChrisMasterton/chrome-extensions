@@ -108,11 +108,11 @@ async function injectPicker(tabId) {
   try {
     await chrome.scripting.executeScript({
       target: { tabId },
-      files: ['vibe-page-probe.js'],
+      files: ['vibe-page-probe.js', 'element-source-probe.js'],
       world: 'MAIN'
     });
   } catch (error) {
-    console.warn('Unable to inject Vibe Debugger page probe:', error);
+    console.warn('Unable to inject page-world probes:', error);
   }
 
   const injected = await chrome.scripting.executeScript({

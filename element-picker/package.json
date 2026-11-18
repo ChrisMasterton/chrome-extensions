@@ -7,6 +7,6 @@
     "inbox": "node scripts/codex-qa-inbox-server.mjs",
     "test": "node --test tests/*.test.mjs",
     "test:e2e": "node tests/vibe-debugger-browser-smoke.mjs",
-    "check": "node --check background.js && node --check picker.js && node --check vibe-page-probe.js && node --check snippets/vibe-debugger-app-probes.js && node --check scripts/codex-qa-inbox-server.mjs && node --check tests/vibe-debugger-browser-smoke.mjs"
+    "check": "node --check background.js && node --check picker.js && node --check vibe-page-probe.js && node --check element-source-probe.js && node --check snippets/vibe-debugger-app-probes.js && node --check scripts/codex-qa-inbox-server.mjs && node --check tests/vibe-debugger-browser-smoke.mjs"
   }
 }
